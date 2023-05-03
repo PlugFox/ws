@@ -37,7 +37,7 @@ jobs:
       run:
         working-directory: ./
     container:
-      image: dart:stable
+      image: dart:beta
     timeout-minutes: 10
     steps:
       - name: 🚂 Get latest code
