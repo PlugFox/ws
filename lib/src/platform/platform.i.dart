@@ -31,7 +31,8 @@ enum WebSocketReadyState {
     'The connection is closed or couldn\'t be opened.',
   );
 
-  /// Creates a const [WebSocketReadyState] with the specified [code], [name] and [description].
+  /// Creates a const [WebSocketReadyState] with the specified [code],
+  /// [name] and [description].
   const WebSocketReadyState(this.code, this.name, this.description);
 
   /// Creates a [WebSocketReadyState] from the specified [code].

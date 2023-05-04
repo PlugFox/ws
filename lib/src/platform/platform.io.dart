@@ -1,34 +1,33 @@
 import 'dart:async';
+import 'dart:developer';
 import 'dart:io' as io show WebSocket;
 
 import 'package:meta/meta.dart';
 import 'package:ws/src/platform/platform.base.dart';
 import 'package:ws/src/platform/platform.i.dart';
+import 'package:ws/src/util/constants.dart';
 
+/// Get the platform WebSocket transport client for the current environment.
+/// {@nodoc}
 @internal
 IWebSocketPlatformTransport $getWebSocketTransport(String url) =>
     WebSocketPlatformTransport$IO(url);
 
+/// WebSocket platform transport for I/O environment.
+/// {@nodoc}
 final class WebSocketPlatformTransport$IO = WebSocketPlatformTransport$Base
     with _WebSocketPlatformTransport$IO$Mixin;
 
 base mixin _WebSocketPlatformTransport$IO$Mixin
     on WebSocketPlatformTransport$Base {
+  /// Native WebSocket client.
+  /// {@nodoc}
   io.WebSocket? _communication;
 
-  final StreamController<Object> _controller =
-      StreamController<Object>.broadcast();
-
-  @override
-  late final Stream<Object> stream = _controller.stream;
-
-  StreamSubscription<Object?>? _bindSubscription;
-
-  @override
-  bool get isClosed => _controller.isClosed;
-
-  @override
-  Future<void> get done => _controller.done;
+  /// Binding to data from native WebSocket client.
+  /// The subscription of [_communication] to [_controller].
+  /// {@nodoc}
+  StreamSubscription<Object?>? _dataBindSubscription;
 
   @override
   String? get extensions => _communication?.extensions;
@@ -53,27 +52,31 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
   @override
   Future<void> connect() async {
     try {
-      close(1001, 'Reconnecting.');
+      disconnect(1001, 'Reconnecting.');
       _communication = await io.WebSocket.connect(url);
       _$closeCode = null;
       _$closeReason = null;
-      _bindSubscription = _communication?.listen(
+      _dataBindSubscription = _communication?.listen(
         (data) {
           if (data is! Object) return;
-          _controller.add(data);
+          receiveData(data);
         },
-        onError: _controller.addError,
+        onError: receiveError,
         onDone: disconnect,
         cancelOnError: false,
       );
       if (!readyState.isOpen) {
-        close(1001, 'Is not open after connect.');
+        disconnect(1001, 'Is not open after connect.');
         assert(
           false,
           'Invalid readyState code after connect: $readyState',
         );
       }
-    } on Object {
+    } on Object catch (error, stackTrace) {
+      // TODO(plugfox): find out reason for error and map it to a WSException
+      debugger(when: $kDebugWS);
+      disconnect(1006, 'Connection failed.');
+      receiveError(error, stackTrace);
       rethrow;
     }
   }
@@ -93,7 +96,10 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
           assert(false, 'Invalid data type: ${data.runtimeType}');
           break;
       }
-    } on Object {
+    } on Object catch (error, stackTrace) {
+      // TODO(plugfox): find out reason for error and map it to a WSException
+      debugger(when: $kDebugWS);
+      receiveError(error, stackTrace);
       rethrow;
     }
   }
@@ -102,7 +108,7 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
   void disconnect([int? code, String? reason]) {
     _$closeCode = code;
     _$closeReason = reason;
-    _bindSubscription?.cancel().ignore();
+    _dataBindSubscription?.cancel().ignore();
     Future<void>.sync(() => _communication?.close(code, reason)).ignore();
     _communication = null;
   }
@@ -110,6 +116,6 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
   @override
   void close([int? code = 1000, String? reason = 'Normal Closure']) {
     disconnect(code, reason);
-    _controller.close();
+    super.close(code, reason);
   }
 }
