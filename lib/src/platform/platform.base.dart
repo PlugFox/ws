@@ -2,10 +2,9 @@ import 'dart:async';
 import 'dart:developer';
 
 import 'package:meta/meta.dart';
-import 'package:ws/src/exception/websocket_exception.dart';
+import 'package:ws/src/model/websocket_exception.dart';
 import 'package:ws/src/platform/platform.i.dart';
-
-import '../util/constants.dart';
+import 'package:ws/src/util/constants.dart';
 
 /// Base class for platform WebSocket transport.
 /// {@nodoc}

@@ -5,6 +5,7 @@ import 'dart:html' as html
 import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
+import 'package:ws/src/model/web_socket_ready_state.dart';
 import 'package:ws/src/platform/platform.base.dart';
 import 'package:ws/src/platform/platform.i.dart';
 import 'package:ws/src/util/constants.dart';

@@ -1,9 +1,9 @@
 import 'package:test/test.dart';
 
-void main() {
-  group('A group of tests', () {
-    setUp(() {});
+import 'platform/platform_test.dart' as platform_test;
 
-    test('First Test', () {});
+void main() {
+  group('WS tests', () {
+    platform_test.main();
   });
 }

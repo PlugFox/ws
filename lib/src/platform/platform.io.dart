@@ -3,6 +3,7 @@ import 'dart:developer';
 import 'dart:io' as io show WebSocket;
 
 import 'package:meta/meta.dart';
+import 'package:ws/src/model/web_socket_ready_state.dart';
 import 'package:ws/src/platform/platform.base.dart';
 import 'package:ws/src/platform/platform.i.dart';
 import 'package:ws/src/util/constants.dart';

@@ -44,3 +44,11 @@ linter:
     # Public packages
     public_member_api_docs: true
     lines_longer_than_80_chars: true
+
+    # Enabling rules
+    always_use_package_imports: true
+    avoid_relative_lib_imports: true
+
+    # Disable rules
+    sort_pub_dependencies: false
+    prefer_relative_imports: false
