@@ -2,7 +2,7 @@ name: ws
 description: >
   Provides a cross-platform WebSocket API,
   a cross-platform implementation of that API.
-version: 0.0.1-dev.placeholder
+version: 0.0.2-dev.placeholder
 homepage: https://github.com/plugfox/ws
 repository: https://github.com/plugfox/ws
 issue_tracker: https://github.com/plugfox/ws/issues
