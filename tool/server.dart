@@ -4,7 +4,7 @@ import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:shelf/shelf.dart' show Request, Response;
-import 'package:shelf/shelf_io.dart' as shelf_io;
+import 'package:shelf/shelf_io.dart' as shelf_io show serve;
 import 'package:shelf_web_socket/shelf_web_socket.dart' show webSocketHandler;
 import 'package:web_socket_channel/web_socket_channel.dart'
     show WebSocketChannel;
