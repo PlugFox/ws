@@ -39,8 +39,12 @@ void _$server(({io.InternetAddress address, int port}) args) => shelf_io.serve(
 FutureOr<Response> Function(Request) _$websocketHandler() =>
     webSocketHandler((WebSocketChannel webSocket) {
       void push(Object message) {
-        print('< $message');
-        webSocket.sink.add(message);
+        try {
+          print('< $message');
+          webSocket.sink.add(message);
+        } catch (e) {
+          print('e $e');
+        }
       }
 
       webSocket.stream.listen((Object? message) {
