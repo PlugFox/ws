@@ -1,3 +1,5 @@
+@TestOn('vm && browser')
+
 import 'package:test/test.dart';
 import 'package:ws/interface.dart';
 import 'package:ws/src/platform/platform.dart';

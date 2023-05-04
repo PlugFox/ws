@@ -1,4 +1,18 @@
 {
   "version": "0.2.0",
-  "configurations": []
+  "configurations": [
+    // https://pub.dev/packages/test
+    {
+      "name": "Run WebSocket Test",
+      "request": "launch",
+      "type": "dart",
+      "program": "test",
+      "env": {
+        "ENVIRONMENT": "test"
+      },
+      "args": [
+        /* "--debug", "--coverage=.coverage", "--platform chrome,vm" */
+      ]
+    }
+  ]
 }
