@@ -31,7 +31,7 @@
     "pubspec.yaml": ".packages, .metadata, .packages, pubspec.lock, *.yaml",
     ".gitignore": ".gitattributes, .gitmodules, .gitmessage, .mailmap, .git-blame*, .dockerignore",
     "readme.*": "authors, backers.md, changelog*, citation*, code_of_conduct.md, codeowners, contributing.md, contributors, copying, credits, governance.md, history.md, license*, maintainers, readme*, security.md, sponsors.md",
-    "*.dart": "$(capture).g.dart, $(capture).i.dart"
+    "*.dart": "$(capture).g.dart, $(capture).i.dart, $(capture).stub.dart, $(capture).web.dart, $(capture).html.dart, $(capture).js.dart, $(capture).io.dart, $(capture).base.dart"
   },
   "files.associations": {
     "*.drift": "sql"
