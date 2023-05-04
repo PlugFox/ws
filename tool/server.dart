@@ -1,3 +1,5 @@
+// @dart=3.0
+
 import 'dart:async';
 import 'dart:io' as io;
 import 'dart:isolate' show Isolate;
