@@ -16,16 +16,20 @@ void main() => Future<void>(() async {
       const port = 8080;
       for (var i = 1; i <= cpu; i++) {
         final args = (address: address, port: port);
-        Isolate.spawn<({io.InternetAddress address, int port})>(_$server, args);
+        Isolate.spawn<({io.InternetAddress address, int port})>(
+          _$server,
+          args,
+          debugName: 'server-$i',
+        );
       }
-      print('Serving at ws://localhost:$port');
+      print('Serving at ws://localhost:$port server-1..$cpu');
     });
 
 void _$server(({io.InternetAddress address, int port}) args) => shelf_io.serve(
       _$websocketHandler(),
       args.address,
       args.port,
-      poweredByHeader: 'WS Server',
+      poweredByHeader: 'WS Server #${Isolate.current.debugName ?? 'unknown'}',
       shared: true,
     );
 
