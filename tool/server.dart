@@ -45,8 +45,7 @@ FutureOr<Response> Function(Request) _$websocketHandler() =>
       });
     });
 
-Future<T?> _$shutdownHandler<T extends Object?>(
-    [final Future<T> Function()? onShutdown]) {
+Future<void> _$shutdownHandler<T extends Object?>() {
   //StreamSubscription<String>? userKeySub;
   StreamSubscription<io.ProcessSignal>? sigIntSub;
   StreamSubscription<io.ProcessSignal>? sigTermSub;
@@ -62,7 +61,6 @@ Future<T?> _$shutdownHandler<T extends Object?>(
         //userKeySub?.cancel();
         sigIntSub?.cancel().ignore();
         sigTermSub?.cancel().ignore();
-        result = await onShutdown?.call();
       } finally {
         shutdownCompleter.complete(result);
       }
