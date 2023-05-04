@@ -22,7 +22,7 @@ void main() => Future<void>(() async {
           debugName: 'server-$i',
         );
       }
-      print('Serving at ws://localhost:$port server-1..$cpu');
+      print('Serving $cpu handlers at ws://localhost:$port');
     });
 
 void _$server(({io.InternetAddress address, int port}) args) => shelf_io.serve(
