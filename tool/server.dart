@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io' as io;
-import 'dart:isolate';
+import 'dart:isolate' show Isolate;
 import 'dart:math' as math;
 
 import 'package:shelf/shelf.dart' show Request, Response;
