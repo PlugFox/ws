@@ -1,20 +1,82 @@
+import 'dart:async';
+import 'dart:io' as io;
+import 'dart:isolate';
+import 'dart:math' as math;
+
+import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_web_socket/shelf_web_socket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-void main() {
-  var handler = webSocketHandler((WebSocketChannel webSocket) {
-    webSocket.stream.listen((Object? message) {
-      print('Message received: $message');
-      switch (message) {
-        case "ping":
-          webSocket.sink.add("pong");
-          break;
+void main() => Future<void>(() async {
+      _$shutdownHandler().whenComplete(() => io.exit(0)).ignore();
+      print('Press Ctrl+C to exit.');
+      final cpu = math.max(io.Platform.numberOfProcessors, 2);
+      const port = 8080;
+      for (var i = 1; i <= cpu; i++) {
+        Isolate.spawn<int>(_$server, port);
       }
+      print('Serving at ws://localhost:$port');
     });
-  });
 
-  shelf_io.serve(handler, 'localhost', 8080).then<void>((server) {
-    print('Serving at ws://${server.address.host}:${server.port}');
-  });
+void _$server(int port) => shelf_io.serve(
+      _$websocketHandler(),
+      io.InternetAddress.anyIPv4,
+      port,
+      poweredByHeader: 'WS Server',
+      shared: true,
+    );
+
+FutureOr<Response> Function(Request) _$websocketHandler() =>
+    webSocketHandler((WebSocketChannel webSocket) {
+      void push(Object message) {
+        print('< $message');
+        webSocket.sink.add(message);
+      }
+
+      webSocket.stream.listen((Object? message) {
+        print('> $message');
+        switch (message) {
+          case "ping":
+            push("pong");
+            break;
+        }
+      });
+    });
+
+Future<T?> _$shutdownHandler<T extends Object?>(
+    [final Future<T> Function()? onShutdown]) {
+  //StreamSubscription<String>? userKeySub;
+  StreamSubscription<io.ProcessSignal>? sigIntSub;
+  StreamSubscription<io.ProcessSignal>? sigTermSub;
+  final shutdownCompleter = Completer<T>.sync();
+  var catchShutdownEvent = false;
+  {
+    Future<void> signalHandler(io.ProcessSignal signal) async {
+      if (catchShutdownEvent) return;
+      catchShutdownEvent = true;
+      print('Received signal [$signal] - closing');
+      T? result;
+      try {
+        //userKeySub?.cancel();
+        sigIntSub?.cancel().ignore();
+        sigTermSub?.cancel().ignore();
+        result = await onShutdown?.call();
+      } finally {
+        shutdownCompleter.complete(result);
+      }
+    }
+
+    sigIntSub = io.ProcessSignal.sigint
+        .watch()
+        .listen(signalHandler, cancelOnError: false);
+    // SIGTERM is not supported on Windows.
+    // Attempting to register a SIGTERM handler raises an exception.
+    if (!io.Platform.isWindows) {
+      sigTermSub = io.ProcessSignal.sigterm
+          .watch()
+          .listen(signalHandler, cancelOnError: false);
+    }
+  }
+  return shutdownCompleter.future;
 }
