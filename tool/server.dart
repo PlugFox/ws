@@ -14,15 +14,16 @@ void main() => Future<void>(() async {
       final cpu = math.max(io.Platform.numberOfProcessors, 2);
       const port = 8080;
       for (var i = 1; i <= cpu; i++) {
-        Isolate.spawn<int>(_$server, port);
+        final args = (address: io.InternetAddress.anyIPv4, port: port);
+        Isolate.spawn<({io.InternetAddress address, int port})>(_$server, args);
       }
       print('Serving at ws://localhost:$port');
     });
 
-void _$server(int port) => shelf_io.serve(
+void _$server(({io.InternetAddress address, int port}) args) => shelf_io.serve(
       _$websocketHandler(),
-      io.InternetAddress.anyIPv4,
-      port,
+      args.address,
+      args.port,
       poweredByHeader: 'WS Server',
       shared: true,
     );

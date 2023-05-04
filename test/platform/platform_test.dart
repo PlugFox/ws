@@ -26,7 +26,7 @@ void main() {
     });
 
     test('url is set correctly', () {
-      expect(transport.url, 'ws://example.com');
+      expect(transport.url, 'ws://localhost:8080');
     });
 
     test('readyState is initially closed', () {
