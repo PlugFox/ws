@@ -10,9 +10,20 @@
       "env": {
         "ENVIRONMENT": "test"
       },
-      "args": [
-        /* "--debug", "--coverage=.coverage", "--platform chrome,vm" */
-      ]
+      "console": "debugConsole",
+      "runTestsOnDevice": false,
+      "templateFor": "test",
+      "toolArgs": [
+        "--color",
+        "--debug",
+        "--coverage=.coverage",
+        "--reporter=expanded",
+        "--platform=chrome,vm",
+        "--file-reporter=json:.coverage/tests.json",
+        "--timeout=30s",
+        "--concurrency=12"
+      ],
+      "args": []
     }
   ]
 }

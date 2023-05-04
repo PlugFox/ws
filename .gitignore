@@ -8,4 +8,6 @@ pubspec.lock
 
 build/
 
+# Test
 .coverage/
+test/**.json
