@@ -12,9 +12,10 @@ void main() => Future<void>(() async {
       _$shutdownHandler().whenComplete(() => io.exit(0)).ignore();
       print('Press Ctrl+C to exit.');
       final cpu = math.max(io.Platform.numberOfProcessors, 2);
+      final address = io.InternetAddress.anyIPv4;
       const port = 8080;
       for (var i = 1; i <= cpu; i++) {
-        final args = (address: io.InternetAddress.anyIPv4, port: port);
+        final args = (address: address, port: port);
         Isolate.spawn<({io.InternetAddress address, int port})>(_$server, args);
       }
       print('Serving at ws://localhost:$port');
