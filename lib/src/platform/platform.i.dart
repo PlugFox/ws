@@ -61,7 +61,7 @@ abstract interface class IWebSocketPlatformTransport implements Sink<Object> {
   /// Sends data on the WebSocket connection.
   /// The data in data must be either a String, or a List<int> holding bytes.
   @override
-  void add(/*String || List<int>*/ Object data);
+  void add(/* String || List<int> || ByteBuffer || TypedData */ Object data);
 
   /// Permanently stops the WebSocket connection and frees all resources.
   /// After calling this method the WebSocket client is no longer usable.

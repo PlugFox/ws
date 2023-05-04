@@ -22,7 +22,7 @@ void main() {
     late IWebSocketPlatformTransport transport;
 
     setUp(() {
-      transport = $getWebSocketTransport('ws://example.com');
+      transport = $getWebSocketTransport('ws://localhost:8080');
     });
 
     test('url is set correctly', () {
@@ -31,6 +31,18 @@ void main() {
 
     test('readyState is initially closed', () {
       expect(transport.readyState, WebSocketReadyState.closed);
+    });
+
+    test('connect', () async {
+      expect(transport.readyState, WebSocketReadyState.closed);
+      final connection = expectLater(transport.connect(), completes);
+      await connection;
+      expect(transport.readyState, WebSocketReadyState.open);
+      transport.add('ping');
+      await expectLater(transport.stream.first, completion(equals('pong')));
+      expect(() => transport.disconnect(), returnsNormally);
+      expect(transport.readyState,
+          anyOf(WebSocketReadyState.closing, WebSocketReadyState.closed));
     });
   });
 }

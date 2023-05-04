@@ -53,17 +53,17 @@ abstract base class WebSocketPlatformTransport$Base
     } else {
       // TODO(plugfox): map all errors to WSException
       switch (error) {
-        case [WSException e]:
+        case WSException e:
           error = e;
           break;
-        case [String e]:
+        case String e:
           error = WSException(e);
           break;
-        case [Exception e]:
+        case Exception e:
           debugger(when: $kDebugWS);
           error = WSException(e.toString());
           break;
-        case [Error e]:
+        case Error e:
           debugger(when: $kDebugWS);
           error = WSException(e.toString());
           break;

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:developer';
 import 'dart:io' as io show WebSocket;
+import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
 import 'package:ws/src/model/web_socket_ready_state.dart';
@@ -87,10 +88,16 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
     if (_communication == null) throw StateError('Not connected.');
     try {
       switch (data) {
-        case [String text]:
+        case String text:
           _communication?.addUtf8Text(text.codeUnits);
           break;
-        case [List<int> bytes]:
+        case TypedData td:
+          _communication?.add(td.buffer.asInt8List());
+          break;
+        case ByteBuffer bb:
+          _communication?.add(bb.asInt8List());
+          break;
+        case List<int> bytes:
           _communication?.add(bytes);
           break;
         default:

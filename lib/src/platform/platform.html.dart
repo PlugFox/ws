@@ -117,19 +117,19 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
     if (_communication == null) throw StateError('Not connected.');
     try {
       switch (data) {
-        case [String text]:
+        case String text:
           _communication?.sendString(text);
           break;
-        case [TypedData td]:
+        case TypedData td:
           _communication?.sendTypedData(td);
           break;
-        case [html.Blob blob]:
+        case html.Blob blob:
           _communication?.sendBlob(blob);
           break;
-        case [ByteBuffer bb]:
+        case ByteBuffer bb:
           _communication?.sendByteBuffer(bb);
           break;
-        case [List<int> bytes]:
+        case List<int> bytes:
           _communication?.send(bytes);
           break;
         default:
