@@ -122,13 +122,13 @@ class SharedServer {
         final handler = Pipeline()
             .addMiddleware(handleErrors())
             .addMiddleware(injector(<String, Object>{}))
-            .addMiddleware($webSocket(path: '/connect'))
+            .addMiddleware(webSocket(path: '/connect'))
             .addMiddleware(
               logRequests(
                 logger: (msg, isError) => isError ? warning(msg) : fine(msg),
               ),
             )
-            .addMiddleware(cors())
+            .addMiddleware(corsHeaders())
             .addHandler($restRouter);
         // ignore: unused_local_variable
         final server = await shelf_io.serve(

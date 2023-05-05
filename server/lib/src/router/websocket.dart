@@ -4,7 +4,7 @@ import 'package:shelf_web_socket/shelf_web_socket.dart' as ws
 import 'package:web_socket_channel/web_socket_channel.dart'
     show WebSocketChannel;
 
-Middleware $webSocket({required String path}) =>
+Middleware webSocket({required String path}) =>
     (Handler innerHandler) => (Request request) =>
         request.method == 'GET' && request.requestedUri.path == path
             ? _webSocketHandler(request)
