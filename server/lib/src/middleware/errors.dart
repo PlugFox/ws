@@ -14,7 +14,7 @@ Middleware handleErrors() => (Handler handler) => (Request request) =>
       (Object error, StackTrace stackTrace) {
         final result = error is HttpException
             ? error
-            : HttpException(
+            : BadRequestException(
                 data: <String, Object?>{
                   'path': request.url.path,
                   'method': request.method,
@@ -38,7 +38,7 @@ Middleware handleErrors() => (Handler handler) => (Request request) =>
 /// and send an appropriate error message to the client. An option
 /// [Map] data can be provided to add additional information as
 /// the response body.
-class HttpException implements Exception {
+sealed class HttpException implements Exception {
   const HttpException({
     this.status = io.HttpStatus.internalServerError,
     this.message = "Internal Server Error",
@@ -48,17 +48,6 @@ class HttpException implements Exception {
   final int status;
   final String message;
   final Map<String, Object?>? data;
-
-  HttpException copyWith({
-    int? status,
-    String? message,
-    Map<String, Object?>? data,
-  }) =>
-      HttpException(
-        status: status ?? this.status,
-        message: message ?? this.message,
-        data: data ?? this.data,
-      );
 
   Map<String, Object?> toJson() => <String, Object?>{
         'error': <String, Object?>{
