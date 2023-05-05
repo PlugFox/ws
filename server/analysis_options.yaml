@@ -1,0 +1,54 @@
+include: package:lints/recommended.yaml
+
+analyzer:
+  exclude:
+    # Build
+    - "build/**"
+    # Codegen
+    - "lib/**.g.dart"
+    # Tests
+    - "test/**.mocks.dart"
+    - ".test_coverage.dart"
+    # Assets
+    - "assets/**"
+
+  # Enable the following options to enable strong mode.
+  language:
+    strict-casts: true
+    strict-raw-types: true
+    strict-inference: true
+
+  errors:
+    # Info
+    todo: info
+    directives_ordering: info
+    always_declare_return_types: info
+
+    # Warning
+    unsafe_html: warning
+    no_logic_in_create_state: warning
+    empty_catches: warning
+
+    # Error
+    always_use_package_imports: error
+    avoid_relative_lib_imports: error
+    avoid_slow_async_io: error
+    avoid_types_as_parameter_names: error
+    cancel_subscriptions: error
+    close_sinks: error
+    valid_regexps: error
+    always_require_non_null_named_parameters: error
+
+linter:
+  rules:
+    # Public packages
+    public_member_api_docs: false
+    lines_longer_than_80_chars: false
+
+    # Enabling rules
+    always_use_package_imports: true
+    avoid_relative_lib_imports: true
+
+    # Disable rules
+    sort_pub_dependencies: false
+    prefer_relative_imports: false

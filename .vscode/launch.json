@@ -2,6 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     // https://pub.dev/packages/test
+    // dart test --color --platform=vm
     {
       "name": "Run WebSocket Test",
       "request": "launch",
@@ -23,6 +24,22 @@
         "--timeout=30s",
         "--concurrency=12"
       ],
+      "args": []
+    },
+    // dart run server/bin/server.dart
+    {
+      "name": "WebSocket Server",
+      "request": "launch",
+      "type": "dart",
+      "program": "bin/server.dart",
+      "cwd": "${workspaceFolder}/server",
+      "env": {
+        "ENVIRONMENT": "test"
+      },
+      "console": "debugConsole",
+      "runTestsOnDevice": false,
+      "templateFor": "test",
+      "toolArgs": [],
       "args": []
     }
   ]

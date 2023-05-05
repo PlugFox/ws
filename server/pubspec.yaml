@@ -1,22 +1,22 @@
-name: ws
+name: ws_server
 description: >
-  Provides a cross-platform WebSocket API,
-  a cross-platform implementation of that API.
-version: 0.0.2-dev.placeholder
+  A web server that uses web sockets to communicate with clients.
+version: 0.0.1
 homepage: https://github.com/plugfox/ws
 repository: https://github.com/plugfox/ws
 issue_tracker: https://github.com/plugfox/ws/issues
+publish_to: 'none'
 
 environment:
   sdk: '>=3.0.0-417.3.beta <4.0.0'
 
 dependencies:
   meta: ^1.9.1
+  shelf: ^1.4.1
+  shelf_router: ^1.1.4
+  shelf_web_socket: ^1.0.4
+  web_socket_channel: ^2.4.0
 
 dev_dependencies:
   lints: ^2.0.1
   test: ^1.24.2
-  shelf: ^1.4.1
-  shelf_router: ^1.1.4
-  shelf_web_socket: ^1.0.4
-  web_socket_channel: any

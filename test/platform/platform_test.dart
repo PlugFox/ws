@@ -19,14 +19,15 @@ void main() {
   });
 
   group('IWebSocketPlatformTransport', () {
+    const String wsUrl = 'ws://localhost:8080/connect';
     late IWebSocketPlatformTransport transport;
 
     setUp(() {
-      transport = $getWebSocketTransport('ws://localhost:8080');
+      transport = $getWebSocketTransport(wsUrl);
     });
 
     test('url is set correctly', () {
-      expect(transport.url, 'ws://localhost:8080');
+      expect(transport.url, wsUrl);
     });
 
     test('readyState is initially closed', () {
