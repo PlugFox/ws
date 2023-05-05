@@ -1,12 +1,16 @@
-import 'dart:async';
-
-import 'package:shelf/shelf.dart' show Request, Response;
-import 'package:shelf_web_socket/shelf_web_socket.dart' show webSocketHandler;
+import 'package:shelf/shelf.dart' show Handler, Middleware, Request;
+import 'package:shelf_web_socket/shelf_web_socket.dart' as ws
+    show webSocketHandler;
 import 'package:web_socket_channel/web_socket_channel.dart'
     show WebSocketChannel;
 
-final FutureOr<Response> Function(Request request) $webSocket =
-    webSocketHandler((WebSocketChannel webSocket) {
+Middleware $webSocket({required String path}) =>
+    (Handler innerHandler) => (Request request) =>
+        request.method == 'GET' && request.requestedUri.path == path
+            ? _webSocketHandler(request)
+            : innerHandler(request);
+
+final _webSocketHandler = ws.webSocketHandler((WebSocketChannel webSocket) {
   void push(Object message) {
     try {
       print('ws < $message');

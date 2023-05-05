@@ -34,13 +34,13 @@
       "program": "bin/server.dart",
       "cwd": "${workspaceFolder}/server",
       "env": {
-        "ENVIRONMENT": "test"
+        "ENVIRONMENT": "WebSocket Server"
       },
       "console": "debugConsole",
       "runTestsOnDevice": false,
       "templateFor": "test",
       "toolArgs": [],
-      "args": []
+      "args": ["--port=8080", "--isolates=2"]
     }
   ]
 }

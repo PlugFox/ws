@@ -119,23 +119,20 @@ class SharedServer {
         receivePort.listen((Object? message) {
           print('Isolate(${args.label}) received: $message'); /* ... */
         });
-        final http = Pipeline()
+        final handler = Pipeline()
             .addMiddleware(handleErrors())
+            .addMiddleware(injector(<String, Object>{}))
+            .addMiddleware($webSocket(path: '/connect'))
             .addMiddleware(
               logRequests(
                 logger: (msg, isError) => isError ? warning(msg) : fine(msg),
               ),
             )
             .addMiddleware(cors())
-            .addMiddleware(injector(<String, Object>{}))
             .addHandler($restRouter);
-        final ws = $webSocket;
         // ignore: unused_local_variable
         final server = await shelf_io.serve(
-          // If path equals 'ws' then use websockets, otherwise use http
-          // e.g. ws://localhost:8080/connect
-          (request) =>
-              request.url.path == 'connect' ? ws(request) : http(request),
+          handler,
           args.address,
           args.port,
           poweredByHeader: 'WS Server #${args.label}',

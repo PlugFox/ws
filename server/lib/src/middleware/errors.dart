@@ -10,7 +10,7 @@ import 'package:stack_trace/stack_trace.dart' as st;
 Middleware handleErrors() => (Handler handler) => (Request request) =>
     Future.sync(() => handler(request))
         .then<Response>((Response response) => response)
-        .catchError(
+        .onError(
       (Object error, StackTrace stackTrace) {
         final result = error is HttpException
             ? error
@@ -31,6 +31,7 @@ Middleware handleErrors() => (Handler handler) => (Request request) =>
           },
         );
       },
+      test: (Object error) => error is HijackException ? false : true,
     );
 
 /// HTTP exception enables to immediately stop request execution
