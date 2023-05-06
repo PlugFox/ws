@@ -10,4 +10,4 @@ build/
 
 # Test
 .coverage/
-test/**.json
+test/**/*.json

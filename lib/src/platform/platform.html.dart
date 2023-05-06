@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
 import 'package:ws/src/model/web_socket_ready_state.dart';
+import 'package:ws/src/model/websocket_exception.dart';
 import 'package:ws/src/platform/platform.base.dart';
 import 'package:ws/src/platform/platform.i.dart';
 import 'package:ws/src/util/constants.dart';
@@ -114,7 +115,7 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
 
   @override
   void add(Object data) {
-    if (_communication == null) throw StateError('Not connected.');
+    if (!readyState.isOpen) throw WSNotConnected('Not connected.');
     try {
       switch (data) {
         case String text:
@@ -153,6 +154,10 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
     _dataBindSubscription?.cancel().ignore();
     Future<void>.sync(() => _communication?.close(code, reason)).ignore();
     _communication = null;
+    assert(
+      readyState == WebSocketReadyState.closed,
+      'Invalid readyState code after disconnect: $readyState',
+    );
   }
 
   @override

@@ -2,12 +2,12 @@
   "version": "0.2.0",
   "configurations": [
     // https://pub.dev/packages/test
-    // dart test --color --platform=vm
+    // dart test test/ws_test.dart --color --platform=vm
     {
-      "name": "Run WebSocket Test",
+      "name": "Test (VM)",
       "request": "launch",
       "type": "dart",
-      "program": "test",
+      "program": "test/ws_test.dart",
       "env": {
         "ENVIRONMENT": "test"
       },
@@ -19,7 +19,31 @@
         "--debug",
         "--coverage=.coverage",
         "--reporter=expanded",
-        "--platform=chrome,vm",
+        "--platform=vm", // chrome
+        "--file-reporter=json:.coverage/tests.json",
+        "--timeout=30s",
+        "--concurrency=12"
+      ],
+      "args": []
+    },
+    // dart test test/ws_test.dart --color --platform=chrome
+    {
+      "name": "Test (Browser)",
+      "request": "launch",
+      "type": "dart",
+      "program": "test/ws_test.dart",
+      "env": {
+        "ENVIRONMENT": "test"
+      },
+      "console": "debugConsole",
+      "runTestsOnDevice": false,
+      "templateFor": "test",
+      "toolArgs": [
+        "--color",
+        "--debug",
+        "--coverage=.coverage",
+        "--reporter=expanded",
+        "--platform=chrome",
         "--file-reporter=json:.coverage/tests.json",
         "--timeout=30s",
         "--concurrency=12"

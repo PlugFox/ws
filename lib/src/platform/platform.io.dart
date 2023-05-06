@@ -1,10 +1,11 @@
 import 'dart:async';
 import 'dart:developer';
-import 'dart:io' as io show WebSocket;
+import 'dart:io' as io show WebSocket, SocketException;
 import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
 import 'package:ws/src/model/web_socket_ready_state.dart';
+import 'package:ws/src/model/websocket_exception.dart';
 import 'package:ws/src/platform/platform.base.dart';
 import 'package:ws/src/platform/platform.i.dart';
 import 'package:ws/src/util/constants.dart';
@@ -64,7 +65,7 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
           receiveData(data);
         },
         onError: receiveError,
-        onDone: disconnect,
+        onDone: () => disconnect(1000, 'Subscription closed.'),
         cancelOnError: false,
       );
       if (!readyState.isOpen) {
@@ -74,6 +75,13 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
           'Invalid readyState code after connect: $readyState',
         );
       }
+    } on io.SocketException catch (error, stackTrace) {
+      // That error is only for I/O environment.
+      final exception = WSSocketException(error.message);
+      debugger(when: $kDebugWS);
+      disconnect(1006, error.message);
+      receiveError(exception, stackTrace);
+      Error.throwWithStackTrace(exception, stackTrace);
     } on Object catch (error, stackTrace) {
       // TODO(plugfox): find out reason for error and map it to a WSException
       debugger(when: $kDebugWS);
@@ -85,7 +93,7 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
 
   @override
   void add(Object data) {
-    if (_communication == null) throw StateError('Not connected.');
+    if (!readyState.isOpen) throw WSNotConnected('Not connected.');
     try {
       switch (data) {
         case String text:
@@ -119,6 +127,10 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
     _dataBindSubscription?.cancel().ignore();
     Future<void>.sync(() => _communication?.close(code, reason)).ignore();
     _communication = null;
+    assert(
+      readyState == WebSocketReadyState.closed,
+      'Invalid readyState code after disconnect: $readyState',
+    );
   }
 
   @override

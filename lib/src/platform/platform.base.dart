@@ -46,6 +46,7 @@ abstract base class WebSocketPlatformTransport$Base
   /// {@nodoc}
   @nonVirtual
   @protected
+  @pragma('vm:invisible')
   void receiveError(Object error, [StackTrace? stackTrace]) {
     debugger(when: $kDebugWS);
     if (isClosed) {
@@ -57,19 +58,23 @@ abstract base class WebSocketPlatformTransport$Base
           error = e;
           break;
         case String e:
-          error = WSException(e);
+          error = WSUnknownException(e);
+          break;
+        case StateError e:
+          debugger(when: $kDebugWS);
+          error = WSUnknownException(e.message);
           break;
         case Exception e:
           debugger(when: $kDebugWS);
-          error = WSException(e.toString());
+          error = WSUnknownException(e.toString());
           break;
         case Error e:
           debugger(when: $kDebugWS);
-          error = WSException(e.toString());
+          error = WSUnknownException(e.toString());
           break;
         case Object:
           debugger(when: $kDebugWS);
-          error = WSException(error.toString());
+          error = WSUnknownException(error.toString());
           break;
       }
       _controller.addError(error, stackTrace);

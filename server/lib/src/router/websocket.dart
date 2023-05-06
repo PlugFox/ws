@@ -31,8 +31,8 @@ final _webSocketHandler = ws.webSocketHandler((WebSocketChannel webSocket) {
           push("pong");
           break;
         case "close":
-          subscription.cancel();
           webSocket.sink.close(1000, 'NORMAL_CLOSURE');
+          subscription.cancel();
           break;
       }
     },

@@ -1,5 +1,3 @@
-@TestOn('vm && browser')
-
 import 'package:test/test.dart';
 import 'package:ws/interface.dart';
 import 'package:ws/src/platform/platform.dart';
@@ -44,6 +42,16 @@ void main() {
       expect(() => transport.disconnect(), returnsNormally);
       expect(transport.readyState,
           anyOf(WebSocketReadyState.closing, WebSocketReadyState.closed));
+    });
+
+    test('close', () async {
+      expect(transport.readyState, WebSocketReadyState.closed);
+      final connection = expectLater(transport.connect(), completes);
+      await connection;
+      expect(transport.readyState, WebSocketReadyState.open);
+      transport.add('close');
+      await Future<void>.delayed(Duration(milliseconds: 250));
+      expect(transport.readyState, equals(WebSocketReadyState.closed));
     });
   });
 }
