@@ -143,7 +143,6 @@ class SharedServer {
         }
 
         receivePort.listen((Object? message) {
-          /* ... */
           switch (message) {
             case 0:
               // Isolate is alive
