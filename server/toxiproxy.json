@@ -11,8 +11,8 @@
         "stream": "downstream",
         "toxicity": 1,
         "attributes": {
-          "latency": 100,
-          "jitter": 50
+          "latency": 1000,
+          "jitter": 500
         }
       },
       {
@@ -21,7 +21,16 @@
         "stream": "downstream",
         "toxicity": 1,
         "attributes": {
-          "bytes": 10240
+          "bytes": 1024
+        }
+      },
+      {
+        "type": "bandwidth",
+        "name": "bandwidth_toxic",
+        "stream": "downstream",
+        "toxicity": 1,
+        "attributes": {
+          "rate": 1024
         }
       },
       {

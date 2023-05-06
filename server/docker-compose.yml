@@ -14,6 +14,7 @@ services:
       - 8080
     entrypoint: ["/app/bin/server", "--isolates=2"]
 
+  # https://github.com/Shopify/toxiproxy
   toxiproxy:
     image: 'ghcr.io/shopify/toxiproxy:2.5.0'
     container_name: toxiproxy
@@ -30,6 +31,6 @@ services:
       - ./toxiproxy.json:/config/toxiproxy.json
     depends_on:
       - server
-    environment:
-      - LOG_LEVEL=debug
+    #environment:
+    #  - LOG_LEVEL=debug
     command: ['-config', '/config/toxiproxy.json','-host', '0.0.0.0']
