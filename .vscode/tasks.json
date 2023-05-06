@@ -12,15 +12,29 @@
       "problemMatcher": []
     },
     {
-      "label": "WebSocket Server",
-      "type": "dart",
-      "command": "dart",
-      "args": ["run", "bin/server.dart", "--port=8080", "--isolates=2"],
+      "label": "Start WebSocket Server",
+      "type": "shell",
+      "command": "docker",
+      "args": ["compose", "--file=server/docker-compose.yml", "up"],
       "group": {
         "kind": "none",
         "isDefault": true
       },
-      "cwd": "server",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Stop WebSocket Server",
+      "type": "shell",
+      "command": "docker",
+      "args": ["compose", "--file=server/docker-compose.yml", "down"],
+      "group": {
+        "kind": "none",
+        "isDefault": true
+      },
       "problemMatcher": [],
       "presentation": {
         "reveal": "always",

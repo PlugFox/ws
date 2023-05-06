@@ -1,0 +1,7 @@
+.dart_tool/
+.temp/
+.vscode/
+tool/
+Dockerfile
+Makefile
+*.md

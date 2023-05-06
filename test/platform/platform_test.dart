@@ -17,7 +17,7 @@ void main() {
   });
 
   group('IWebSocketPlatformTransport', () {
-    const String wsUrl = 'ws://localhost:8080/connect';
+    const String wsUrl = 'ws://localhost:9090/connect';
     late IWebSocketPlatformTransport transport;
 
     setUp(() {

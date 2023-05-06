@@ -37,3 +37,11 @@ final class WSSocketException extends WSException {
   /// {@macro socket_exception}
   const WSSocketException(super.message);
 }
+
+/// {@template http_exception}
+/// Exception thrown when a socket operation fails.
+/// {@endtemplate}
+final class WSHttpException extends WSException {
+  /// {@macro http_exception}
+  const WSHttpException(super.message);
+}

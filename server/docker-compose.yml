@@ -1,0 +1,35 @@
+# docker-compose up -d
+# docker-compose down
+# docker-compose logs -f
+
+version: '3.9'
+
+services:
+  server:
+    container_name: server
+    build: .
+    ports:
+      - 8080:8080
+    expose:
+      - 8080
+    entrypoint: ["/app/bin/server", "--isolates=2"]
+
+  toxiproxy:
+    image: 'ghcr.io/shopify/toxiproxy:2.5.0'
+    container_name: toxiproxy
+    ports:
+      - target: 8474
+        published: 8474
+        protocol: tcp
+        mode: host
+      - target: 9090
+        published: 9090
+        protocol: tcp
+        mode: host
+    volumes:
+      - ./toxiproxy.json:/config/toxiproxy.json
+    depends_on:
+      - server
+    environment:
+      - LOG_LEVEL=debug
+    command: ['-config', '/config/toxiproxy.json','-host', '0.0.0.0']

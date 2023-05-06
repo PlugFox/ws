@@ -1,0 +1,38 @@
+[
+  {
+    "name": "ws_proxy",
+    "listen": "[::]:9090",
+    "upstream": "server:8080",
+    "enabled": true,
+    "toxics": [
+      {
+        "type": "latency",
+        "name": "latency_toxic",
+        "stream": "downstream",
+        "toxicity": 1,
+        "attributes": {
+          "latency": 100,
+          "jitter": 50
+        }
+      },
+      {
+        "type": "limit_data",
+        "name": "limit_data_toxic",
+        "stream": "downstream",
+        "toxicity": 1,
+        "attributes": {
+          "bytes": 10240
+        }
+      },
+      {
+        "type": "timeout",
+        "name": "timeout_toxic",
+        "stream": "downstream",
+        "toxicity": 1,
+        "attributes": {
+          "timeout": 5000
+        }
+      }
+    ]
+  }
+]

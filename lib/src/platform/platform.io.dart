@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:developer';
-import 'dart:io' as io show WebSocket, SocketException;
+import 'dart:io' as io show WebSocket, SocketException, HttpException;
 import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
@@ -82,8 +82,14 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
       disconnect(1006, error.message);
       receiveError(exception, stackTrace);
       Error.throwWithStackTrace(exception, stackTrace);
+    } on io.HttpException catch (error, stackTrace) {
+      // That error is only for I/O environment.
+      final exception = WSHttpException(error.message);
+      debugger(when: $kDebugWS);
+      disconnect(1006, error.message);
+      receiveError(exception, stackTrace);
+      Error.throwWithStackTrace(exception, stackTrace);
     } on Object catch (error, stackTrace) {
-      // TODO(plugfox): find out reason for error and map it to a WSException
       debugger(when: $kDebugWS);
       disconnect(1006, 'Connection failed.');
       receiveError(error, stackTrace);
