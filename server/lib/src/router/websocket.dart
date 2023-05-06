@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:shelf/shelf.dart' show Handler, Middleware, Request;
 import 'package:shelf_web_socket/shelf_web_socket.dart' as ws
     show webSocketHandler;
@@ -20,12 +22,16 @@ final _webSocketHandler = ws.webSocketHandler((WebSocketChannel webSocket) {
     }
   }
 
-  webSocket.stream.listen(
+  late final StreamSubscription<Object?> subscription;
+  subscription = webSocket.stream.listen(
     (Object? message) {
       print('ws > $message');
       switch (message) {
         case "ping":
           push("pong");
+          break;
+        case "close":
+          webSocket.sink.close(1000, 'NORMAL_CLOSURE');
           break;
       }
     },
