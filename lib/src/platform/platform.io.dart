@@ -10,11 +10,22 @@ import 'package:ws/src/platform/platform.base.dart';
 import 'package:ws/src/platform/platform.i.dart';
 import 'package:ws/src/util/constants.dart';
 
+// TODO(plugfox): Добавить состояние и стрим состояния.
+// количество отправленных сообщений, общий размер сообщений
+// количество полученных сообщений, общий размер сообщений
+// скорость отправки
+// скорость получения
+// последние ошибки и их время
+// количество переподключений
+// время последнего переподключения
+// время последнего отправленного/полученного сообщения
+// состояние подключения, время подключения
+
 /// Get the platform WebSocket transport client for the current environment.
 /// {@nodoc}
 @internal
-IWebSocketPlatformTransport $getWebSocketTransport(String url) =>
-    WebSocketPlatformTransport$IO(url);
+IWebSocketPlatformTransport $getWebSocketTransport() =>
+    WebSocketPlatformTransport$IO();
 
 /// WebSocket platform transport for I/O environment.
 /// {@nodoc}
@@ -53,7 +64,7 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
   String? _$closeReason;
 
   @override
-  Future<void> connect() async {
+  Future<void> connect(String url) async {
     try {
       disconnect(1001, 'Reconnecting.');
       _communication = await io.WebSocket.connect(url);
@@ -92,8 +103,9 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
   }
 
   @override
-  void add(Object data) {
+  FutureOr<void> add(Object data) {
     if (!readyState.isOpen) throw WSNotConnected('Not connected.');
+
     try {
       switch (data) {
         case String text:

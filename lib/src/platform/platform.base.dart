@@ -11,11 +11,8 @@ import 'package:ws/src/util/constants.dart';
 abstract base class WebSocketPlatformTransport$Base
     implements IWebSocketPlatformTransport {
   /// {@nodoc}
-  WebSocketPlatformTransport$Base(this.url)
+  WebSocketPlatformTransport$Base()
       : _controller = StreamController<Object>.broadcast();
-
-  @override
-  final String url;
 
   /// Output stream of data from native WebSocket client.
   /// {@nodoc}

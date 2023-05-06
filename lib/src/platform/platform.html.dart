@@ -14,11 +14,10 @@ import 'package:ws/src/util/constants.dart';
 /// Get the platform WebSocket transport client for the current environment.
 /// {@nodoc}
 @internal
-IWebSocketPlatformTransport $getWebSocketTransport(String url) =>
-    html.WebSocket.supported
-        ? WebSocketPlatformTransport$HTML(url)
-        : throw UnsupportedError(
-            'Cannot create a WebSocket because it is not supported.');
+IWebSocketPlatformTransport $getWebSocketTransport() => html.WebSocket.supported
+    ? WebSocketPlatformTransport$HTML()
+    : throw UnsupportedError(
+        'Cannot create a WebSocket because it is not supported.');
 
 /// WebSocket platform transport for HTML & JS environment.
 /// {@nodoc}
@@ -65,7 +64,7 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
   String? _$closeReason;
 
   @override
-  Future<void> connect() async {
+  Future<void> connect(String url) async {
     try {
       disconnect(1001, 'Reconnecting.');
       _communication = html.WebSocket(url);
@@ -114,7 +113,7 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
   }
 
   @override
-  void add(Object data) {
+  FutureOr<void> add(Object data) {
     if (!readyState.isOpen) throw WSNotConnected('Not connected.');
     try {
       switch (data) {

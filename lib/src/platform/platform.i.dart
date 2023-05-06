@@ -8,9 +8,6 @@ import 'package:ws/src/model/web_socket_ready_state.dart';
 /// a WebSocket connection to a server, as well as for sending
 /// and receiving data on the connection.
 abstract interface class IWebSocketPlatformTransport implements Sink<Object> {
-  /// The URL that was used to establish the connection.
-  abstract final String url;
-
   /// Stream of message events handled by this WebSocket.
   abstract final Stream<Object> stream;
 
@@ -47,7 +44,8 @@ abstract interface class IWebSocketPlatformTransport implements Sink<Object> {
   String? get extensions;
 
   /// Connects to the WebSocket server.
-  Future<void> connect();
+  /// [url] - the URL that was used to establish the connection.
+  Future<void> connect(String url);
 
   /// Closes the WebSocket connection.
   /// Set the optional [code] and [reason] arguments
@@ -61,7 +59,7 @@ abstract interface class IWebSocketPlatformTransport implements Sink<Object> {
   /// Sends data on the WebSocket connection.
   /// The data in data must be either a String, or a List<int> holding bytes.
   @override
-  void add(/* String || List<int> || ByteBuffer || TypedData */ Object data);
+  FutureOr<void> add(/* String || List<int> */ Object data);
 
   /// Permanently stops the WebSocket connection and frees all resources.
   /// After calling this method the WebSocket client is no longer usable.

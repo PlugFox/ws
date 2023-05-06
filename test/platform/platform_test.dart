@@ -21,11 +21,7 @@ void main() {
     late IWebSocketPlatformTransport transport;
 
     setUp(() {
-      transport = $getWebSocketTransport(wsUrl);
-    });
-
-    test('url is set correctly', () {
-      expect(transport.url, wsUrl);
+      transport = $getWebSocketTransport();
     });
 
     test('readyState is initially closed', () {
@@ -34,7 +30,7 @@ void main() {
 
     test('connect', () async {
       expect(transport.readyState, WebSocketReadyState.closed);
-      final connection = expectLater(transport.connect(), completes);
+      final connection = expectLater(transport.connect(wsUrl), completes);
       await connection;
       expect(transport.readyState, WebSocketReadyState.open);
       transport.add('ping');
@@ -46,7 +42,7 @@ void main() {
 
     test('close', () async {
       expect(transport.readyState, WebSocketReadyState.closed);
-      final connection = expectLater(transport.connect(), completes);
+      final connection = expectLater(transport.connect(wsUrl), completes);
       await connection;
       expect(transport.readyState, WebSocketReadyState.open);
       transport.add('close');
