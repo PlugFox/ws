@@ -10,17 +10,6 @@ import 'package:ws/src/platform/platform.base.dart';
 import 'package:ws/src/platform/platform.i.dart';
 import 'package:ws/src/util/constants.dart';
 
-// TODO(plugfox): Добавить состояние и стрим состояния.
-// количество отправленных сообщений, общий размер сообщений
-// количество полученных сообщений, общий размер сообщений
-// скорость отправки
-// скорость получения
-// последние ошибки и их время
-// количество переподключений
-// время последнего переподключения
-// время последнего отправленного/полученного сообщения
-// состояние подключения, время подключения
-
 /// Get the platform WebSocket transport client for the current environment.
 /// {@nodoc}
 @internal

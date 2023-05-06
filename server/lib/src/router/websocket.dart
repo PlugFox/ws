@@ -27,13 +27,30 @@ final _webSocketHandler = ws.webSocketHandler((WebSocketChannel webSocket) {
     (Object? message) {
       print('ws > $message');
       switch (message) {
+        // Ping-Pong message.
         case "ping":
           push("pong");
           break;
+
+        // Close connection.
         case "close":
           webSocket.sink.close(1000, 'NORMAL_CLOSURE');
           subscription.cancel();
           break;
+
+        // Echo.
+        default:
+          switch (message) {
+            // Echo text.
+            case String text:
+              push(text);
+              break;
+
+            // Echo bytes.
+            case List<int> bytes:
+              push(bytes);
+              break;
+          }
       }
     },
     onError: (Object error) => print('ws > [error] $error'),
