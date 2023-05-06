@@ -23,11 +23,7 @@ void main(List<String> arguments) => Future<void>(() async {
         port: options.port,
       );
       for (var i = 1; i <= options.isolates; i++) {
-        // ignore: unused_local_variable
-        final setup = SharedServer(
-          connection: connection,
-          label: 'Server-$i',
-        )();
+        SharedServer(connection: connection, label: 'Server-$i')();
       }
       print(
         'Serving ${options.isolates} handlers at '

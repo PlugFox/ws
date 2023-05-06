@@ -13,16 +13,18 @@
     },
     {
       "label": "WebSocket Server",
-      "type": "shell",
-      "command": ["dart run server/bin/server.dart"],
+      "type": "dart",
+      "command": "dart",
+      "args": ["run", "bin/server.dart", "--port=8080", "--isolates=2"],
       "group": {
         "kind": "none",
         "isDefault": true
       },
+      "cwd": "server",
       "problemMatcher": [],
       "presentation": {
         "reveal": "always",
-        "panel": "shared"
+        "panel": "dedicated"
       }
     }
   ]

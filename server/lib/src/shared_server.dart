@@ -1,3 +1,5 @@
+// ignore_for_file: unused_field
+
 import 'dart:async';
 import 'dart:io' as io;
 import 'dart:isolate';
@@ -10,12 +12,6 @@ import 'package:ws_server/src/middleware/injector.dart';
 import 'package:ws_server/src/router/rest_router.dart';
 import 'package:ws_server/src/router/websocket.dart';
 import 'package:ws_server/src/util/logger.dart';
-
-typedef SharedServerSetup = ({
-  Isolate isolate,
-  void Function(Object? event) send,
-  Stream<Object?> stream
-});
 
 typedef _SharedServerArguments = ({
   io.InternetAddress address,
@@ -33,15 +29,36 @@ class SharedServer {
   final ({io.InternetAddress address, int port}) connection;
   final String label;
 
-  Future<SharedServerSetup> call() async {
+  Isolate? _isolate;
+  void Function(Object? event)? _send;
+  Stream<Object?>? _stream;
+
+  Future<void> call() async {
     final receivePort = ReceivePort();
     final controller = StreamController<Object?>();
+    if (_isolate != null) throw StateError('Isolate is already running');
     try {
       final responsePort = receivePort.sendPort;
       final sendPortCompleter = Completer<SendPort>();
 
-      // Listen to isolate
       var isAlive = true;
+      late Isolate isolate;
+      late final Timer timer;
+
+      // Exit process if isolate is stuck
+      Future<void> close() async {
+        _isolate = null;
+        _send = null;
+        _stream = null;
+        timer.cancel();
+        receivePort.close();
+        controller.close().ignore();
+        isolate.kill(priority: Isolate.immediate);
+        await Future<void>.delayed(const Duration(seconds: 1));
+        io.exit(1);
+      }
+
+      // Listen to isolate
       receivePort.listen(
         (Object? message) {
           switch (message) {
@@ -52,6 +69,11 @@ class SharedServer {
               // Isolate is alive
               isAlive = true;
               break;
+            case 1:
+              // Isolate is dead
+              isAlive = false;
+              close();
+              break;
             default:
               controller.add(message);
               break;
@@ -61,7 +83,7 @@ class SharedServer {
       );
 
       // Spawn isolate
-      final isolate = await Isolate.spawn<_SharedServerArguments>(
+      isolate = await Isolate.spawn<_SharedServerArguments>(
         _endpoint,
         (
           address: connection.address,
@@ -78,32 +100,25 @@ class SharedServer {
           await sendPortCompleter.future.timeout(const Duration(seconds: 5));
 
       // Health check
-      late final Timer timer;
-
-      // Exit process if isolate is stuck
-      Future<void> onStuck() async {
-        severe('Isolate($label) is stuck');
-        timer.cancel();
-        receivePort.close();
-        controller.close().ignore();
-        isolate.kill(priority: Isolate.immediate);
-        await Future<void>.delayed(const Duration(seconds: 5));
-        io.exit(1);
-      }
 
       timer = Timer.periodic(const Duration(seconds: 15), (_) {
         try {
           if (!isAlive) {
-            onStuck().ignore();
+            severe('Isolate($label) is stuck');
+            close().ignore();
             return;
           }
           isolate.ping(responsePort, response: 0);
           isAlive = false;
         } on Object {
-          onStuck();
+          severe('Unknown health check error');
+          close();
         }
       });
-      return (isolate: isolate, send: sendPort.send, stream: controller.stream);
+
+      _isolate = isolate;
+      _send = sendPort.send;
+      _stream = controller.stream;
     } on Object {
       receivePort.close();
       controller.close().ignore();
@@ -116,8 +131,30 @@ class SharedServer {
         //fine('Starting isolate ${Isolate.current.debugName ?? 'unknown'}');
         final receivePort = ReceivePort();
         args.sendPort.send(receivePort.sendPort);
+        io.HttpServer? server;
+
+        // Close server and isolate
+        void close() {
+          receivePort.close();
+          server?.close(force: true).whenComplete(() {
+            args.sendPort.send(1);
+            Isolate.current.kill(priority: Isolate.beforeNextEvent);
+          });
+        }
+
         receivePort.listen((Object? message) {
-          print('Isolate(${args.label}) received: $message'); /* ... */
+          /* ... */
+          switch (message) {
+            case 0:
+              // Isolate is alive
+              break;
+            case 2:
+              // We should close the server
+              close();
+              break;
+            default:
+              break;
+          }
         });
         final handler = Pipeline()
             .addMiddleware(handleErrors())
@@ -130,14 +167,16 @@ class SharedServer {
             )
             .addMiddleware(corsHeaders())
             .addHandler($restRouter);
-        // ignore: unused_local_variable
-        final server = await shelf_io.serve(
-          handler,
-          args.address,
-          args.port,
-          poweredByHeader: 'WS Server #${args.label}',
-          shared: true,
-        );
-        //config('Server running on ${server.address}:${server.port}');
+        try {
+          server = await shelf_io.serve(
+            handler,
+            args.address,
+            args.port,
+            poweredByHeader: 'WS Server #${args.label}',
+            shared: true,
+          );
+        } on Object {
+          close();
+        }
       });
 }
