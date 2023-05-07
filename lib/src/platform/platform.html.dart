@@ -14,10 +14,23 @@ import 'package:ws/src/util/constants.dart';
 /// Get the platform WebSocket transport client for the current environment.
 /// {@nodoc}
 @internal
-IWebSocketPlatformTransport $getWebSocketTransport() => html.WebSocket.supported
-    ? WebSocketPlatformTransport$HTML()
-    : throw UnsupportedError(
-        'Cannot create a WebSocket because it is not supported.');
+IWebSocketPlatformTransport $getWebSocketTransport({
+  required final void Function(Object data) onReceived,
+  required final void Function(Object data) onSent,
+  required final void Function(Object error, StackTrace stackTrace) onError,
+  required final void Function(String url) onConnected,
+  required final void Function(int? code, String? reason) onDisconnected,
+}) =>
+    html.WebSocket.supported
+        ? WebSocketPlatformTransport$HTML(
+            onReceived: onReceived,
+            onSent: onSent,
+            onError: onError,
+            onConnected: onConnected,
+            onDisconnected: onDisconnected,
+          )
+        : throw WSUnsupportedException(
+            'Cannot create a WebSocket because it is not supported.');
 
 /// WebSocket platform transport for HTML & JS environment.
 /// {@nodoc}
@@ -75,9 +88,9 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
         (event) {
           // TODO(plugfox): extract error from event and map it to a WSException
           debugger(when: $kDebugWS);
-          receiveError(event);
+          onError(event, StackTrace.current);
         },
-        onError: receiveError,
+        onError: onError,
         onDone: disconnect,
         cancelOnError: false,
       );
@@ -85,15 +98,15 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
         (event) {
           final data = event.data;
           if (data is! Object) return;
-          receiveData(data);
+          onReceived(data);
         },
-        onError: receiveError,
+        onError: onError,
         onDone: disconnect,
         cancelOnError: false,
       );
       _closeBindSubscription = _communication?.onClose.listen(
         (event) => disconnect(event.code, event.reason),
-        onError: receiveError,
+        onError: onError,
         cancelOnError: false,
       );
       if (!readyState.isOpen) {
@@ -107,7 +120,7 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
       // TODO(plugfox): find out reason for error and map it to a WSException
       debugger(when: $kDebugWS);
       disconnect(1006, 'Connection failed.');
-      receiveError(error, stackTrace);
+      onError(error, stackTrace);
       rethrow;
     }
   }
@@ -139,7 +152,7 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
     } on Object catch (error, stackTrace) {
       // TODO(plugfox): find out reason for error and map it to a WSException
       debugger(when: $kDebugWS);
-      receiveError(error, stackTrace);
+      onError(error, stackTrace);
       rethrow;
     }
   }
@@ -157,6 +170,7 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
       readyState == WebSocketReadyState.closed,
       'Invalid readyState code after disconnect: $readyState',
     );
+    onDisconnected(code, reason);
   }
 
   @override

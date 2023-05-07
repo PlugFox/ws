@@ -13,8 +13,20 @@ import 'package:ws/src/util/constants.dart';
 /// Get the platform WebSocket transport client for the current environment.
 /// {@nodoc}
 @internal
-IWebSocketPlatformTransport $getWebSocketTransport() =>
-    WebSocketPlatformTransport$IO();
+IWebSocketPlatformTransport $getWebSocketTransport({
+  required final void Function(Object data) onReceived,
+  required final void Function(Object data) onSent,
+  required final void Function(Object error, StackTrace stackTrace) onError,
+  required final void Function(String url) onConnected,
+  required final void Function(int? code, String? reason) onDisconnected,
+}) =>
+    WebSocketPlatformTransport$IO(
+      onReceived: onReceived,
+      onSent: onSent,
+      onError: onError,
+      onConnected: onConnected,
+      onDisconnected: onDisconnected,
+    );
 
 /// WebSocket platform transport for I/O environment.
 /// {@nodoc}
@@ -62,9 +74,9 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
       _dataBindSubscription = _communication?.listen(
         (data) {
           if (data is! Object) return;
-          receiveData(data);
+          onReceived(data);
         },
-        onError: receiveError,
+        onError: onError,
         onDone: () => disconnect(1000, 'Subscription closed.'),
         cancelOnError: false,
       );
@@ -75,24 +87,25 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
           'Invalid readyState code after connect: $readyState',
         );
       }
+      onConnected(url);
     } on io.SocketException catch (error, stackTrace) {
       // That error is only for I/O environment.
       final exception = WSSocketException(error.message);
       debugger(when: $kDebugWS);
       disconnect(1006, error.message);
-      receiveError(exception, stackTrace);
+      onError(exception, stackTrace);
       Error.throwWithStackTrace(exception, stackTrace);
     } on io.HttpException catch (error, stackTrace) {
       // That error is only for I/O environment.
       final exception = WSHttpException(error.message);
       debugger(when: $kDebugWS);
       disconnect(1006, error.message);
-      receiveError(exception, stackTrace);
+      onError(exception, stackTrace);
       Error.throwWithStackTrace(exception, stackTrace);
     } on Object catch (error, stackTrace) {
       debugger(when: $kDebugWS);
       disconnect(1006, 'Connection failed.');
-      receiveError(error, stackTrace);
+      onError(error, stackTrace);
       rethrow;
     }
   }
@@ -122,7 +135,7 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
     } on Object catch (error, stackTrace) {
       // TODO(plugfox): find out reason for error and map it to a WSException
       debugger(when: $kDebugWS);
-      receiveError(error, stackTrace);
+      onError(error, stackTrace);
       rethrow;
     }
   }

@@ -24,6 +24,7 @@ import 'package:meta/meta.dart';
 /// and thus can't be registered.  Such codes can be used by prior
 /// agreements between WebSocket applications.  The interpretation of
 /// these codes is undefined by this protocol.
+/// {@category Entity}
 enum WebSocketStatusCodes implements Comparable<WebSocketStatusCodes> {
   /// Successful operation / regular socket shutdown.
   /// The connection successfully completed

@@ -7,10 +7,8 @@ import 'package:ws/src/model/web_socket_ready_state.dart';
 /// The WebSocket object provides the API for creating and managing
 /// a WebSocket connection to a server, as well as for sending
 /// and receiving data on the connection.
+/// {@category Transport}
 abstract interface class IWebSocketPlatformTransport implements Sink<Object> {
-  /// Stream of message events handled by this WebSocket.
-  abstract final Stream<Object> stream;
-
   /// Returns the current state of the connection.
   /// 0	: CONNECTING - Socket has been created. The connection is not yet open.
   /// 1	: OPEN       - The connection is open and ready to communicate.
@@ -25,18 +23,6 @@ abstract interface class IWebSocketPlatformTransport implements Sink<Object> {
   /// The close reason set when the WebSocket connection is closed.
   /// If there is no close reason available this property will be null.
   String? get closeReason;
-
-  /// Whether the stream controller is permanently closed.
-  ///
-  /// The controller becomes closed by calling the [close] method.
-  ///
-  /// If the controller is closed,
-  /// the "done" event might not have been delivered yet,
-  /// but it has been scheduled, and it is too late to add more events.
-  bool get isClosed;
-
-  /// A future which is completed when the stream controller is done.
-  Future<void> get done;
 
   /// The extensions property is initially null.
   /// After the WebSocket connection is established
@@ -68,4 +54,19 @@ abstract interface class IWebSocketPlatformTransport implements Sink<Object> {
   /// And reconnect with [connect] method later.
   @override
   void close([int? code = 1000, String? reason = 'Normal Closure']);
+
+  /// On message received.
+  abstract final void Function(Object data) onReceived;
+
+  /// On message sent.
+  abstract final void Function(Object data) onSent;
+
+  /// Receive error from native WebSocket client.
+  abstract final void Function(Object error, StackTrace stackTrace) onError;
+
+  /// On connection established.
+  abstract final void Function(String url) onConnected;
+
+  /// On connection closed.
+  abstract final void Function(int? code, String? reason) onDisconnected;
 }
