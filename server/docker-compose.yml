@@ -28,7 +28,7 @@ services:
         protocol: tcp
         mode: host
     volumes:
-      - ./toxiproxy.json:/config/toxiproxy.json
+      - ./toxiproxy.json:/config/toxiproxy.json:ro
     depends_on:
       - server
     #environment:
