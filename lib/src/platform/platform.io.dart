@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:developer';
-import 'dart:io' as io show WebSocket, SocketException, HttpException;
+import 'dart:io' as io;
 import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
@@ -102,6 +102,11 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
       disconnect(1006, error.message);
       onError(exception, stackTrace);
       Error.throwWithStackTrace(exception, stackTrace);
+    } on io.WebSocketException catch (error, stackTrace) {
+      debugger(when: $kDebugWS);
+      disconnect(1006, error.message);
+      onError(error, stackTrace);
+      rethrow;
     } on Object catch (error, stackTrace) {
       debugger(when: $kDebugWS);
       disconnect(1006, 'Connection failed.');

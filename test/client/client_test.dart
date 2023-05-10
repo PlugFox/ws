@@ -3,7 +3,7 @@ import 'package:ws/ws.dart';
 
 void main() {
   group('WebSocketClient', () {
-    const String url = 'ws://localhost:9090/connect';
+    const String url = 'wss://echo.plugfox.dev:443/connect';
 
     /* test('connect throws ArgumentError for invalid url', () {
       final client = WebSocketClient();
