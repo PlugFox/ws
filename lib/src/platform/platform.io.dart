@@ -67,7 +67,7 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
   @override
   Future<void> connect(String url) async {
     try {
-      disconnect(1001, 'Reconnecting.');
+      disconnect(1001, 'RECONNECTING');
       _communication = await io.WebSocket.connect(url);
       _$closeCode = null;
       _$closeReason = null;
@@ -77,11 +77,11 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
           onReceived(data);
         },
         onError: onError,
-        onDone: () => disconnect(1000, 'Subscription closed.'),
+        onDone: () => disconnect(1000, 'SUBSCRIPTION_CLOSED'),
         cancelOnError: false,
       );
       if (!readyState.isOpen) {
-        disconnect(1001, 'Is not open after connect.');
+        disconnect(1001, 'IS_NOT_OPEN_AFTER_CONNECT');
         assert(
           false,
           'Invalid readyState code after connect: $readyState',
@@ -92,24 +92,24 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
       // That error is only for I/O environment.
       final exception = WSSocketException(error.message);
       debugger(when: $kDebugWS);
-      disconnect(1006, error.message);
+      disconnect(1006, 'CONNECTION_FAILED');
       onError(exception, stackTrace);
       Error.throwWithStackTrace(exception, stackTrace);
     } on io.HttpException catch (error, stackTrace) {
       // That error is only for I/O environment.
       final exception = WSHttpException(error.message);
       debugger(when: $kDebugWS);
-      disconnect(1006, error.message);
+      disconnect(1006, 'CONNECTION_FAILED');
       onError(exception, stackTrace);
       Error.throwWithStackTrace(exception, stackTrace);
     } on io.WebSocketException catch (error, stackTrace) {
       debugger(when: $kDebugWS);
-      disconnect(1006, error.message);
+      disconnect(1006, 'CONNECTION_FAILED');
       onError(error, stackTrace);
       rethrow;
     } on Object catch (error, stackTrace) {
       debugger(when: $kDebugWS);
-      disconnect(1006, 'Connection failed.');
+      disconnect(1006, 'CONNECTION_FAILED');
       onError(error, stackTrace);
       rethrow;
     }
@@ -136,6 +136,7 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
       // TODO(plugfox): find out reason for error and map it to a WSException
       debugger(when: $kDebugWS);
       onError(error, stackTrace);
+      // TODO(plugfox): maybe disconnect at every error?
       rethrow;
     }
   }

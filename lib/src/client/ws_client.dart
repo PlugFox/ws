@@ -27,6 +27,10 @@ abstract base class _WebSocketClientBase implements IWebSocketClient {
   /// {@nodoc}
   late final IWebSocketPlatformTransport _transport;
 
+  /// Last URL used to connect.
+  /// {@nodoc}
+  String? _lastUrl;
+
   @override
   @nonVirtual
   Stream<Object> get stream => _controller.stream;
@@ -37,13 +41,16 @@ abstract base class _WebSocketClientBase implements IWebSocketClient {
 
   @override
   @mustCallSuper
-  Future<void> connect(String url) => _transport.connect(url);
+  Future<void> connect(String url) {
+    _lastUrl = url;
+    return _transport.connect(url);
+  }
 
   @override
   @mustCallSuper
   void disconnect([int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
     _setState(
-      WebSocketClientState.closing(
+      (_) => WebSocketClientState.closing(
         closeCode: code,
         closeReason: reason,
       ),
@@ -114,7 +121,7 @@ abstract base class _WebSocketClientBase implements IWebSocketClient {
   void _$onConnected(String url) {
     assert(url.isNotEmpty, 'URL cannot be empty.');
     assert(!_controller.isClosed, 'Controller already closed.');
-    _setState(WebSocketClientState.open(url: url));
+    _setState((_) => WebSocketClientState.open(url: url));
   }
 
   /// On connection closed.
@@ -122,7 +129,7 @@ abstract base class _WebSocketClientBase implements IWebSocketClient {
   @nonVirtual
   void _$onDisconnected(int? code, String? reason) {
     _setState(
-      WebSocketClientState.closed(
+      (_) => WebSocketClientState.closed(
         closeCode: code,
         closeReason: reason,
       ),
@@ -131,7 +138,7 @@ abstract base class _WebSocketClientBase implements IWebSocketClient {
 
   /// Set client state.
   /// {@nodoc}
-  void _setState(WebSocketClientState state);
+  void _setState(WebSocketClientState Function(WebSocketClientState state) fn);
 }
 
 /// {@template ws_client}
@@ -139,13 +146,26 @@ abstract base class _WebSocketClientBase implements IWebSocketClient {
 /// {@endtemplate}
 /// {@category Client}
 final class WebSocketClient extends _WebSocketClientBase
-    with _WebSocketClientStateController {
+    with _WebSocketClientStateController, _WebSocketClientReconnection {
   /// {@macro ws_client}
   WebSocketClient();
 
   /// {@macro ws_client}
   factory WebSocketClient.connect(String url) =>
       WebSocketClient()..connect(url);
+
+  @override
+  Future<void> connect(String url) {
+    _$enableReconnection();
+    return super.connect(url);
+  }
+
+  @override
+  @mustCallSuper
+  void disconnect([int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
+    _$disableReconnection();
+    super.disconnect(code, reason);
+  }
 }
 
 base mixin _WebSocketClientStateController on _WebSocketClientBase {
@@ -165,17 +185,45 @@ base mixin _WebSocketClientStateController on _WebSocketClientBase {
       _stateController.stream;
 
   @override
-  void _setState(WebSocketClientState state) {
+  void _setState(WebSocketClientState Function(WebSocketClientState state) fn) {
     if (_stateController.isClosed) {
       assert(false, 'Cannot receive data to a closed stream controller.');
-    } else {
-      _stateController.add(_state = state);
+      return;
     }
+    _stateController.add(_state = fn(state));
   }
 
   @override
   void close([int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
     super.close(code, reason);
     _stateController.close();
+  }
+}
+
+base mixin _WebSocketClientReconnection on _WebSocketClientBase {
+  /// Reconnection timer.
+  /// {@nodoc}
+  Timer? _reconnectionTimer;
+
+  /// Enable reconnection after manual/interactive connection.
+  /// {@nodoc}
+  void _$enableReconnection() {
+    _reconnectionTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (timer) {
+        if (!_transport.readyState.isClosed) {
+          return;
+        } else if (_lastUrl case String url) {
+          connect(url).ignore();
+        }
+      },
+    );
+  }
+
+  /// Disable reconnection after manual/interactive disconnection or close.
+  /// {@nodoc}
+  void _$disableReconnection() {
+    _reconnectionTimer?.cancel();
+    _reconnectionTimer = null;
   }
 }

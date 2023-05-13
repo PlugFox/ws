@@ -79,7 +79,7 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
   @override
   Future<void> connect(String url) async {
     try {
-      disconnect(1001, 'Reconnecting.');
+      disconnect(1001, 'RECONNECTING');
       _communication = html.WebSocket(url);
       _$closeCode = null;
       _$closeReason = null;
@@ -110,7 +110,7 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
         cancelOnError: false,
       );
       if (!readyState.isOpen) {
-        disconnect(1001, 'Is not open after connect.');
+        disconnect(1001, 'IS_NOT_OPEN_AFTER_CONNECT');
         assert(
           false,
           'Invalid readyState code after connect: $readyState',
@@ -119,7 +119,7 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
     } on Object catch (error, stackTrace) {
       // TODO(plugfox): find out reason for error and map it to a WSException
       debugger(when: $kDebugWS);
-      disconnect(1006, 'Connection failed.');
+      disconnect(1006, 'CONNECTION_FAILED');
       onError(error, stackTrace);
       rethrow;
     }
@@ -147,6 +147,7 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
       // TODO(plugfox): find out reason for error and map it to a WSException
       debugger(when: $kDebugWS);
       onError(error, stackTrace);
+      // TODO(plugfox): maybe disconnect at every error?
       rethrow;
     }
   }
