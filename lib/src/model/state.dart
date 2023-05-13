@@ -1,21 +1,4 @@
-/// WebSocket client state.
-/// {@category Client}
-/// {@category Entity}
-
-/// Returns the current state of the connection.
-/// 0	: CONNECTING - Socket has been created. The connection is not yet open.
-/// 1	: OPEN       - The connection is open and ready to communicate.
-/// 2	: CLOSING    - The connection is in the process of closing.
-/// 3	: CLOSED     - The connection is closed or couldn't be opened.
-//WebSocketReadyState get readyState;
-
-/// The close code set when the WebSocket connection is closed.
-/// If there is no close code available this property will be null.
-//int? get closeCode;
-
-/// The close reason set when the WebSocket connection is closed.
-/// If there is no close reason available this property will be null.
-//String? get closeReason;
+import 'package:ws/src/model/web_socket_ready_state.dart';
 
 /// Whether the stream controller is permanently closed.
 ///
@@ -28,3 +11,117 @@
 
 /// A future which is completed when the stream controller is done.
 //Future<void> get done;
+
+/// {@template web_socket_client_state}
+/// WebSocket client state.
+///
+/// {@category Client}
+/// {@category Entity}
+/// {@endtemplate}
+sealed class WebSocketClientState {
+  /// {@macro web_socket_client_state}
+  const WebSocketClientState();
+
+  /// {@macro web_socket_client_state}
+  const factory WebSocketClientState.connecting() =
+      WebSocketClientState$Connecting;
+
+  /// {@macro web_socket_client_state}
+  const factory WebSocketClientState.open({
+    required String url,
+  }) = WebSocketClientState$Open;
+
+  /// {@macro web_socket_client_state}
+  const factory WebSocketClientState.closing({
+    required int? closeCode,
+    required String? closeReason,
+  }) = WebSocketClientState$Closing;
+
+  /// {@macro web_socket_client_state}
+  const factory WebSocketClientState.closed({
+    required int? closeCode,
+    required String? closeReason,
+  }) = WebSocketClientState$Closed;
+
+  /// Returns the current state of the connection.
+  /// 0	: CONNECTING - Socket has been created. The connection is not yet open.
+  /// 1	: OPEN       - The connection is open and ready to communicate.
+  /// 2	: CLOSING    - The connection is in the process of closing.
+  /// 3	: CLOSED     - The connection is closed or couldn't be opened.
+  abstract final WebSocketReadyState readyState;
+}
+
+/// {@macro web_socket_client_state}
+final class WebSocketClientState$Connecting extends WebSocketClientState {
+  /// {@macro web_socket_client_state}
+  const WebSocketClientState$Connecting();
+
+  @override
+  WebSocketReadyState get readyState => WebSocketReadyState.connecting;
+
+  @override
+  String toString() => 'WebSocketClientState.connecting';
+}
+
+/// {@macro web_socket_client_state}
+final class WebSocketClientState$Open extends WebSocketClientState {
+  /// {@macro web_socket_client_state}
+  const WebSocketClientState$Open({
+    required this.url,
+  });
+
+  @override
+  WebSocketReadyState get readyState => WebSocketReadyState.open;
+
+  /// The URL connected to.
+  final String url;
+
+  @override
+  String toString() => 'WebSocketClientState.open';
+}
+
+/// {@macro web_socket_client_state}
+final class WebSocketClientState$Closing extends WebSocketClientState {
+  /// {@macro web_socket_client_state}
+  const WebSocketClientState$Closing({
+    required this.closeCode,
+    required this.closeReason,
+  });
+
+  @override
+  WebSocketReadyState get readyState => WebSocketReadyState.closing;
+
+  /// The close code set when the WebSocket connection is closed.
+  /// If there is no close code available this property will be null.
+  final int? closeCode;
+
+  /// The close reason set when the WebSocket connection is closed.
+  /// If there is no close reason available this property will be null.
+  final String? closeReason;
+
+  @override
+  String toString() => 'WebSocketClientState.closing';
+}
+
+/// {@macro web_socket_client_state}
+final class WebSocketClientState$Closed extends WebSocketClientState {
+  /// {@macro web_socket_client_state}
+  const WebSocketClientState$Closed({
+    required this.closeCode,
+    required this.closeReason,
+  });
+
+  @override
+  WebSocketReadyState get readyState => WebSocketReadyState.closed;
+
+  /// The close code set when the WebSocket connection is closed.
+  /// If there is no close code available this property will be null.
+  final int? closeCode;
+
+  /// The close reason set when the WebSocket connection is closed.
+  /// If there is no close reason available this property will be null.
+  final String? closeReason;
+
+  @override
+  String toString() => 'WebSocketClientState.closed';
+}

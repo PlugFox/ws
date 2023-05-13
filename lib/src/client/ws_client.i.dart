@@ -1,9 +1,15 @@
 import 'dart:async';
 
+import 'package:ws/src/model/state.dart';
+
 /// WebSocket client interface.
 /// {@category Client}
 abstract interface class IWebSocketClient implements Sink<Object> {
-  // abstract final state;
+  /// The current state of the WebSocket connection.
+  WebSocketClientState get state;
+
+  /// Stream of state changes for the WebSocket connection.
+  abstract final Stream<WebSocketClientState> stateChanges;
 
   /// Stream of message events handled by this WebSocket.
   abstract final Stream<Object> stream;
@@ -19,7 +25,7 @@ abstract interface class IWebSocketClient implements Sink<Object> {
   /// `No Status Rcvd (1005)` code with no reason,
   /// indicates that no status code was provided even though one was expected.
   /// https://developer.mozilla.org/en-US/docs/Web/API/CloseEvent/code
-  void disconnect([int? code, String? reason]);
+  void disconnect([int? code = 1000, String? reason = 'NORMAL_CLOSURE']);
 
   /// Sends data on the WebSocket connection.
   /// The data in data must be either a String, or a List<int> holding bytes.
@@ -32,5 +38,5 @@ abstract interface class IWebSocketClient implements Sink<Object> {
   /// Use [disconnect] to temporarily close the connection.
   /// And reconnect with [connect] method later.
   @override
-  void close([int? code = 1000, String? reason = 'Normal Closure']);
+  void close([int? code = 1000, String? reason = 'NORMAL_CLOSURE']);
 }

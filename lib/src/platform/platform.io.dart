@@ -146,6 +146,7 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
     _$closeReason = reason;
     _dataBindSubscription?.cancel().ignore();
     Future<void>.sync(() => _communication?.close(code, reason)).ignore();
+    onDisconnected(code, reason);
     _communication = null;
     assert(
       readyState == WebSocketReadyState.closed,
@@ -154,7 +155,7 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
   }
 
   @override
-  void close([int? code = 1000, String? reason = 'Normal Closure']) {
+  void close([int? code, String? reason]) {
     disconnect(code, reason);
     super.close(code, reason);
   }

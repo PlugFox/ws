@@ -53,7 +53,7 @@ abstract interface class IWebSocketPlatformTransport implements Sink<Object> {
   /// Use [disconnect] to temporarily close the connection.
   /// And reconnect with [connect] method later.
   @override
-  void close([int? code = 1000, String? reason = 'Normal Closure']);
+  void close([int? code, String? reason]);
 
   /// On message received.
   abstract final void Function(Object data) onReceived;

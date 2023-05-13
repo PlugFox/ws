@@ -168,7 +168,7 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
   }
 
   @override
-  void close([int? code = 1000, String? reason = 'Normal Closure']) {
+  void close([int? code = 1000, String? reason]) {
     disconnect(code, reason);
     super.close(code, reason);
   }
