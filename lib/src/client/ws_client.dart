@@ -146,7 +146,7 @@ abstract base class _WebSocketClientBase implements IWebSocketClient {
 /// {@endtemplate}
 /// {@category Client}
 final class WebSocketClient extends _WebSocketClientBase
-    with _WebSocketClientStateController, _WebSocketClientReconnection {
+    with _WebSocketClientStateController, _WebSocketClientHealthCheck {
   /// {@macro ws_client}
   WebSocketClient();
 
@@ -200,7 +200,7 @@ base mixin _WebSocketClientStateController on _WebSocketClientBase {
   }
 }
 
-base mixin _WebSocketClientReconnection on _WebSocketClientBase {
+base mixin _WebSocketClientHealthCheck on _WebSocketClientBase {
   /// Reconnection timer.
   /// {@nodoc}
   Timer? _reconnectionTimer;
