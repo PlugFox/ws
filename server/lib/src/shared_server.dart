@@ -64,19 +64,15 @@ class SharedServer {
           switch (message) {
             case SendPort sendPort:
               sendPortCompleter.complete(sendPort);
-              break;
             case 0:
               // Isolate is alive
               isAlive = true;
-              break;
             case 1:
               // Isolate is dead
               isAlive = false;
               close();
-              break;
             default:
               controller.add(message);
-              break;
           }
         },
         cancelOnError: false,
@@ -145,14 +141,11 @@ class SharedServer {
         receivePort.listen((Object? message) {
           switch (message) {
             case 0:
-              // Isolate is alive
-              break;
+            // Isolate is alive
             case 2:
               // We should close the server
               close();
-              break;
             default:
-              break;
           }
         });
         final handler = Pipeline()

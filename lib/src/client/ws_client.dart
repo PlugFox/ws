@@ -86,30 +86,23 @@ class WebSocketClient implements IWebSocketClient {
       switch (error) {
         case WSException e:
           error = e;
-          break;
         case String e:
           error = WSUnknownException(e);
-          break;
         case StateError e:
           debugger(when: $kDebugWS);
           error = WSUnknownException(e.message);
-          break;
         case UnsupportedError e:
           debugger(when: $kDebugWS);
           error = WSUnsupportedException(e.message ?? 'Unsupported exception.');
-          break;
         case Exception e:
           debugger(when: $kDebugWS);
           error = WSUnknownException(e.toString());
-          break;
         case Error e:
           debugger(when: $kDebugWS);
           error = WSUnknownException(e.toString());
-          break;
         case Object:
           debugger(when: $kDebugWS);
           error = WSUnknownException(error.toString());
-          break;
       }
       _controller.addError(error, stackTrace);
     }

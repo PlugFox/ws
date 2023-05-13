@@ -132,22 +132,16 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
       switch (data) {
         case String text:
           _communication?.sendString(text);
-          break;
         case TypedData td:
           _communication?.sendTypedData(td);
-          break;
         case html.Blob blob:
           _communication?.sendBlob(blob);
-          break;
         case ByteBuffer bb:
           _communication?.sendByteBuffer(bb);
-          break;
         case List<int> bytes:
           _communication?.send(bytes);
-          break;
         default:
           assert(false, 'Invalid data type: ${data.runtimeType}');
-          break;
       }
     } on Object catch (error, stackTrace) {
       // TODO(plugfox): find out reason for error and map it to a WSException

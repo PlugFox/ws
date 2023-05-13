@@ -8,7 +8,7 @@ repository: https://github.com/plugfox/ws
 issue_tracker: https://github.com/plugfox/ws/issues
 
 environment:
-  sdk: '>=3.0.0-417.3.beta <4.0.0'
+  sdk: '>=3.0.0 <4.0.0'
 
 dependencies:
   meta: ^1.9.1
