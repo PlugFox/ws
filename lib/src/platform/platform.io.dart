@@ -117,7 +117,7 @@ base mixin _WebSocketPlatformTransport$IO$Mixin
 
   @override
   FutureOr<void> add(Object data) {
-    if (!readyState.isOpen) throw WSNotConnected('Not connected.');
+    if (!readyState.isOpen) throw const WSNotConnected('Not connected.');
 
     try {
       switch (data) {
