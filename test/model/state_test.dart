@@ -46,5 +46,48 @@ void main() {
               closeCode: 1000, closeReason: 'test')));
       expect(state.toString(), equals('WebSocketClientState.closed'));
     });
+
+    test(r'WebSocketClientState$Connecting hashCode and ==', () {
+      const state1 = WebSocketClientState$Connecting();
+      const state2 = WebSocketClientState$Connecting();
+      expect(state1.hashCode, equals(state2.hashCode));
+      expect(state1, equals(state2));
+    });
+
+    test(r'WebSocketClientState$Open hashCode and ==', () {
+      const state1 = WebSocketClientState$Open(url: 'ws://localhost');
+      const state2 = WebSocketClientState$Open(url: 'ws://localhost');
+      const state3 = WebSocketClientState$Open(url: 'ws://localhost:8080');
+      expect(state1.hashCode, equals(state2.hashCode));
+      expect(state1, equals(state2));
+      expect(state1.hashCode, isNot(equals(state3.hashCode)));
+      expect(state1, isNot(equals(state3)));
+    });
+
+    test(r'WebSocketClientState$Closing hashCode and ==', () {
+      const state1 = WebSocketClientState$Closing(
+          closeCode: 1000, closeReason: 'Normal closure');
+      const state2 = WebSocketClientState$Closing(
+          closeCode: 1000, closeReason: 'Normal closure');
+      const state3 = WebSocketClientState$Closing(
+          closeCode: 1001, closeReason: 'Going away');
+      expect(state1.hashCode, equals(state2.hashCode));
+      expect(state1, equals(state2));
+      expect(state1.hashCode, isNot(equals(state3.hashCode)));
+      expect(state1, isNot(equals(state3)));
+    });
+
+    test(r'WebSocketClientState$Closed hashCode and ==', () {
+      const state1 = WebSocketClientState$Closed(
+          closeCode: 1000, closeReason: 'Normal closure');
+      const state2 = WebSocketClientState$Closed(
+          closeCode: 1000, closeReason: 'Normal closure');
+      const state3 = WebSocketClientState$Closed(
+          closeCode: 1001, closeReason: 'Going away');
+      expect(state1.hashCode, equals(state2.hashCode));
+      expect(state1, equals(state2));
+      expect(state1.hashCode, isNot(equals(state3.hashCode)));
+      expect(state1, isNot(equals(state3)));
+    });
   });
 }
