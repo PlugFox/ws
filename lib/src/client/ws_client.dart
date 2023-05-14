@@ -97,28 +97,30 @@ abstract base class _WebSocketClientBase implements IWebSocketClient {
     if (_controller.isClosed) {
       assert(false, 'Cannot receive error to a closed stream controller.');
     } else {
+      // ignore: unused_local_variable
+      final WSException err;
       switch (error) {
         case WSException e:
-          error = e;
+          err = e;
         case String e:
-          error = WSUnknownException(e);
+          err = WSUnknownException(e);
         case StateError e:
           debugger(when: $kDebugWS);
-          error = WSUnknownException(e.message);
+          err = WSUnknownException(e.message);
         case UnsupportedError e:
           debugger(when: $kDebugWS);
-          error = WSUnsupportedException(e.message ?? 'Unsupported exception.');
+          err = WSUnsupportedException(e.message ?? 'Unsupported exception.');
         case Exception e:
           debugger(when: $kDebugWS);
-          error = WSUnknownException(e.toString());
+          err = WSUnknownException(e.toString());
         case Error e:
           debugger(when: $kDebugWS);
-          error = WSUnknownException(e.toString());
+          err = WSUnknownException(e.toString());
         case Object:
           debugger(when: $kDebugWS);
-          error = WSUnknownException(error.toString());
+          err = WSUnknownException(error.toString());
       }
-      //_controller.addError(error, stackTrace);
+      //_controller.addError(err, stackTrace);
     }
   }
 

@@ -1,3 +1,4 @@
+import 'package:meta/meta.dart';
 import 'package:ws/src/model/web_socket_ready_state.dart';
 
 /// Whether the stream controller is permanently closed.
@@ -18,6 +19,7 @@ import 'package:ws/src/model/web_socket_ready_state.dart';
 /// {@category Client}
 /// {@category Entity}
 /// {@endtemplate}
+@immutable
 sealed class WebSocketClientState {
   /// {@macro web_socket_client_state}
   const WebSocketClientState();

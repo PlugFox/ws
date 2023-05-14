@@ -8,7 +8,7 @@ void main() {
   group(
     'WebSocketClient',
     () {
-      const String url = 'wss://echo.plugfox.dev:443/connect';
+      const url = 'wss://echo.plugfox.dev:443/connect';
 
       late IWebSocketClient client;
 
@@ -23,7 +23,6 @@ void main() {
       });
 
       test('connect', () async {
-        final client = WebSocketClient();
         final connection = expectLater(client.connect(url), completes);
         await connection;
         client.add('ping');
@@ -57,7 +56,7 @@ void main() {
         const message = 'Hello, World!';
         client.add(message);
 
-        await for (var received in client.stream) {
+        await for (final received in client.stream) {
           expect(received, equals(message));
           break;
         }
@@ -68,7 +67,7 @@ void main() {
         final message = utf8.encode('Hello, World!');
         client.add(message);
 
-        await for (var received in client.stream) {
+        await for (final received in client.stream) {
           expect(received, equals(message));
           break;
         }
@@ -88,7 +87,7 @@ void main() {
 
       test('reconnects if the connection is interrupted', () async {
         await client.connect(url);
-        expect(client.state, equals(WebSocketClientState.open(url: url)));
+        expect(client.state, equals(const WebSocketClientState.open(url: url)));
         client.add('close');
         await expectLater(
           client.stateChanges
@@ -110,7 +109,7 @@ void main() {
               .timeout(const Duration(seconds: 2)),
           completes,
         );
-        expect(client.state, equals(WebSocketClientState.open(url: url)));
+        expect(client.state, equals(const WebSocketClientState.open(url: url)));
       });
 
       // Test that messages can be sent again after reconnecting
@@ -237,11 +236,11 @@ void main() {
         client.add('close'); // Simulate server closing connection.
         await Future<void>.delayed(const Duration(seconds: 3));
 
-        final anotherUrl = url;
+        const anotherUrl = url;
         await client.connect(anotherUrl);
         expect(
           client.state,
-          equals(WebSocketClientState.open(url: anotherUrl)),
+          equals(const WebSocketClientState.open(url: anotherUrl)),
         );
       });
 
@@ -258,18 +257,18 @@ void main() {
             completion(equals(message)),
           );
           stopwatch.stop();
-          expect(stopwatch.elapsed, lessThan(Duration(seconds: 3)));
+          expect(stopwatch.elapsed, lessThan(const Duration(seconds: 3)));
         } finally {
           stopwatch.stop();
         }
       });
     },
-    timeout: Timeout(Duration(seconds: 10)),
+    timeout: const Timeout(Duration(seconds: 10)),
     onPlatform: <String, Object?>{
       'browser': <Object?>[
-        Skip('This test is currently failing on Browser.'),
+        const Skip('This test is currently failing on Browser.'),
         // They'll be slow on browsers once it works on them.
-        Timeout.factor(2),
+        const Timeout.factor(2),
       ],
     },
   );

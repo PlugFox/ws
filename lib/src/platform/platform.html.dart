@@ -29,7 +29,7 @@ IWebSocketPlatformTransport $getWebSocketTransport({
             onConnected: onConnected,
             onDisconnected: onDisconnected,
           )
-        : throw WSUnsupportedException(
+        : throw const WSUnsupportedException(
             'Cannot create a WebSocket because it is not supported.');
 
 /// WebSocket platform transport for HTML & JS environment.
@@ -127,7 +127,7 @@ base mixin _WebSocketPlatformTransport$HTML$Mixin
 
   @override
   FutureOr<void> add(Object data) {
-    if (!readyState.isOpen) throw WSNotConnected('Not connected.');
+    if (!readyState.isOpen) throw const WSNotConnected('Not connected.');
     try {
       switch (data) {
         case String text:
