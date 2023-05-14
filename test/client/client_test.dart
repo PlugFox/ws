@@ -253,10 +253,11 @@ void main() {
 
         final stopwatch = Stopwatch()..start();
         try {
-          final received =
-              await client.stream.first.timeout(const Duration(seconds: 3));
+          await expectLater(
+            client.stream.first.timeout(const Duration(seconds: 3)),
+            completion(equals(message)),
+          );
           stopwatch.stop();
-          expect(received, equals(message));
           expect(stopwatch.elapsed, lessThan(Duration(seconds: 3)));
         } finally {
           stopwatch.stop();
