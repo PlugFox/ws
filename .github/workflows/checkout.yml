@@ -68,14 +68,14 @@ jobs:
         timeout-minutes: 1
         run: dart analyze --fatal-infos --fatal-warnings lib
 
-      #- name: 🧪 Run tests
-      #  timeout-minutes: 2
-      #  run: |
-      #    dart run coverage:test_with_coverage -fb -o coverage -- \
-      #      --concurrency=6 --platform vm --coverage=./coverage --reporter=expanded test/test.dart
+      - name: 🧪 Run tests
+        timeout-minutes: 2
+        run: |
+          dart run coverage:test_with_coverage -fb -o coverage -- \
+            --concurrency=6 --platform vm --coverage=./coverage --reporter=expanded test/test.dart
 
-      #- name: 📥 Upload coverage to Codecov
-      #  timeout-minutes: 1
-      #  uses: codecov/codecov-action@v2.1.0
-      #  with:
-      #    token: ${{ secrets.CODECOV_TOKEN }} # not required for public repos
+      - name: 📥 Upload coverage to Codecov
+        timeout-minutes: 1
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }} # not required for public repos
