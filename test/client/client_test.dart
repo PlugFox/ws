@@ -5,6 +5,29 @@ import 'package:ws/interface.dart';
 import 'package:ws/ws.dart';
 
 void main() {
+  group('WebSocketClient init', () {
+    const url = 'wss://echo.plugfox.dev:443/connect';
+
+    late IWebSocketClient client;
+
+    setUp(() {
+      client = WebSocketClient(reconnectTimeout: const Duration(seconds: 1));
+    });
+
+    tearDown(() {
+      client.close();
+    });
+
+    test('connect & close', () async {
+      expect(client.state, isA<WebSocketClientState$Closed>());
+      await expectLater(client.connect(url), completes);
+      expect(client.state, isA<WebSocketClientState$Open>());
+      client.add('ping');
+      await expectLater(client.stream.first, completion(equals('pong')));
+      expect(() => client.close(), returnsNormally);
+    });
+  });
+
   group(
     'WebSocketClient',
     () {
@@ -12,35 +35,22 @@ void main() {
 
       late IWebSocketClient client;
 
-      setUp(() {
-        //print('setUp');
+      setUpAll(() {
         client = WebSocketClient(reconnectTimeout: const Duration(seconds: 1));
       });
 
-      tearDown(() {
+      tearDownAll(() {
         client.close();
-        //print('tearDown');
       });
 
-      test('connect', () async {
-        final connection = expectLater(client.connect(url), completes);
-        await connection;
-        client.add('ping');
-        await expectLater(client.stream.first, completion(equals('pong')));
-        expect(() => client.disconnect(), returnsNormally);
-      });
-
-      test('initially is in close state', () {
-        expect(client.state, isA<WebSocketClientState$Closed>());
-      });
-
-      test('can connect to a websocket server', () async {
-        await client.connect(url);
-        expect(client.state, isA<WebSocketClientState$Open>());
+      setUp(() async {
+        if (!client.state.readyState.isOpen) {
+          await client.connect(url);
+        }
       });
 
       test('can disconnect from a websocket server', () async {
-        await client.connect(url);
+        expect(client.state, equals(const WebSocketClientState.open(url: url)));
         client.disconnect();
         expect(
           client.state,
@@ -52,10 +62,8 @@ void main() {
       });
 
       test('can send and receive a string message', () async {
-        await client.connect(url);
         const message = 'Hello, World!';
         client.add(message);
-
         await for (final received in client.stream) {
           expect(received, equals(message));
           break;
@@ -63,30 +71,15 @@ void main() {
       });
 
       test('can send and receive a byte message', () async {
-        await client.connect(url);
         final message = utf8.encode('Hello, World!');
         client.add(message);
-
-        await for (final received in client.stream) {
-          expect(received, equals(message));
-          break;
-        }
-      });
-
-      test('can close the websocket connection', () async {
-        await client.connect(url);
-        client.close();
-        expect(
-          client.state,
-          anyOf(
-            isA<WebSocketClientState$Closing>(),
-            isA<WebSocketClientState$Closed>(),
-          ),
+        await expectLater(
+          client.stream.first.timeout(const Duration(seconds: 5)),
+          completion(equals(message)),
         );
       });
 
       test('reconnects if the connection is interrupted', () async {
-        await client.connect(url);
         expect(client.state, equals(const WebSocketClientState.open(url: url)));
         client.add('close');
         await expectLater(
@@ -114,9 +107,7 @@ void main() {
 
       // Test that messages can be sent again after reconnecting
       test('can send messages after reconnecting', () async {
-        await client.connect(url).timeout(const Duration(seconds: 5));
         client.add('close'); // Simulate connection interruption.
-
         // Wait for the client to have time to attempt to reconnect.
         await expectLater(
           client.stateChanges
@@ -125,12 +116,9 @@ void main() {
           completes,
           reason: 'Client did not reconnect in time.',
         );
-
         expect(client.state.readyState.isOpen, isTrue);
-
         const message = 'Hello, again!';
         client.add(message);
-
         await expectLater(
           client.stream.first.timeout(const Duration(seconds: 5)),
           completion(equals(message)),
@@ -140,11 +128,8 @@ void main() {
 
       // Test that large messages can be sent
       test('can send large messages', () async {
-        await client.connect(url).timeout(const Duration(seconds: 5));
         final largeMessage = 'A' * 512 * 1024; // 0.5 MiB message
-
         client.add(largeMessage);
-
         await expectLater(
           client.stream.first.timeout(const Duration(seconds: 5)),
           completion(equals(largeMessage)),
@@ -157,13 +142,9 @@ void main() {
       test(
         'handles server closing connection',
         () async {
-          await client.connect(url).timeout(const Duration(seconds: 5));
-
           expect(client.state.readyState.isOpen, isTrue);
-
           // Simulate server closing connection.
           client.add('close');
-
           await expectLater(
             client.stateChanges
                 .firstWhere((state) =>
@@ -178,18 +159,15 @@ void main() {
               isA<WebSocketClientState$Closed>(),
             ),
           );
-        }, /* skip: 'This test is currently failing.' */
+        },
       );
 
       // Test that an error is thrown when trying to send
       // a message with a closed connection
       test('throws an error when trying to send with a closed connection',
           () async {
-        await client.connect(url).timeout(const Duration(seconds: 5));
-
         expect(client.state.readyState.isOpen, isTrue);
         client.add('close'); // Simulate connection closing.
-
         // Wait for the client to have time to handle the connection closing.
         await expectLater(
           client.stateChanges
@@ -198,7 +176,6 @@ void main() {
               .timeout(const Duration(seconds: 2)),
           completes,
         );
-
         await expectLater(
           Future<void>.sync(() => client.add('Hello, World!')),
           throwsA(isException),
@@ -207,7 +184,6 @@ void main() {
 
       // Test that binary data can be sent
       test('can send binary data', () async {
-        await client.connect(url).timeout(const Duration(seconds: 5));
         final binaryData =
             List<int>.generate(512, (i) => i % 256); // 0.5 KiB binary data
         client.add(binaryData);
@@ -230,12 +206,9 @@ void main() {
 
       // Test that the client can connect to different URLs
       test('can connect to different URLs', () async {
-        await client.connect(url).timeout(const Duration(seconds: 5));
         expect(client.state, isA<WebSocketClientState$Open>());
-
         client.add('close'); // Simulate server closing connection.
         await Future<void>.delayed(const Duration(seconds: 3));
-
         const anotherUrl = url;
         await client.connect(anotherUrl);
         expect(
@@ -246,10 +219,8 @@ void main() {
 
       // Test that the response time is acceptable
       test('has acceptable response time', () async {
-        await client.connect(url).timeout(const Duration(seconds: 5));
         const message = 'Hello, World!';
         client.add(message);
-
         final stopwatch = Stopwatch()..start();
         try {
           await expectLater(
