@@ -1,7 +1,6 @@
 name: ws
 description: >
-  WS is a powerful, cross-platform library designed to facilitate the implementation of WebSocket clients in various software applications.
-  This library provides a simple, high-level API, enabling developers to establish, maintain, and manage WebSocket connections efficiently.
+  WS: A compact, highly efficient WebSocket library. Easily establish, manage, and reconnect WebSocket connections in real-time apps.
 version: 0.0.3-dev.placeholder
 homepage: https://github.com/plugfox/ws
 repository: https://github.com/plugfox/ws
