@@ -60,6 +60,13 @@ final class WebSocketClientState$Connecting extends WebSocketClientState {
   WebSocketReadyState get readyState => WebSocketReadyState.connecting;
 
   @override
+  int get hashCode => readyState.code;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) || other is WebSocketClientState$Connecting;
+
+  @override
   String toString() => 'WebSocketClientState.connecting';
 }
 
@@ -75,6 +82,14 @@ final class WebSocketClientState$Open extends WebSocketClientState {
 
   /// The URL connected to.
   final String url;
+
+  @override
+  int get hashCode => readyState.code ^ url.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WebSocketClientState$Open && other.url == url;
 
   @override
   String toString() => 'WebSocketClientState.open';
@@ -100,6 +115,20 @@ final class WebSocketClientState$Closing extends WebSocketClientState {
   final String? closeReason;
 
   @override
+  int get hashCode => Object.hashAll(<int?>[
+        readyState.code,
+        closeCode,
+        closeReason?.hashCode
+      ].whereType<int>());
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WebSocketClientState$Closing &&
+          other.closeCode == closeCode &&
+          other.closeReason == closeReason;
+
+  @override
   String toString() => 'WebSocketClientState.closing';
 }
 
@@ -121,6 +150,20 @@ final class WebSocketClientState$Closed extends WebSocketClientState {
   /// The close reason set when the WebSocket connection is closed.
   /// If there is no close reason available this property will be null.
   final String? closeReason;
+
+  @override
+  int get hashCode => Object.hashAll(<int?>[
+        readyState.code,
+        closeCode,
+        closeReason?.hashCode
+      ].whereType<int>());
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WebSocketClientState$Closed &&
+          other.closeCode == closeCode &&
+          other.closeReason == closeReason;
 
   @override
   String toString() => 'WebSocketClientState.closed';

@@ -10,7 +10,9 @@ import 'package:ws/src/platform/platform.dart';
 import 'package:ws/src/util/constants.dart';
 
 abstract base class _WebSocketClientBase implements IWebSocketClient {
-  _WebSocketClientBase() : _controller = StreamController<Object>.broadcast() {
+  _WebSocketClientBase({Duration reconnectTimeout = const Duration(seconds: 5)})
+      : _reconnectTimeout = reconnectTimeout,
+        _controller = StreamController<Object>.broadcast() {
     _transport = $getWebSocketTransport(
       onReceived: _$onReceived,
       onSent: _$onSent,
@@ -19,6 +21,10 @@ abstract base class _WebSocketClientBase implements IWebSocketClient {
       onDisconnected: _$onDisconnected,
     );
   }
+
+  /// Delay between reconnection attempts.
+  /// {@nodoc}
+  final Duration _reconnectTimeout;
 
   /// Output stream of data from native WebSocket client.
   /// {@nodoc}
@@ -61,6 +67,7 @@ abstract base class _WebSocketClientBase implements IWebSocketClient {
   @override
   @mustCallSuper
   void close([int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
+    disconnect(code, reason);
     _transport.close(code, reason);
     _controller.close().ignore();
   }
@@ -111,7 +118,7 @@ abstract base class _WebSocketClientBase implements IWebSocketClient {
           debugger(when: $kDebugWS);
           error = WSUnknownException(error.toString());
       }
-      _controller.addError(error, stackTrace);
+      //_controller.addError(error, stackTrace);
     }
   }
 
@@ -148,7 +155,9 @@ abstract base class _WebSocketClientBase implements IWebSocketClient {
 final class WebSocketClient extends _WebSocketClientBase
     with _WebSocketClientStateController, _WebSocketClientHealthCheck {
   /// {@macro ws_client}
-  WebSocketClient();
+  WebSocketClient({
+    super.reconnectTimeout = const Duration(seconds: 5),
+  });
 
   /// {@macro ws_client}
   factory WebSocketClient.connect(String url) =>
@@ -187,7 +196,26 @@ base mixin _WebSocketClientStateController on _WebSocketClientBase {
   @override
   void _setState(WebSocketClientState Function(WebSocketClientState state) fn) {
     if (_stateController.isClosed) {
-      assert(false, 'Cannot receive data to a closed stream controller.');
+      if (_state is WebSocketClientState$Closed) return;
+      final state = fn(_state);
+      if (state is WebSocketClientState$Closed) {
+        _stateController.add(_state = state);
+      } else if (state is WebSocketClientState$Closing) {
+        _stateController.add(
+          _state = WebSocketClientState.closed(
+            closeCode: state.closeCode,
+            closeReason: state.closeReason,
+          ),
+        );
+      } else {
+        assert(false, 'Cannot set state to $state.');
+        _stateController.add(
+          WebSocketClientState.closed(
+            closeCode: WebSocketStatusCodes.normalClosure.code,
+            closeReason: 'UNKNOWN_STATE',
+          ),
+        );
+      }
       return;
     }
     _stateController.add(_state = fn(state));
@@ -209,7 +237,7 @@ base mixin _WebSocketClientHealthCheck on _WebSocketClientBase {
   /// {@nodoc}
   void _$enableReconnection() {
     _reconnectionTimer = Timer.periodic(
-      const Duration(seconds: 15),
+      _reconnectTimeout,
       (timer) {
         if (!_transport.readyState.isClosed) {
           return;
