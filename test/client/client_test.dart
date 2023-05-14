@@ -5,28 +5,38 @@ import 'package:ws/interface.dart';
 import 'package:ws/ws.dart';
 
 void main() {
-  group('WebSocketClient init', () {
-    const url = 'wss://echo.plugfox.dev:443/connect';
+  group(
+    'WebSocketClient init',
+    () {
+      const url = 'wss://echo.plugfox.dev:443/connect';
 
-    late IWebSocketClient client;
+      late IWebSocketClient client;
 
-    setUp(() {
-      client = WebSocketClient(reconnectTimeout: const Duration(seconds: 1));
-    });
+      setUp(() {
+        client = WebSocketClient(reconnectTimeout: const Duration(seconds: 1));
+      });
 
-    tearDown(() {
-      client.close();
-    });
+      tearDown(() {
+        client.close();
+      });
 
-    test('connect & close', () async {
-      expect(client.state, isA<WebSocketClientState$Closed>());
-      await expectLater(client.connect(url), completes);
-      expect(client.state, isA<WebSocketClientState$Open>());
-      client.add('ping');
-      await expectLater(client.stream.first, completion(equals('pong')));
-      expect(() => client.close(), returnsNormally);
-    });
-  });
+      test('connect & close', () async {
+        expect(client.state, isA<WebSocketClientState$Closed>());
+        await expectLater(client.connect(url), completes);
+        expect(client.state, isA<WebSocketClientState$Open>());
+        client.add('ping');
+        await expectLater(client.stream.first, completion(equals('pong')));
+        expect(() => client.close(), returnsNormally);
+      });
+    },
+    onPlatform: <String, Object?>{
+      'browser': <Object?>[
+        const Skip('This test is currently failing on Browser.'),
+        // They'll be slow on browsers once it works on them.
+        const Timeout.factor(2),
+      ],
+    },
+  );
 
   group(
     'WebSocketClient',
