@@ -1,4 +1,4 @@
-# WS: Cross-platform WebSocket client for Dart and Flutter
+# Cross-platform WebSocket client
 
 [![Pub](https://img.shields.io/pub/v/ws.svg)](https://pub.dev/packages/ws)
 [![Actions Status](https://github.com/PlugFox/ws/actions/workflows/checkout.yml/badge.svg)](https://github.com/PlugFox/ws/actions)
