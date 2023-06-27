@@ -6,10 +6,9 @@ import 'package:ws/ws.dart';
 void main() {
   group('WebSocketClientState tests', () {
     test(r'WebSocketClientState$Connecting properties', () {
-      final state = WebSocketClientState$Connecting();
+      final state = WebSocketClientState$Connecting(url: 'ws://test');
       expect(state.readyState, equals(WebSocketReadyState.connecting));
-      expect(state.hashCode, equals(WebSocketReadyState.connecting.code));
-      expect(state, equals(WebSocketClientState$Connecting()));
+      expect(state, equals(WebSocketClientState$Connecting(url: 'ws://test')));
       expect(state.toString(), equals('WebSocketClientState.connecting'));
     });
 
@@ -23,17 +22,17 @@ void main() {
       expect(state.toString(), equals('WebSocketClientState.open'));
     });
 
-    test(r'WebSocketClientState$Closing properties', () {
-      final state =
-          WebSocketClientState$Closing(closeCode: 1000, closeReason: 'test');
-      expect(state.readyState, equals(WebSocketReadyState.closing));
+    test(r'WebSocketClientState$Disconnecting properties', () {
+      final state = WebSocketClientState$Disconnecting(
+          closeCode: 1000, closeReason: 'test');
+      expect(state.readyState, equals(WebSocketReadyState.disconnecting));
       expect(state.closeCode, equals(1000));
       expect(state.closeReason, equals('test'));
       expect(
           state,
-          equals(WebSocketClientState$Closing(
+          equals(WebSocketClientState$Disconnecting(
               closeCode: 1000, closeReason: 'test')));
-      expect(state.toString(), equals('WebSocketClientState.closing'));
+      expect(state.toString(), equals('WebSocketClientState.disconnecting'));
     });
 
     test(r'WebSocketClientState$Closed properties', () {
@@ -50,8 +49,8 @@ void main() {
     });
 
     test(r'WebSocketClientState$Connecting hashCode and ==', () {
-      final state1 = WebSocketClientState$Connecting();
-      final state2 = WebSocketClientState$Connecting();
+      final state1 = WebSocketClientState$Connecting(url: 'ws://localhost');
+      final state2 = WebSocketClientState$Connecting(url: 'ws://localhost');
       expect(state1.hashCode, equals(state2.hashCode));
       expect(state1, equals(state2));
     });
@@ -67,11 +66,11 @@ void main() {
     });
 
     test(r'WebSocketClientState$Closing hashCode and ==', () {
-      final state1 = WebSocketClientState$Closing(
+      final state1 = WebSocketClientState$Disconnecting(
           closeCode: 1000, closeReason: 'Normal closure');
-      final state2 = WebSocketClientState$Closing(
+      final state2 = WebSocketClientState$Disconnecting(
           closeCode: 1000, closeReason: 'Normal closure');
-      final state3 = WebSocketClientState$Closing(
+      final state3 = WebSocketClientState$Disconnecting(
           closeCode: 1001, closeReason: 'Going away');
       expect(state1.hashCode, equals(state2.hashCode));
       expect(state1, equals(state2));

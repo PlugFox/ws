@@ -52,6 +52,17 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   @mustCallSuper
   FutureOr<void> connect(String url) async {
     _lastUrl = url;
+    setState((_) => WebSocketClientState.connecting(url: url));
+  }
+
+  @override
+  @mustCallSuper
+  FutureOr<void> disconnect(
+      [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
+    setState((_) => WebSocketClientState.disconnecting(
+          closeCode: code,
+          closeReason: reason,
+        ));
   }
 
   /// {@nodoc}
@@ -60,12 +71,32 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
           WebSocketClientState Function(WebSocketClientState state) change) =>
       _stateController.add(_state = change(_state));
 
+  /// {@nodoc}
+  @protected
+  void onConnected(String url) {
+    _lastUrl = url;
+    setState((_) => WebSocketClientState.open(url: url));
+  }
+
+  /// {@nodoc}
+  @protected
+  void onSent(Object data) {}
+
   /// On data received callback.
   /// {@nodoc}
   @protected
   void onReceivedData(Object? data) {
     if (data == null) return;
     _dataController.add(data);
+  }
+
+  /// {@nodoc}
+  @protected
+  void onDisconnected(int? code, String? reason) {
+    setState((_) => WebSocketClientState.closed(
+          closeCode: code,
+          closeReason: reason,
+        ));
   }
 
   /// Error callback.

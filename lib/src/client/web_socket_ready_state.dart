@@ -17,7 +17,7 @@ enum WebSocketReadyState {
   ),
 
   /// The connection is in the process of closing.
-  closing(
+  disconnecting(
     2,
     'CLOSING',
     'The connection is in the process of closing.',
@@ -42,7 +42,7 @@ enum WebSocketReadyState {
       case 1:
         return WebSocketReadyState.open;
       case 2:
-        return WebSocketReadyState.closing;
+        return WebSocketReadyState.disconnecting;
       case 3:
         return WebSocketReadyState.closed;
       default:
@@ -70,7 +70,7 @@ enum WebSocketReadyState {
   bool get isOpen => this == WebSocketReadyState.open;
 
   /// The connection is in the process of closing.
-  bool get isClosing => this == WebSocketReadyState.closing;
+  bool get isDisconnecting => this == WebSocketReadyState.disconnecting;
 
   /// The connection is closed or couldn't be opened.
   bool get isClosed => this == WebSocketReadyState.closed;

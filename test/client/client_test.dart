@@ -65,7 +65,7 @@ void main() {
         expect(
           client.state,
           anyOf(
-            isA<WebSocketClientState$Closing>(),
+            isA<WebSocketClientState$Disconnecting>(),
             isA<WebSocketClientState$Closed>(),
           ),
         );
@@ -95,14 +95,14 @@ void main() {
         await expectLater(
           client.stateChanges
               .firstWhere((state) =>
-                  state.readyState.isClosing || state.readyState.isClosed)
+                  state.readyState.isDisconnecting || state.readyState.isClosed)
               .timeout(const Duration(seconds: 1)),
           completes,
         );
         expect(
           client.state,
           anyOf(
-            isA<WebSocketClientState$Closing>(),
+            isA<WebSocketClientState$Disconnecting>(),
             isA<WebSocketClientState$Closed>(),
           ),
         );
@@ -158,14 +158,15 @@ void main() {
           await expectLater(
             client.stateChanges
                 .firstWhere((state) =>
-                    state.readyState.isClosing || state.readyState.isClosed)
+                    state.readyState.isDisconnecting ||
+                    state.readyState.isClosed)
                 .timeout(const Duration(seconds: 1)),
             completes,
           );
           expect(
             client.state,
             anyOf(
-              isA<WebSocketClientState$Closing>(),
+              isA<WebSocketClientState$Disconnecting>(),
               isA<WebSocketClientState$Closed>(),
             ),
           );
@@ -182,7 +183,7 @@ void main() {
         await expectLater(
           client.stateChanges
               .firstWhere((state) =>
-                  state.readyState.isClosing || state.readyState.isClosed)
+                  state.readyState.isDisconnecting || state.readyState.isClosed)
               .timeout(const Duration(seconds: 2)),
           completes,
         );

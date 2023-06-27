@@ -101,12 +101,13 @@ final class WebSocketClient$JS extends WebSocketClientBase {
         cancelOnError: false,
       );
       /* if (!readyState.isOpen) {
-      disconnect(1001, 'IS_NOT_OPEN_AFTER_CONNECT');
-      assert(
-        false,
-        'Invalid readyState code after connect: $readyState',
-      );
-    } */
+        disconnect(1001, 'IS_NOT_OPEN_AFTER_CONNECT');
+        assert(
+          false,
+          'Invalid readyState code after connect: $readyState',
+        );
+      } */
+      super.onConnected(url);
     } on Object catch (error, stackTrace) {
       disconnect(1006, 'CONNECTION_FAILED');
       onError(error, stackTrace);
@@ -117,11 +118,13 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   @override
   FutureOr<void> disconnect(
       [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
+    super.disconnect(code, reason);
     _errorBindSubscription?.cancel().ignore();
     _closeBindSubscription?.cancel().ignore();
     _dataBindSubscription?.cancel().ignore();
     Future<void>.sync(() => _client?.close(code, reason)).ignore();
     _client = null;
+    super.onDisconnected(code, reason);
   }
 
   @override
