@@ -206,9 +206,7 @@ void main() {
       test('handles failed connection attempts', () async {
         // Try to connect to an invalid URL.
         await expectLater(
-          client
-              .connect('wss://invalid.url')
-              .timeout(const Duration(seconds: 5)),
+          client.connect('wss://invalid.url'),
           throwsA(isException),
         );
         expect(client.state, isA<WebSocketClientState$Closed>());

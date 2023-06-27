@@ -1,5 +1,6 @@
 import 'package:meta/meta.dart';
-import 'package:ws/src/model/web_socket_ready_state.dart';
+import 'package:ws/src/client/status_codes.dart';
+import 'package:ws/src/client/web_socket_ready_state.dart';
 
 /// Whether the stream controller is permanently closed.
 ///
@@ -44,6 +45,13 @@ sealed class WebSocketClientState {
     required int? closeCode,
     required String? closeReason,
   }) = WebSocketClientState$Closed;
+
+  /// The initial state of the web socket client.
+  /// {@macro web_socket_client_state}
+  static WebSocketClientState get initial => WebSocketClientState.closed(
+        closeCode: WebSocketStatusCodes.normalClosure.code,
+        closeReason: 'INITIAL_CLOSED_STATE',
+      );
 
   /// Returns the current state of the connection.
   /// 0	: CONNECTING - Socket has been created. The connection is not yet open.
