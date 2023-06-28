@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:ws/src/client/message_stream.dart';
 import 'package:ws/src/client/state.dart';
 
 /// WebSocket client interface.
@@ -18,7 +19,8 @@ abstract interface class IWebSocketClient implements Sink<Object> {
   abstract final Stream<WebSocketClientState> stateChanges;
 
   /// Stream of message events handled by this WebSocket.
-  abstract final Stream< /* String || List<int> */ Object> stream;
+  /// The stream provides messages as they are received from the network.
+  abstract final WebSocketMessagesStream stream;
 
   /// Sends data on the WebSocket connection.
   /// The data in data must be either a String, or a List<int> holding bytes.
