@@ -8,9 +8,7 @@ void main() {
   const url = 'wss://echo.plugfox.dev:443/connect';
 
   final client = WebSocketClient.connect(url)
-    ..stream.listen((message) {
-      print('< $message');
-    })
+    ..stream.listen((message) => print('< $message'))
     ..add('Hello, ').ignore()
     ..add('world!').ignore();
 

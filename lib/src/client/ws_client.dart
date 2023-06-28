@@ -23,8 +23,10 @@ final class WebSocketClient implements IWebSocketClient {
         _client = $platformWebSocketClient(reconnectTimeout.abs());
 
   /// {@macro ws_client}
-  factory WebSocketClient.connect(String url) =>
-      WebSocketClient()..connect(url).ignore();
+  factory WebSocketClient.connect(String url,
+          {Duration reconnectTimeout = const Duration(seconds: 5)}) =>
+      WebSocketClient(reconnectTimeout: reconnectTimeout)
+        ..connect(url).ignore();
 
   final IWebSocketClient _client;
   final WebSocketEventQueue _eventQueue = WebSocketEventQueue();

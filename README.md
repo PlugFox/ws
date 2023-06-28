@@ -36,18 +36,14 @@ dependencies:
 import 'package:ws/ws.dart';
 
 void main() async {
-  const url = 'ws://localhost:1234';
+  const url = 'wss://echo.plugfox.dev:443/connect';
 
-  final client = WebSocketClient.connect(url);
+  final client = WebSocketClient.connect(url)
+    ..stream.listen((message) => print('< $message'))
+    ..add('Hello, ').ignore()
+    ..add('world!').ignore();
 
-  client.stream.listen((message) {
-    print('Received message: $message');
-  });
-
-  client.add('Hello, server!');
-
-  await Future<void>.delayed(const Duration(seconds: 10));
-  client.close();
+  Timer(const Duration(seconds: 5), client.close);
 }
 ```
 
