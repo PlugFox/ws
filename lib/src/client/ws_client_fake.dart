@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:meta/meta.dart';
+import 'package:ws/src/client/message_stream.dart';
 import 'package:ws/src/client/state.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
 
@@ -27,7 +28,8 @@ final class WebSocketClient$Fake implements IWebSocketClient {
   Stream<WebSocketClientState> get stateChanges => throw UnimplementedError();
 
   @override
-  Stream<Object> get stream => const Stream<Object>.empty();
+  WebSocketMessagesStream get stream =>
+      WebSocketMessagesStream(const Stream<Object>.empty());
 
   @override
   FutureOr<void> add(Object data) {}

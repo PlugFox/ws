@@ -33,7 +33,8 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   final StreamController<Object> _dataController;
 
   @override
-  late final Stream<Object> stream = _dataController.stream;
+  late final WebSocketMessagesStream stream =
+      WebSocketMessagesStream(_dataController.stream);
 
   /// Current ready state of the WebSocket connection.
   /// {@nodoc}

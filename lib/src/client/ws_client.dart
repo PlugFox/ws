@@ -37,7 +37,7 @@ final class WebSocketClient implements IWebSocketClient {
   final Duration reconnectTimeout;
 
   @override
-  Stream<Object> get stream => _client.stream;
+  WebSocketMessagesStream get stream => _client.stream;
 
   @override
   Stream<WebSocketClientState> get stateChanges => _client.stateChanges;
