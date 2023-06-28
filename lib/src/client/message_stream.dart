@@ -11,7 +11,7 @@ final Converter<List<int>, Map<String, Object?>> _$jsonBytesDecoder =
         const JsonDecoder().cast<String, Map<String, Object?>>());
 
 /// Stream of message events handled by this WebSocket.
-class WebSocketMessagesStream
+final class WebSocketMessagesStream
     extends StreamView< /* String || List<int> */ Object> {
   /// Stream of message events handled by this WebSocket.
   WebSocketMessagesStream(super.stream);

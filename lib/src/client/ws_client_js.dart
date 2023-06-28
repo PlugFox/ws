@@ -27,6 +27,8 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   /// {@nodoc}
   html.WebSocket? _client;
 
+  /// Blob codec for `Blob <-> List<int>` conversion.
+  /// {@nodoc}
   late final _BlobCodec _blobCodec = _BlobCodec();
 
   /// Binding to data from native WebSocket client.
@@ -163,9 +165,13 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   }
 }
 
-class _BlobCodec {
+/// {@nodoc}
+final class _BlobCodec {
+  /// {@nodoc}
   _BlobCodec();
 
+  /// {@nodoc}
+  @internal
   html.Blob write(Object data) {
     switch (data) {
       case String text:
@@ -181,6 +187,8 @@ class _BlobCodec {
     }
   }
 
+  /// {@nodoc}
+  @internal
   FutureOr<Object> read(html.Blob blob) async {
     final completer = Completer<Object>();
 
@@ -196,22 +204,6 @@ class _BlobCodec {
 
     late final html.FileReader reader;
     reader = html.FileReader()
-      /* ..onLoad.listen((_) {
-        final result = reader.result;
-        switch (result) {
-          case String text:
-            complete(text);
-            break;
-          case Uint8List bytes:
-            complete(bytes);
-            break;
-          case ByteBuffer bb:
-            complete(bb.asUint8List());
-            break;
-          default:
-            completeError('Unexpected result type: ${result.runtimeType}');
-        }
-      }) */
       ..onLoadEnd.listen((_) {
         final result = reader.result;
         switch (result) {
