@@ -69,8 +69,7 @@ final class WebSocketClient implements IWebSocketClient {
   Future<void> connect(String url) {
     if (_isClosed) return Future<void>.error(const WSClientClosed());
     return _eventQueue.push('connect', () {
-      WebSocketConnectionManager.instance
-          .startMonitoringConnection(_client, url);
+      WebSocketConnectionManager.instance.startMonitoringConnection(this, url);
       return _client.connect(url);
     });
   }
@@ -80,7 +79,7 @@ final class WebSocketClient implements IWebSocketClient {
       [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
     if (_isClosed) return Future<void>.error(const WSClientClosed());
     return _eventQueue.push('disconnect', () {
-      WebSocketConnectionManager.instance.stopMonitoringConnection(_client);
+      WebSocketConnectionManager.instance.stopMonitoringConnection(this);
       return _client.disconnect(code, reason);
     });
   }
@@ -90,7 +89,7 @@ final class WebSocketClient implements IWebSocketClient {
       [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
     _isClosed = true;
     // Stop monitoring the connection.
-    WebSocketConnectionManager.instance.stopMonitoringConnection(_client);
+    WebSocketConnectionManager.instance.stopMonitoringConnection(this);
     // Clear the event queue and prevent new events from being processed.
     // Returns when the queue is empty and no new events are being processed.
     Future<void>.sync(_eventQueue.close).ignore();
