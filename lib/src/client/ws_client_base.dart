@@ -24,6 +24,7 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   bool get isClosed => _isClosed;
   bool _isClosed = false;
 
+  /// {@nodoc}
   @protected
   final List<String>? protocols;
 

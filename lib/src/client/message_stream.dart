@@ -32,7 +32,11 @@ class WebSocketMessagesStream
       handleData: (data, sink) {
         try {
           final json = switch (data) {
-            String text => _$jsonTextDecoder.convert(text),
+            String text
+                when text.length >= 2 &&
+                    text.codeUnitAt(0) == 123 &&
+                    text.codeUnitAt(text.length - 1) == 125 =>
+              _$jsonTextDecoder.convert(text),
             List<int> bytes
                 when bytes.length >= 2 &&
                     bytes.first == 123 &&
@@ -46,7 +50,7 @@ class WebSocketMessagesStream
         }
       },
     ),
-  );
+  ).asBroadcastStream();
 
   /// Filtered stream of data of type T.
   Stream<T> whereType<T>() =>
@@ -55,5 +59,5 @@ class WebSocketMessagesStream
           T valid => sink.add(valid),
           _ => null,
         },
-      ));
+      )).asBroadcastStream();
 }

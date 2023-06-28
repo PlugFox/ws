@@ -1,3 +1,3 @@
-## 0.0.5-dev.placeholder
+## 0.0.6-dev
 
 - Placeholder proof of concept
