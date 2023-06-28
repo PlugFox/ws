@@ -1,3 +1,3 @@
-## 0.0.6-dev
+## 0.0.7-dev
 
-- Placeholder proof of concept
+- MVP version of the library
