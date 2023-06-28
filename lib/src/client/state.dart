@@ -25,22 +25,26 @@ sealed class WebSocketClientState {
   /// {@macro web_socket_client_state}
   const WebSocketClientState();
 
+  /// Connection has not yet been established.
   /// {@macro web_socket_client_state}
   const factory WebSocketClientState.connecting({
     required String url,
   }) = WebSocketClientState$Connecting;
 
+  /// Connection is open and ready to communicate.
   /// {@macro web_socket_client_state}
   const factory WebSocketClientState.open({
     required String url,
   }) = WebSocketClientState$Open;
 
+  /// Connection is in the process of closing.
   /// {@macro web_socket_client_state}
   const factory WebSocketClientState.disconnecting({
     required int? closeCode,
     required String? closeReason,
   }) = WebSocketClientState$Disconnecting;
 
+  /// Connection has been closed or couldn't be opened.
   /// {@macro web_socket_client_state}
   const factory WebSocketClientState.closed({
     required int? closeCode,
@@ -49,7 +53,7 @@ sealed class WebSocketClientState {
 
   /// The initial state of the web socket client.
   /// {@macro web_socket_client_state}
-  static WebSocketClientState get initial => WebSocketClientState.closed(
+  factory WebSocketClientState.initial() => WebSocketClientState.closed(
         closeCode: WebSocketStatusCodes.normalClosure.code,
         closeReason: 'INITIAL_CLOSED_STATE',
       );
@@ -62,6 +66,7 @@ sealed class WebSocketClientState {
   abstract final WebSocketReadyState readyState;
 }
 
+/// Connection has not yet been established.
 /// {@macro web_socket_client_state}
 final class WebSocketClientState$Connecting extends WebSocketClientState {
   /// {@macro web_socket_client_state}
@@ -84,9 +89,10 @@ final class WebSocketClientState$Connecting extends WebSocketClientState {
       other is WebSocketClientState$Connecting && other.url == url;
 
   @override
-  String toString() => 'WebSocketClientState.connecting';
+  String toString() => 'WebSocketClientState.connecting($url)';
 }
 
+/// Connection is open and ready to communicate.
 /// {@macro web_socket_client_state}
 final class WebSocketClientState$Open extends WebSocketClientState {
   /// {@macro web_socket_client_state}
@@ -109,9 +115,10 @@ final class WebSocketClientState$Open extends WebSocketClientState {
       other is WebSocketClientState$Open && other.url == url;
 
   @override
-  String toString() => 'WebSocketClientState.open';
+  String toString() => 'WebSocketClientState.open($url)';
 }
 
+/// Connection is in the process of closing.
 /// {@macro web_socket_client_state}
 final class WebSocketClientState$Disconnecting extends WebSocketClientState {
   /// {@macro web_socket_client_state}
@@ -146,9 +153,10 @@ final class WebSocketClientState$Disconnecting extends WebSocketClientState {
           other.closeReason == closeReason;
 
   @override
-  String toString() => 'WebSocketClientState.disconnecting';
+  String toString() => 'WebSocketClientState.disconnecting($closeReason)';
 }
 
+/// Connection is closed temporarily or permanently.
 /// {@macro web_socket_client_state}
 final class WebSocketClientState$Closed extends WebSocketClientState {
   /// {@macro web_socket_client_state}
@@ -183,5 +191,5 @@ final class WebSocketClientState$Closed extends WebSocketClientState {
           other.closeReason == closeReason;
 
   @override
-  String toString() => 'WebSocketClientState.closed';
+  String toString() => 'WebSocketClientState.closed($closeReason)';
 }

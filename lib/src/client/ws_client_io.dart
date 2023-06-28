@@ -40,17 +40,21 @@ final class WebSocketClient$IO extends WebSocketClientBase {
 
   @override
   FutureOr<void> add(Object data) {
-    assert(_client != null, 'WebSocket client is not connected.');
+    super.add(data);
+    final client = _client;
+    if (client == null) {
+      throw const WSClientClosed('WebSocket client is not connected.');
+    }
     try {
       switch (data) {
         case String text:
-          _client?.addUtf8Text(text.codeUnits);
+          client.addUtf8Text(text.codeUnits);
         case TypedData td:
-          _client?.add(td.buffer.asInt8List());
+          client.add(td.buffer.asInt8List());
         case ByteBuffer bb:
-          _client?.add(bb.asInt8List());
+          client.add(bb.asInt8List());
         case List<int> bytes:
-          _client?.add(bytes);
+          client.add(bytes);
         default:
           throw ArgumentError.value(data, 'data', 'Invalid data type.');
       }
@@ -65,14 +69,22 @@ final class WebSocketClient$IO extends WebSocketClientBase {
   FutureOr<void> connect(String url) async {
     try {
       super.connect(url);
-      disconnect(1001, 'RECONNECTING');
+      if (_client != null) disconnect(1001, 'RECONNECTING');
       _client = await io.WebSocket.connect(url);
-      _dataBindSubscription = _client?.listen(
-        onReceivedData,
-        onError: onError,
-        onDone: () => disconnect(1000, 'SUBSCRIPTION_CLOSED'),
-        cancelOnError: false,
-      );
+      _dataBindSubscription = _client
+          ?.asyncMap<Object?>((data) => switch (data) {
+                String text => text,
+                TypedData td => td.buffer.asInt8List(),
+                ByteBuffer bb => bb.asInt8List(),
+                List<int> bytes => bytes,
+                _ => data,
+              })
+          .listen(
+            onReceivedData,
+            onError: onError,
+            onDone: () => disconnect(1000, 'SUBSCRIPTION_CLOSED'),
+            cancelOnError: false,
+          );
       /* if (!readyState.isOpen) {
         disconnect(1001, 'IS_NOT_OPEN_AFTER_CONNECT');
         assert(
@@ -106,8 +118,8 @@ final class WebSocketClient$IO extends WebSocketClientBase {
 
   @override
   FutureOr<void> disconnect(
-      [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
-    super.disconnect(code, reason);
+      [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
+    await super.disconnect(code, reason);
     _dataBindSubscription?.cancel().ignore();
     Future<void>.sync(() => _client?.close(code, reason)).ignore();
     _client = null;
@@ -115,8 +127,9 @@ final class WebSocketClient$IO extends WebSocketClientBase {
   }
 
   @override
-  void close([int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
-    disconnect(code, reason);
+  FutureOr<void> close(
+      [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
+    await super.close(code, reason);
     _client = null;
   }
 }

@@ -1,10 +1,11 @@
 import 'dart:async';
 import 'dart:html' as html
-    show WebSocket, Blob, Event, MessageEvent, CloseEvent;
+    show WebSocket, Blob, Event, MessageEvent, CloseEvent, FileReader;
 import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
 import 'package:ws/src/client/web_socket_ready_state.dart';
+import 'package:ws/src/client/websocket_exception.dart';
 import 'package:ws/src/client/ws_client_base.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/util/logger.dart';
@@ -24,10 +25,12 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   /// {@nodoc}
   html.WebSocket? _client;
 
+  late final _BlobReader _blobReader = _BlobReader();
+
   /// Binding to data from native WebSocket client.
   /// The subscription of [_communication] to [_controller].
   /// {@nodoc}
-  StreamSubscription<html.MessageEvent>? _dataBindSubscription;
+  StreamSubscription<Object?>? _dataBindSubscription;
 
   /// Binding to error from native WebSocket client.
   /// {@nodoc}
@@ -50,19 +53,23 @@ final class WebSocketClient$JS extends WebSocketClientBase {
 
   @override
   FutureOr<void> add(Object data) {
-    assert(_client != null, 'WebSocket client is not connected.');
+    super.add(data);
+    final client = _client;
+    if (client == null) {
+      throw const WSClientClosed('WebSocket client is not connected.');
+    }
     try {
       switch (data) {
         case String text:
-          _client?.sendString(text);
+          client.sendString(text);
         case TypedData td:
-          _client?.sendTypedData(td);
+          client.sendTypedData(td);
         case html.Blob blob:
-          _client?.sendBlob(blob);
+          client.sendBlob(blob);
         case ByteBuffer bb:
-          _client?.sendByteBuffer(bb);
+          client.sendByteBuffer(bb);
         case List<int> bytes:
-          _client?.send(bytes);
+          client.send(bytes);
         default:
           throw ArgumentError.value(data, 'data', 'Invalid data type.');
       }
@@ -77,7 +84,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   FutureOr<void> connect(String url) async {
     try {
       super.connect(url);
-      disconnect(1001, 'RECONNECTING');
+      if (_client != null) disconnect(1001, 'RECONNECTING');
       _client = html.WebSocket(url);
       await _client?.onOpen.first;
       _errorBindSubscription = _client?.onError.listen(
@@ -86,15 +93,22 @@ final class WebSocketClient$JS extends WebSocketClientBase {
         onDone: disconnect,
         cancelOnError: false,
       );
-      _dataBindSubscription = _client?.onMessage.listen(
-        (event) {
-          final data = event.data;
-          onReceivedData(data);
-        },
-        onError: onError,
-        onDone: disconnect,
-        cancelOnError: false,
-      );
+      _dataBindSubscription = _client?.onMessage
+          .map<Object?>((event) => event.data)
+          .asyncMap<Object?>((data) => switch (data) {
+                String text => text,
+                TypedData td => td.buffer.asInt8List(),
+                html.Blob blob => _blobReader.read(blob),
+                ByteBuffer bb => bb.asInt8List(),
+                List<int> bytes => bytes,
+                _ => data,
+              })
+          .listen(
+            onReceivedData,
+            onError: onError,
+            onDone: disconnect,
+            cancelOnError: false,
+          );
       _closeBindSubscription = _client?.onClose.listen(
         (event) => disconnect(event.code, event.reason),
         onError: onError,
@@ -117,8 +131,8 @@ final class WebSocketClient$JS extends WebSocketClientBase {
 
   @override
   FutureOr<void> disconnect(
-      [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
-    super.disconnect(code, reason);
+      [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
+    await super.disconnect(code, reason);
     _errorBindSubscription?.cancel().ignore();
     _closeBindSubscription?.cancel().ignore();
     _dataBindSubscription?.cancel().ignore();
@@ -128,8 +142,49 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   }
 
   @override
-  void close([int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
-    disconnect(code, reason);
+  FutureOr<void> close(
+      [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
+    await super.close(code, reason);
     _client = null;
+  }
+}
+
+class _BlobReader {
+  _BlobReader();
+
+  FutureOr<Object> read(html.Blob blob) async {
+    final completer = Completer<Object>();
+
+    void complete(Object data) {
+      if (completer.isCompleted) return;
+      completer.complete(data);
+    }
+
+    void completeError(Object error, [StackTrace? stackTrace]) {
+      if (completer.isCompleted) return;
+      completer.completeError(error, stackTrace);
+    }
+
+    late final html.FileReader reader;
+    reader = html.FileReader()
+      ..onLoadEnd.listen((_) {
+        final result = reader.result;
+        switch (result) {
+          case String text:
+            complete(text);
+            break;
+          case Uint8List bytes:
+            complete(bytes);
+            break;
+          case ByteBuffer bb:
+            complete(bb.asUint8List());
+            break;
+          default:
+            completeError('Unexpected result type: ${result.runtimeType}');
+        }
+      })
+      ..onError.listen(completeError)
+      ..readAsArrayBuffer(blob);
+    return completer.future;
   }
 }

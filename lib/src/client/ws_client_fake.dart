@@ -14,11 +14,14 @@ final class WebSocketClient$Fake implements IWebSocketClient {
   /// {@nodoc}
   WebSocketClient$Fake({this.reconnectTimeout = const Duration(seconds: 5)});
 
-  /// {@nodoc}
+  @override
   final Duration reconnectTimeout;
 
   @override
-  WebSocketClientState get state => WebSocketClientState.initial;
+  bool get isClosed => true;
+
+  @override
+  WebSocketClientState get state => WebSocketClientState.initial();
 
   @override
   Stream<WebSocketClientState> get stateChanges => throw UnimplementedError();
@@ -37,5 +40,5 @@ final class WebSocketClient$Fake implements IWebSocketClient {
       [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {}
 
   @override
-  void close([int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {}
+  FutureOr<void> close([int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {}
 }

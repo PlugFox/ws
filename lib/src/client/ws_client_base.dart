@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:meta/meta.dart';
 import 'package:ws/interface.dart';
+import 'package:ws/src/util/constants.dart';
+import 'package:ws/src/util/logger.dart';
 
 /// {@nodoc}
 @internal
@@ -10,11 +12,13 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   WebSocketClientBase({this.reconnectTimeout = const Duration(seconds: 5)})
       : _dataController = StreamController<Object>.broadcast(),
         _stateController = StreamController<WebSocketClientState>.broadcast(),
-        _state = WebSocketClientState.initial;
+        _state = WebSocketClientState.initial();
 
-  /// Delay between reconnection attempts.
-  /// {@nodoc}
-  @protected
+  @override
+  bool get isClosed => _isClosed;
+  bool _isClosed = false;
+
+  @override
   final Duration reconnectTimeout;
 
   String? _lastUrl;
@@ -57,19 +61,48 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
 
   @override
   @mustCallSuper
+  FutureOr<void> add(Object data) async {
+    if ($kDebugWS) {
+      var text = data.toString();
+      text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
+      fine('> $text');
+    }
+  }
+
+  @override
+  @mustCallSuper
   FutureOr<void> disconnect(
       [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
+    if (state.readyState.isClosed) return;
     setState((_) => WebSocketClientState.disconnecting(
           closeCode: code,
           closeReason: reason,
         ));
   }
 
+  @override
+  @mustCallSuper
+  FutureOr<void> close(
+      [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
+    _isClosed = true;
+    try {
+      await disconnect(code, reason);
+    } on Object {
+      /* ignore */
+    }
+    _dataController.close().ignore();
+    _stateController.close().ignore();
+  }
+
   /// {@nodoc}
   @protected
   void setState(
-          WebSocketClientState Function(WebSocketClientState state) change) =>
-      _stateController.add(_state = change(_state));
+      WebSocketClientState Function(WebSocketClientState state) change) {
+    final newState = change(_state);
+    if (newState == _state || _stateController.isClosed) return;
+    _stateController.add(_state = newState);
+    info('WebSocketClient state changed to $newState');
+  }
 
   /// {@nodoc}
   @protected
@@ -80,14 +113,25 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
 
   /// {@nodoc}
   @protected
-  void onSent(Object data) {}
+  void onSent(Object data) {
+    if ($kDebugWS) {
+      var text = data.toString();
+      text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
+      fine('Sent: $text');
+    }
+  }
 
   /// On data received callback.
   /// {@nodoc}
   @protected
   void onReceivedData(Object? data) {
-    if (data == null) return;
+    if (data == null || _dataController.isClosed) return;
     _dataController.add(data);
+    if ($kDebugWS) {
+      var text = data.toString();
+      text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
+      fine('< $text');
+    }
   }
 
   /// {@nodoc}

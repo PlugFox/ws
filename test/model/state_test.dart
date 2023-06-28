@@ -9,7 +9,8 @@ void main() {
       final state = WebSocketClientState$Connecting(url: 'ws://test');
       expect(state.readyState, equals(WebSocketReadyState.connecting));
       expect(state, equals(WebSocketClientState$Connecting(url: 'ws://test')));
-      expect(state.toString(), equals('WebSocketClientState.connecting'));
+      expect(state.toString(),
+          equals('WebSocketClientState.connecting(ws://test)'));
     });
 
     test(r'WebSocketClientState$Open properties', () {
@@ -19,7 +20,7 @@ void main() {
       expect(state.hashCode,
           equals(WebSocketReadyState.open.code ^ state.url.hashCode));
       expect(state, equals(WebSocketClientState$Open(url: 'ws://test')));
-      expect(state.toString(), equals('WebSocketClientState.open'));
+      expect(state.toString(), equals('WebSocketClientState.open(ws://test)'));
     });
 
     test(r'WebSocketClientState$Disconnecting properties', () {
@@ -32,7 +33,8 @@ void main() {
           state,
           equals(WebSocketClientState$Disconnecting(
               closeCode: 1000, closeReason: 'test')));
-      expect(state.toString(), equals('WebSocketClientState.disconnecting'));
+      expect(
+          state.toString(), equals('WebSocketClientState.disconnecting(test)'));
     });
 
     test(r'WebSocketClientState$Closed properties', () {
@@ -45,7 +47,7 @@ void main() {
           state,
           equals(WebSocketClientState$Closed(
               closeCode: 1000, closeReason: 'test')));
-      expect(state.toString(), equals('WebSocketClientState.closed'));
+      expect(state.toString(), equals('WebSocketClientState.closed(test)'));
     });
 
     test(r'WebSocketClientState$Connecting hashCode and ==', () {
