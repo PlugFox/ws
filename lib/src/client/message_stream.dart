@@ -48,7 +48,7 @@ class WebSocketMessagesStream
     ),
   );
 
-  /// Filtered stream of JSON data.
+  /// Filtered stream of data of type T.
   Stream<T> whereType<T>() =>
       transform<T>(StreamTransformer<Object, T>.fromHandlers(
         handleData: (data, sink) => switch (data) {
