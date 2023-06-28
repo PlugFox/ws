@@ -12,14 +12,16 @@ import 'package:ws/src/util/logger.dart';
 
 /// {@nodoc}
 @internal
-IWebSocketClient $platformWebSocketClient(Duration reconnectTimeout) =>
-    WebSocketClient$IO(reconnectTimeout: reconnectTimeout);
+IWebSocketClient $platformWebSocketClient(
+        Duration reconnectTimeout, Iterable<String>? protocols) =>
+    WebSocketClient$IO(
+        reconnectTimeout: reconnectTimeout, protocols: protocols);
 
 /// {@nodoc}
 @internal
 final class WebSocketClient$IO extends WebSocketClientBase {
   /// {@nodoc}
-  WebSocketClient$IO({super.reconnectTimeout});
+  WebSocketClient$IO({super.reconnectTimeout, super.protocols});
 
   /// Native WebSocket client.
   /// {@nodoc}
@@ -71,7 +73,7 @@ final class WebSocketClient$IO extends WebSocketClientBase {
     try {
       if (_client != null) await disconnect(1001, 'RECONNECTING');
       super.connect(url);
-      _client = await io.WebSocket.connect(url);
+      _client = await io.WebSocket.connect(url, protocols: protocols);
       _dataBindSubscription = _client
           ?.asyncMap<Object?>((data) => switch (data) {
                 String text => text,

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:meta/meta.dart';
 import 'package:ws/interface.dart';
@@ -9,14 +10,22 @@ import 'package:ws/src/util/logger.dart';
 @internal
 abstract base class WebSocketClientBase implements IWebSocketClient {
   /// {@nodoc}
-  WebSocketClientBase({this.reconnectTimeout = const Duration(seconds: 5)})
+  WebSocketClientBase(
+      {this.reconnectTimeout = const Duration(seconds: 5),
+      Iterable<String>? protocols})
       : _dataController = StreamController<Object>.broadcast(),
         _stateController = StreamController<WebSocketClientState>.broadcast(),
-        _state = WebSocketClientState.initial();
+        _state = WebSocketClientState.initial(),
+        protocols = protocols != null
+            ? UnmodifiableListView(protocols.toList(growable: false))
+            : null;
 
   @override
   bool get isClosed => _isClosed;
   bool _isClosed = false;
+
+  @protected
+  final List<String>? protocols;
 
   @override
   final Duration reconnectTimeout;

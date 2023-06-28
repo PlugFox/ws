@@ -18,14 +18,17 @@ import 'package:ws/ws.dart';
 /// {@category Client}
 final class WebSocketClient implements IWebSocketClient {
   /// {@macro ws_client}
-  WebSocketClient({Duration reconnectTimeout = const Duration(seconds: 5)})
+  WebSocketClient(
+      {Duration reconnectTimeout = const Duration(seconds: 5),
+      Iterable<String>? protocols})
       : reconnectTimeout = reconnectTimeout.abs(),
-        _client = $platformWebSocketClient(reconnectTimeout.abs());
+        _client = $platformWebSocketClient(reconnectTimeout.abs(), protocols);
 
   /// {@macro ws_client}
   factory WebSocketClient.connect(String url,
-          {Duration reconnectTimeout = const Duration(seconds: 5)}) =>
-      WebSocketClient(reconnectTimeout: reconnectTimeout)
+          {Duration reconnectTimeout = const Duration(seconds: 5),
+          Iterable<String>? protocols}) =>
+      WebSocketClient(reconnectTimeout: reconnectTimeout, protocols: protocols)
         ..connect(url).ignore();
 
   final IWebSocketClient _client;

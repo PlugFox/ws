@@ -7,16 +7,24 @@ import 'package:ws/src/client/ws_client_interface.dart';
 
 /// {@nodoc}
 @internal
-IWebSocketClient $platformWebSocketClient(Duration reconnectTimeout) =>
-    WebSocketClient$Fake(reconnectTimeout: reconnectTimeout);
+IWebSocketClient $platformWebSocketClient(
+        Duration reconnectTimeout, Iterable<String>? protocols) =>
+    WebSocketClient$Fake(
+        reconnectTimeout: reconnectTimeout, protocols: protocols);
 
 /// {@nodoc}
 final class WebSocketClient$Fake implements IWebSocketClient {
   /// {@nodoc}
-  WebSocketClient$Fake({this.reconnectTimeout = const Duration(seconds: 5)});
+  WebSocketClient$Fake(
+      {this.reconnectTimeout = const Duration(seconds: 5),
+      Iterable<String>? protocols})
+      : protocols = protocols?.toList();
 
   @override
   final Duration reconnectTimeout;
+
+  /// {@nodoc}
+  final List<String>? protocols;
 
   @override
   bool get isClosed => true;
