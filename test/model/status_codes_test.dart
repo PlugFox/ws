@@ -1,5 +1,5 @@
 import 'package:test/test.dart';
-import 'package:ws/src/model/status_codes.dart';
+import 'package:ws/ws.dart';
 
 void main() {
   group('WebSocketStatusCodes tests', () {

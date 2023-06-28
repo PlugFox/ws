@@ -6,7 +6,8 @@ void main() {
     test('fromCode() returns the correct state for each code', () {
       expect(WebSocketReadyState.fromCode(0), WebSocketReadyState.connecting);
       expect(WebSocketReadyState.fromCode(1), WebSocketReadyState.open);
-      expect(WebSocketReadyState.fromCode(2), WebSocketReadyState.closing);
+      expect(
+          WebSocketReadyState.fromCode(2), WebSocketReadyState.disconnecting);
       expect(WebSocketReadyState.fromCode(3), WebSocketReadyState.closed);
     });
 

@@ -23,6 +23,7 @@
         "--file-reporter=json:.coverage/tests.json",
         "--timeout=30s",
         "--concurrency=12"
+        /* "--name=handles failed connection attempts" */
       ],
       "args": []
     },
@@ -47,6 +48,7 @@
         "--file-reporter=json:.coverage/tests.json",
         "--timeout=30s",
         "--concurrency=12"
+        /* "--name=can send binary data" */
       ],
       "args": []
     },

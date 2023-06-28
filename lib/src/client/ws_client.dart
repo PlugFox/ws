@@ -1,259 +1,86 @@
 import 'dart:async';
-import 'dart:developer';
 
-import 'package:meta/meta.dart';
-import 'package:ws/src/client/ws_client.i.dart';
-import 'package:ws/src/model/state.dart';
-import 'package:ws/src/model/status_codes.dart';
-import 'package:ws/src/model/websocket_exception.dart';
-import 'package:ws/src/platform/platform.dart';
-import 'package:ws/src/util/constants.dart';
-
-abstract base class _WebSocketClientBase implements IWebSocketClient {
-  _WebSocketClientBase({Duration reconnectTimeout = const Duration(seconds: 5)})
-      : _reconnectTimeout = reconnectTimeout,
-        _controller = StreamController<Object>.broadcast() {
-    _transport = $getWebSocketTransport(
-      onReceived: _$onReceived,
-      onSent: _$onSent,
-      onError: _$onError,
-      onConnected: _$onConnected,
-      onDisconnected: _$onDisconnected,
-    );
-  }
-
-  /// Delay between reconnection attempts.
-  /// {@nodoc}
-  final Duration _reconnectTimeout;
-
-  /// Output stream of data from native WebSocket client.
-  /// {@nodoc}
-  final StreamController<Object> _controller;
-
-  /// {@nodoc}
-  late final IWebSocketPlatformTransport _transport;
-
-  /// Last URL used to connect.
-  /// {@nodoc}
-  String? _lastUrl;
-
-  @override
-  @nonVirtual
-  Stream<Object> get stream => _controller.stream;
-
-  @override
-  @mustCallSuper
-  FutureOr<void> add(Object data) => _transport.add(data);
-
-  @override
-  @mustCallSuper
-  Future<void> connect(String url) {
-    _lastUrl = url;
-    return _transport.connect(url);
-  }
-
-  @override
-  @mustCallSuper
-  void disconnect([int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
-    _setState(
-      (_) => WebSocketClientState.closing(
-        closeCode: code,
-        closeReason: reason,
-      ),
-    );
-    _transport.disconnect(code, reason);
-  }
-
-  @override
-  @mustCallSuper
-  void close([int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
-    disconnect(code, reason);
-    _transport.close(code, reason);
-    _controller.close().ignore();
-  }
-
-  /// On message received from native WebSocket client.
-  /// {@nodoc}
-  @nonVirtual
-  void _$onReceived(Object data) {
-    if (_controller.isClosed) {
-      assert(false, 'Cannot receive data to a closed stream controller.');
-    } else {
-      _controller.add(data);
-    }
-  }
-
-  /// On message sent.
-  /// {@nodoc}
-  @nonVirtual
-  void _$onSent(Object data) {}
-
-  /// Receive error from native WebSocket client.
-  /// {@nodoc}
-  @nonVirtual
-  @pragma('vm:invisible')
-  void _$onError(Object error, StackTrace stackTrace) {
-    debugger(when: $kDebugWS);
-    if (_controller.isClosed) {
-      assert(false, 'Cannot receive error to a closed stream controller.');
-    } else {
-      // ignore: unused_local_variable
-      final WSException err;
-      switch (error) {
-        case WSException e:
-          err = e;
-        case String e:
-          err = WSUnknownException(e);
-        case StateError e:
-          debugger(when: $kDebugWS);
-          err = WSUnknownException(e.message);
-        case UnsupportedError e:
-          debugger(when: $kDebugWS);
-          err = WSUnsupportedException(e.message ?? 'Unsupported exception.');
-        case Exception e:
-          debugger(when: $kDebugWS);
-          err = WSUnknownException(e.toString());
-        case Error e:
-          debugger(when: $kDebugWS);
-          err = WSUnknownException(e.toString());
-        case Object:
-          debugger(when: $kDebugWS);
-          err = WSUnknownException(error.toString());
-      }
-      //_controller.addError(err, stackTrace);
-    }
-  }
-
-  /// On connection established.
-  /// {@nodoc}
-  @nonVirtual
-  void _$onConnected(String url) {
-    assert(url.isNotEmpty, 'URL cannot be empty.');
-    assert(!_controller.isClosed, 'Controller already closed.');
-    _setState((_) => WebSocketClientState.open(url: url));
-  }
-
-  /// On connection closed.
-  /// {@nodoc}
-  @nonVirtual
-  void _$onDisconnected(int? code, String? reason) {
-    _setState(
-      (_) => WebSocketClientState.closed(
-        closeCode: code,
-        closeReason: reason,
-      ),
-    );
-  }
-
-  /// Set client state.
-  /// {@nodoc}
-  void _setState(WebSocketClientState Function(WebSocketClientState state) fn);
-}
+import 'package:ws/src/client/ws_client_fake.dart'
+    // ignore: uri_does_not_exist
+    if (dart.library.html) 'package:ws/src/client/ws_client_js.dart'
+    // ignore: uri_does_not_exist
+    if (dart.library.io) 'package:ws/src/client/ws_client_io.dart';
+import 'package:ws/src/client/ws_client_interface.dart';
+import 'package:ws/src/connection_manager/connection_manager.dart';
+import 'package:ws/src/util/event_queue.dart';
+import 'package:ws/ws.dart';
 
 /// {@template ws_client}
 /// WebSocket client.
+/// With concurrency protection and reconnecting.
+/// Supports both web and io platforms.
 /// {@endtemplate}
 /// {@category Client}
-final class WebSocketClient extends _WebSocketClientBase
-    with _WebSocketClientStateController, _WebSocketClientHealthCheck {
+final class WebSocketClient implements IWebSocketClient {
   /// {@macro ws_client}
-  WebSocketClient({
-    super.reconnectTimeout = const Duration(seconds: 5),
-  });
+  WebSocketClient({Duration reconnectTimeout = const Duration(seconds: 5)})
+      : reconnectTimeout = reconnectTimeout.abs(),
+        _client = $platformWebSocketClient(reconnectTimeout.abs());
 
   /// {@macro ws_client}
   factory WebSocketClient.connect(String url) =>
-      WebSocketClient()..connect(url);
+      WebSocketClient()..connect(url).ignore();
+
+  final IWebSocketClient _client;
+  final WebSocketEventQueue _eventQueue = WebSocketEventQueue();
+
+  @override
+  bool get isClosed => _isClosed;
+  bool _isClosed = false;
+
+  @override
+  final Duration reconnectTimeout;
+
+  @override
+  Stream<Object> get stream => _client.stream;
+
+  @override
+  Stream<WebSocketClientState> get stateChanges => _client.stateChanges;
+
+  @override
+  WebSocketClientState get state => _client.state;
+
+  @override
+  Future<void> add(Object data) {
+    if (_isClosed) return Future<void>.error(const WSClientClosed());
+    return _eventQueue.push('add', () => _client.add(data));
+  }
 
   @override
   Future<void> connect(String url) {
-    _$enableReconnection();
-    return super.connect(url);
+    if (_isClosed) return Future<void>.error(const WSClientClosed());
+    return _eventQueue.push('connect', () {
+      WebSocketConnectionManager.instance
+          .startMonitoringConnection(_client, url);
+      return _client.connect(url);
+    });
   }
 
   @override
-  @mustCallSuper
-  void disconnect([int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
-    _$disableReconnection();
-    super.disconnect(code, reason);
-  }
-}
-
-base mixin _WebSocketClientStateController on _WebSocketClientBase {
-  final StreamController<WebSocketClientState> _stateController =
-      StreamController<WebSocketClientState>.broadcast();
-
-  WebSocketClientState _state = WebSocketClientState.closed(
-    closeCode: WebSocketStatusCodes.normalClosure.code,
-    closeReason: 'INITIAL_CLOSED_STATE',
-  );
-
-  @override
-  WebSocketClientState get state => _state;
-
-  @override
-  late final Stream<WebSocketClientState> stateChanges =
-      _stateController.stream;
-
-  @override
-  void _setState(WebSocketClientState Function(WebSocketClientState state) fn) {
-    if (_stateController.isClosed) {
-      if (_state is WebSocketClientState$Closed) return;
-      final state = fn(_state);
-      if (state is WebSocketClientState$Closed) {
-        _stateController.add(_state = state);
-      } else if (state is WebSocketClientState$Closing) {
-        _stateController.add(
-          _state = WebSocketClientState.closed(
-            closeCode: state.closeCode,
-            closeReason: state.closeReason,
-          ),
-        );
-      } else {
-        assert(false, 'Cannot set state to $state.');
-        _stateController.add(
-          WebSocketClientState.closed(
-            closeCode: WebSocketStatusCodes.normalClosure.code,
-            closeReason: 'UNKNOWN_STATE',
-          ),
-        );
-      }
-      return;
-    }
-    _stateController.add(_state = fn(state));
+  Future<void> disconnect(
+      [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
+    if (_isClosed) return Future<void>.error(const WSClientClosed());
+    return _eventQueue.push('disconnect', () {
+      WebSocketConnectionManager.instance.stopMonitoringConnection(_client);
+      return _client.disconnect(code, reason);
+    });
   }
 
   @override
-  void close([int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
-    super.close(code, reason);
-    _stateController.close();
-  }
-}
-
-base mixin _WebSocketClientHealthCheck on _WebSocketClientBase {
-  /// Reconnection timer.
-  /// {@nodoc}
-  Timer? _reconnectionTimer;
-
-  /// Enable reconnection after manual/interactive connection.
-  /// {@nodoc}
-  void _$enableReconnection() {
-    _reconnectionTimer = Timer.periodic(
-      _reconnectTimeout,
-      (timer) {
-        if (!_transport.readyState.isClosed) {
-          return;
-        } else if (_lastUrl case String url) {
-          connect(url).ignore();
-        }
-      },
-    );
-  }
-
-  /// Disable reconnection after manual/interactive disconnection or close.
-  /// {@nodoc}
-  void _$disableReconnection() {
-    _reconnectionTimer?.cancel();
-    _reconnectionTimer = null;
+  FutureOr<void> close(
+      [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
+    _isClosed = true;
+    // Stop monitoring the connection.
+    WebSocketConnectionManager.instance.stopMonitoringConnection(_client);
+    // Clear the event queue and prevent new events from being processed.
+    // Returns when the queue is empty and no new events are being processed.
+    Future<void>.sync(_eventQueue.close).ignore();
+    // Close the internal client connection and free resources.
+    await _client.close(code, reason);
   }
 }

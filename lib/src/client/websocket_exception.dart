@@ -59,3 +59,15 @@ final class WSUnsupportedException extends WSException {
   /// {@macro unsupported_exception}
   const WSUnsupportedException(super.message);
 }
+
+/// {@template client_closed}
+/// The operation was not allowed by the object.
+/// {@endtemplate}
+/// {@category Entity}
+final class WSClientClosed extends WSException implements StateError {
+  /// {@macro client_closed}
+  const WSClientClosed([super.message = 'WebSocket client is closed.']);
+
+  @override
+  StackTrace? get stackTrace => StackTrace.current;
+}
