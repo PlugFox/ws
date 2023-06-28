@@ -1,6 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:html' as html
-    show WebSocket, Blob, Event, MessageEvent, CloseEvent, FileReader;
+    show WebSocket, Blob, Event, CloseEvent, FileReader, FileWriter;
 import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
@@ -25,7 +26,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   /// {@nodoc}
   html.WebSocket? _client;
 
-  late final _BlobReader _blobReader = _BlobReader();
+  late final _BlobCodec _blobCodec = _BlobCodec();
 
   /// Binding to data from native WebSocket client.
   /// The subscription of [_communication] to [_controller].
@@ -64,12 +65,12 @@ final class WebSocketClient$JS extends WebSocketClientBase {
           client.sendString(text);
         case TypedData td:
           client.sendTypedData(td);
-        case html.Blob blob:
-          client.sendBlob(blob);
         case ByteBuffer bb:
           client.sendByteBuffer(bb);
+        case html.Blob blob:
+          client.sendBlob(blob);
         case List<int> bytes:
-          client.send(bytes);
+          client.sendBlob(_blobCodec.write(bytes));
         default:
           throw ArgumentError.value(data, 'data', 'Invalid data type.');
       }
@@ -83,12 +84,22 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   @override
   FutureOr<void> connect(String url) async {
     try {
+      if (_client != null) await disconnect(1001, 'RECONNECTING');
       super.connect(url);
-      if (_client != null) disconnect(1001, 'RECONNECTING');
       _client = html.WebSocket(url);
-      await _client?.onOpen.first;
+      final completer = Completer<void>();
+      _client?.onOpen.first.whenComplete(() {
+        if (completer.isCompleted) return;
+        completer.complete();
+      }).ignore();
       _errorBindSubscription = _client?.onError.listen(
-        (event) => onError(event, StackTrace.current),
+        (event) {
+          if (completer.isCompleted) {
+            onError(event, StackTrace.current);
+          } else {
+            completer.completeError(const WSNotConnected());
+          }
+        },
         onError: onError,
         onDone: disconnect,
         cancelOnError: false,
@@ -97,8 +108,9 @@ final class WebSocketClient$JS extends WebSocketClientBase {
           .map<Object?>((event) => event.data)
           .asyncMap<Object?>((data) => switch (data) {
                 String text => text,
+                html.Blob blob => _blobCodec.read(blob),
+                /* html.Blob blob => (blob as ByteBuffer).asUint8List(), */
                 TypedData td => td.buffer.asInt8List(),
-                html.Blob blob => _blobReader.read(blob),
                 ByteBuffer bb => bb.asInt8List(),
                 List<int> bytes => bytes,
                 _ => data,
@@ -114,17 +126,18 @@ final class WebSocketClient$JS extends WebSocketClientBase {
         onError: onError,
         cancelOnError: false,
       );
-      /* if (!readyState.isOpen) {
+      await completer.future;
+      if (!readyState.isOpen) {
         disconnect(1001, 'IS_NOT_OPEN_AFTER_CONNECT');
         assert(
           false,
           'Invalid readyState code after connect: $readyState',
         );
-      } */
+      }
       super.onConnected(url);
     } on Object catch (error, stackTrace) {
-      disconnect(1006, 'CONNECTION_FAILED');
       onError(error, stackTrace);
+      Future<void>.sync(() => disconnect(1006, 'CONNECTION_FAILED')).ignore();
       rethrow;
     }
   }
@@ -149,8 +162,23 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   }
 }
 
-class _BlobReader {
-  _BlobReader();
+class _BlobCodec {
+  _BlobCodec();
+
+  html.Blob write(Object data) {
+    switch (data) {
+      case String text:
+        return html.Blob([Uint8List.fromList(utf8.encode(text))]);
+      case TypedData td:
+        return html.Blob([td.buffer.asUint8List()]);
+      case ByteBuffer bb:
+        return html.Blob([bb.asUint8List()]);
+      case List<int> bytes:
+        return html.Blob([Uint8List.fromList(bytes)]);
+      default:
+        throw ArgumentError.value(data, 'data', 'Invalid data type.');
+    }
+  }
 
   FutureOr<Object> read(html.Blob blob) async {
     final completer = Completer<Object>();
@@ -167,6 +195,22 @@ class _BlobReader {
 
     late final html.FileReader reader;
     reader = html.FileReader()
+      /* ..onLoad.listen((_) {
+        final result = reader.result;
+        switch (result) {
+          case String text:
+            complete(text);
+            break;
+          case Uint8List bytes:
+            complete(bytes);
+            break;
+          case ByteBuffer bb:
+            complete(bb.asUint8List());
+            break;
+          default:
+            completeError('Unexpected result type: ${result.runtimeType}');
+        }
+      }) */
       ..onLoadEnd.listen((_) {
         final result = reader.result;
         switch (result) {

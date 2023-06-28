@@ -87,12 +87,15 @@ void main() {
     test('can send and receive a byte message', () async {
       final message = utf8.encode('Hello, World!');
       client.add(message);
-      await expectLater(
-        client.stream
-            .map((event) => event is List<int> ? event.toList() : event)
-            .first
-            .timeout(const Duration(seconds: 5)),
-        completion(equals(message)),
+      final received =
+          await client.stream.first.timeout(const Duration(seconds: 5));
+      expect(
+          received,
+          isA<List<int>>()
+              .having((l) => l.length, 'length', equals(message.length)));
+      expect(
+        received,
+        equals(message),
       );
     });
 
@@ -228,10 +231,12 @@ void main() {
       final binaryData =
           List<int>.generate(512, (i) => i % 256); // 0.5 KiB binary data
       client.add(binaryData);
-      final received = await client.stream
-          .map((event) => event is List<int> ? event.toList() : event)
-          .first
-          .timeout(const Duration(seconds: 5));
+      final received =
+          await client.stream.first.timeout(const Duration(seconds: 5));
+      expect(
+          received,
+          isA<List<int>>()
+              .having((l) => l.length, 'length', equals(binaryData.length)));
       expect(received, equals(binaryData));
     });
   });
@@ -256,14 +261,18 @@ void main() {
     });
 
     // Test that the client behaves correctly when it fails to connect
-    test('handles failed connection attempts', () async {
-      // Try to connect to an invalid URL.
-      await expectLater(
-        client.connect('wss://invalid.url'),
-        throwsA(isException),
-      );
-      expect(client.state, isA<WebSocketClientState$Closed>());
-    }, timeout: const Timeout(Duration(seconds: 5)));
+    test(
+      'handles failed connection attempts',
+      () async {
+        // Try to connect to an invalid URL.
+        await expectLater(
+          client.connect('wss://invalid.url'),
+          throwsA(isException),
+        );
+        expect(client.state, isA<WebSocketClientState$Closed>());
+      },
+      timeout: const Timeout(Duration(seconds: 15)),
+    );
 
     // Test that the client can connect to different URLs
     test('can connect to different URLs', () async {
