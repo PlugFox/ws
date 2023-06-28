@@ -24,6 +24,15 @@ final class WebSocketClient implements IWebSocketClient {
       : reconnectTimeout = reconnectTimeout.abs(),
         _client = $platformWebSocketClient(reconnectTimeout.abs(), protocols);
 
+  /// Creates a [WebSocketClient] from an existing [IWebSocketClient].
+  /// This is useful for testing or if you want to use a custom implementation
+  /// with reconnecting and concurrency protection.
+  /// {@macro ws_client}
+  WebSocketClient.fromClient(IWebSocketClient client,
+      {Duration reconnectTimeout = const Duration(seconds: 5)})
+      : reconnectTimeout = reconnectTimeout.abs(),
+        _client = client;
+
   /// {@macro ws_client}
   factory WebSocketClient.connect(String url,
           {Duration reconnectTimeout = const Duration(seconds: 5),
