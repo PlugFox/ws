@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:html' as html
-    show WebSocket, Blob, Event, CloseEvent, FileReader, FileWriter;
+import 'dart:html' as html show WebSocket, Blob, Event, CloseEvent, FileReader;
 import 'dart:typed_data';
 
 import 'package:meta/meta.dart';

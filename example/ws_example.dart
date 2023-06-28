@@ -11,7 +11,7 @@ void main() async {
     print('Received message: $message');
   });
 
-  client.add('Hello, server!');
+  client.add('Hello, server!').ignore();
 
   await Future<void>.delayed(const Duration(seconds: 10));
   client.close();
