@@ -57,6 +57,22 @@ The `ws` package provides a cross-platform WebSocket client that supports automa
 
 ---
 
+## Features and Roadmap
+
+- [x] Cross-platform WebSocket client for Dart and Flutter
+- [x] Support for secure WebSocket connections (wss://)
+- [x] Reactive state
+- [x] Fake client
+- [x] Reconnection to new URL
+- [x] Concurrency
+- [ ] Auto reconnection after network problems
+- [ ] Metrics & counters
+- [ ] TS/RX Speed
+- [ ] Reusing client between isolates
+- [ ] 95% test coverage
+
+---
+
 ## More resources
 
 - [RFC 6455: The WebSocket Protocol](https://tools.ietf.org/html/rfc6455)
