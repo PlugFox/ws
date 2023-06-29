@@ -8,6 +8,7 @@ import 'package:ws/src/client/web_socket_ready_state.dart';
 final class WebSocketMetrics {
   /// {@macro metrics}
   const WebSocketMetrics({
+    required this.timestamp,
     required this.readyState,
     required this.reconnectTimeout,
     required this.transferredSize,
@@ -19,9 +20,137 @@ final class WebSocketMetrics {
     required this.disconnects,
     required this.lastDisconnectTime,
     required this.expectedReconnectTime,
-    required this.lastDisconnectReason,
+    required this.lastDisconnect,
     required this.lastUrl,
   });
+
+  /// Create WebSocket metrics from JSON Object
+  /// {@macro metrics}
+  factory WebSocketMetrics.fromJson(Map<String, Object?> json) {
+    R extract<T, R>(
+        String key, R Function(T value) convert, R Function() fallback) {
+      if (json[key] case T value) {
+        try {
+          return convert(value);
+        } on Object {
+          return fallback();
+        }
+      } else {
+        return fallback();
+      }
+    }
+
+    return WebSocketMetrics(
+      timestamp: extract<int, DateTime>(
+        'timestamp',
+        DateTime.fromMillisecondsSinceEpoch,
+        DateTime.now,
+      ),
+      readyState: extract<int, WebSocketReadyState>(
+        'readyState',
+        WebSocketReadyState.fromCode,
+        () => WebSocketReadyState.closed,
+      ),
+      reconnectTimeout: extract<int, Duration>(
+        'reconnectTimeout',
+        (v) => Duration(milliseconds: v),
+        () => Duration.zero,
+      ),
+      transferredSize: extract<String, BigInt>(
+        'transferredSize',
+        BigInt.parse,
+        () => BigInt.zero,
+      ),
+      receivedSize: extract<String, BigInt>(
+        'receivedSize',
+        BigInt.parse,
+        () => BigInt.zero,
+      ),
+      transferredCount: extract<String, BigInt>(
+        'transferredCount',
+        BigInt.parse,
+        () => BigInt.zero,
+      ),
+      receivedCount: extract<String, BigInt>(
+        'receivedCount',
+        BigInt.parse,
+        () => BigInt.zero,
+      ),
+      reconnects: (
+        successful: extract<int, int>(
+          'reconnectsSuccessful',
+          (v) => v,
+          () => 0,
+        ),
+        total: extract<int, int>(
+          'reconnectsTotal',
+          (v) => v,
+          () => 0,
+        )
+      ),
+      lastSuccessfulConnectionTime: extract<int, DateTime?>(
+        'lastSuccessfulConnectionTime',
+        DateTime.fromMillisecondsSinceEpoch,
+        () => null,
+      ),
+      disconnects: extract<int, int>(
+        'disconnects',
+        (v) => v,
+        () => 0,
+      ),
+      lastDisconnectTime: extract<int, DateTime?>(
+        'lastDisconnectTime',
+        DateTime.fromMillisecondsSinceEpoch,
+        () => null,
+      ),
+      lastDisconnect: (
+        code: extract<int?, int?>(
+          'lastDisconnectCode',
+          (v) => v,
+          () => null,
+        ),
+        reason: extract<String?, String?>(
+          'lastDisconnectReason',
+          (v) => v,
+          () => null,
+        ),
+      ),
+      lastUrl: extract<String?, String?>(
+        'lastUrl',
+        (v) => v,
+        () => null,
+      ),
+      expectedReconnectTime: extract<int, DateTime?>(
+        'expectedReconnectTime',
+        DateTime.fromMillisecondsSinceEpoch,
+        () => null,
+      ),
+    );
+  }
+
+  /// Convert WebSocket metrics to JSON Object
+  Map<String, Object?> toJson() => <String, Object?>{
+        'timestamp': timestamp.millisecondsSinceEpoch,
+        'readyState': readyState.code,
+        'reconnectTimeout': reconnectTimeout.inMilliseconds,
+        'transferredSize': transferredSize.toString(),
+        'receivedSize': receivedSize.toString(),
+        'transferredCount': transferredCount.toString(),
+        'receivedCount': receivedCount.toString(),
+        'reconnectsSuccessful': reconnects.successful,
+        'reconnectsTotal': reconnects.total,
+        'lastSuccessfulConnectionTime':
+            lastSuccessfulConnectionTime?.millisecondsSinceEpoch,
+        'disconnects': disconnects,
+        'lastDisconnectTime': lastDisconnectTime?.millisecondsSinceEpoch,
+        'expectedReconnectTime': expectedReconnectTime?.millisecondsSinceEpoch,
+        'lastDisconnectCode': lastDisconnect.code,
+        'lastDisconnectReason': lastDisconnect.reason,
+        'lastUrl': lastUrl,
+      };
+
+  /// Timestamp of the metrics.
+  final DateTime timestamp;
 
   /// The current state of the connection.
   final WebSocketReadyState readyState;
@@ -57,7 +186,7 @@ final class WebSocketMetrics {
   final DateTime? expectedReconnectTime;
 
   /// The last disconnect reason.
-  final ({int? code, String? reason}) lastDisconnectReason;
+  final ({int? code, String? reason}) lastDisconnect;
 
   /// The last URL used to connect.
   final String? lastUrl;
@@ -75,7 +204,7 @@ final class WebSocketMetrics {
         disconnects,
         lastDisconnectTime,
         expectedReconnectTime,
-        lastDisconnectReason,
+        lastDisconnect,
         lastUrl,
       ]);
 
@@ -103,9 +232,9 @@ final class WebSocketMetrics {
         '${dateTimeRepresentation(lastDisconnectTime, ago: true)}\n'
         'expectedReconnectTime: '
         '${dateTimeRepresentation(expectedReconnectTime)}\n'
-        'lastDisconnectReason: '
-        '${lastDisconnectReason.code ?? 'unknown'} '
-        '(${lastDisconnectReason.reason ?? 'unknown'})\n'
+        'lastDisconnect: '
+        '${lastDisconnect.code ?? 'unknown'} '
+        '(${lastDisconnect.reason ?? 'unknown'})\n'
         'lastUrl: ${lastUrl ?? 'not connected yet'}';
   }
 }

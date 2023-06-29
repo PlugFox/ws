@@ -85,7 +85,7 @@ final class WebSocketMetricsManager {
         metrics
           ..disconnects += 1
           ..lastDisconnectTime = DateTime.now()
-          ..lastDisconnectReason =
+          ..lastDisconnect =
               (code: closed.closeCode, reason: closed.closeReason);
         break;
     }
@@ -113,6 +113,7 @@ final class WebSocketMetricsManager {
     final lastDisconnectTime = metrics.lastDisconnectTime;
     final reconnectTimeout = client.reconnectTimeout;
     return WebSocketMetrics(
+      timestamp: DateTime.now(),
       readyState: readyState,
       reconnectTimeout: reconnectTimeout,
       transferredSize: metrics.transferredSize,
@@ -123,7 +124,7 @@ final class WebSocketMetricsManager {
       lastSuccessfulConnectionTime: metrics.lastSuccessfulConnectionTime,
       disconnects: metrics.disconnects,
       lastDisconnectTime: lastDisconnectTime,
-      lastDisconnectReason: metrics.lastDisconnectReason,
+      lastDisconnect: metrics.lastDisconnect,
       lastUrl: metrics.lastUrl,
       expectedReconnectTime: switch (readyState) {
         WebSocketReadyState.open => null,
@@ -177,8 +178,7 @@ final class $WebSocketMetrics {
   DateTime? lastDisconnectTime;
 
   /// The last disconnect reason.
-  ({int? code, String? reason}) lastDisconnectReason =
-      (code: null, reason: null);
+  ({int? code, String? reason}) lastDisconnect = (code: null, reason: null);
 
   /// The last URL used to connect.
   String? lastUrl;
