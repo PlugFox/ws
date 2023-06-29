@@ -87,7 +87,7 @@ final class WebSocketMetrics {
     String dateTimeRepresentation(DateTime? time, {bool ago = false}) =>
         time != null
             ? '${DateTime.now().difference(time).abs().inSeconds} seconds '
-                '${ago ? 'ago' : 'from now'}}'
+                '${ago ? 'ago' : 'from now'}'
             : 'never';
     return 'readyState: ${readyState.name}\n'
         'reconnectTimeout: ${reconnectTimeout.inSeconds} seconds\n'
