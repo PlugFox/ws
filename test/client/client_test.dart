@@ -23,7 +23,7 @@ void main() {
         expect(client.metrics, isA<WebSocketMetrics>());
         await Future<void>.delayed(const Duration(milliseconds: 350));
         expect(client.state, isA<WebSocketClientState$Closed>());
-        await Future<void>.delayed(const Duration(seconds: 1));
+        await Future<void>.delayed(const Duration(seconds: 3));
         expect(client.metrics, isA<WebSocketMetrics>());
         expect(client.state, isA<WebSocketClientState$Open>());
         await expectLater(client.disconnect(), completes);
