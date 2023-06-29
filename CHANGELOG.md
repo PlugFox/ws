@@ -1,3 +1,3 @@
-## 0.0.9-dev
+## 0.1.0
 
-- MVP version of the library
+- Initial release
