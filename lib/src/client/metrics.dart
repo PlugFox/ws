@@ -81,4 +81,29 @@ final class WebSocketMetrics {
 
   @override
   bool operator ==(Object other) => identical(this, other);
+
+  @override
+  String toString() {
+    String dateTimeRepresentation(DateTime? time) => time != null
+        ? '${DateTime.now().difference(time).abs().inSeconds} seconds ago'
+        : 'never';
+    return 'readyState: ${readyState.name}\n'
+        'reconnectTimeout: ${reconnectTimeout.inSeconds} seconds\n'
+        'transferredSize: $transferredSize\n'
+        'receivedSize: $receivedSize\n'
+        'transferredCount: $transferredCount\n'
+        'receivedCount: $receivedCount\n'
+        'reconnects: ${reconnects.successful} / ${reconnects.total}\n'
+        'lastSuccessfulConnectionTime: '
+        '${dateTimeRepresentation(lastSuccessfulConnectionTime)}\n'
+        'disconnects: $disconnects\n'
+        'lastDisconnectTime: '
+        '${dateTimeRepresentation(lastDisconnectTime)}\n'
+        'expectedReconnectTime: '
+        '${dateTimeRepresentation(expectedReconnectTime)}\n'
+        'lastDisconnectReason: '
+        '${lastDisconnectReason.code ?? 'unknown'} '
+        '(${lastDisconnectReason.reason ?? 'unknown'})\n'
+        'lastUrl: ${lastUrl ?? 'not connected yet'}';
+  }
 }

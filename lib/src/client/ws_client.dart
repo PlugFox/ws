@@ -97,14 +97,22 @@ final class WebSocketClient implements IWebSocketClient {
   @override
   FutureOr<void> close(
       [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
-    _isClosed = true;
-    // Stop monitoring the connection.
-    WebSocketConnectionManager.instance.stopMonitoringConnection(this);
-    WebSocketMetricsManager.instance.stopObserving(this);
-    // Clear the event queue and prevent new events from being processed.
-    // Returns when the queue is empty and no new events are being processed.
-    Future<void>.sync(_eventQueue.close).ignore();
-    // Close the internal client connection and free resources.
-    await _client.close(code, reason);
+    try {
+      _isClosed = true;
+      // Stop monitoring the connection.
+      WebSocketConnectionManager.instance.stopMonitoringConnection(this);
+      // Clear the event queue and prevent new events from being processed.
+      // Returns when the queue is empty and no new events are being processed.
+      Future<void>.sync(_eventQueue.close).ignore();
+      // Close the internal client connection and free resources.
+      await _client.close(code, reason);
+    } finally {
+      // Stop observing metrics.
+      // Wait for the next microtask to ensure that the metrics are updated
+      // from state stream, before stopping observing.
+      scheduleMicrotask(() {
+        WebSocketMetricsManager.instance.stopObserving(this);
+      });
+    }
   }
 }
