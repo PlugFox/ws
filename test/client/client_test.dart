@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:test/test.dart';
@@ -5,6 +6,38 @@ import 'package:ws/interface.dart';
 import 'package:ws/ws.dart';
 
 void main() {
+  test('WebSocketClient example', () async {
+    await runZoned<Future<void>>(
+      () async {
+        const url = 'wss://echo.plugfox.dev:443/connect';
+        final client = WebSocketClient(
+            reconnectTimeout: const Duration(milliseconds: 750));
+        expect(client.state, isA<WebSocketClientState$Closed>());
+        expect(client.metrics, isA<WebSocketMetrics>());
+        client.stream.drain<void>().ignore();
+        client.stateChanges.drain<void>().ignore();
+        await expectLater(client.connect(url), completes);
+        await expectLater(client.add('Hello, '), completes);
+        await expectLater(client.add('world!'), completes);
+        await expectLater(client.add('close'), completes);
+        expect(client.metrics, isA<WebSocketMetrics>());
+        await Future<void>.delayed(const Duration(milliseconds: 350));
+        expect(client.state, isA<WebSocketClientState$Closed>());
+        await Future<void>.delayed(const Duration(seconds: 1));
+        expect(client.metrics, isA<WebSocketMetrics>());
+        expect(client.state, isA<WebSocketClientState$Open>());
+        await expectLater(client.disconnect(), completes);
+        await Future<void>.delayed(const Duration(seconds: 1));
+        await expectLater(client.close(), completes);
+        await expectLater(client.close(), completes);
+        expect(client.metrics, isA<WebSocketMetrics>());
+      },
+      zoneValues: <Object?, Object?>{
+        #dev.plugfox.ws.debug: true,
+      },
+    );
+  });
+
   group(
     'WebSocketClient init',
     () {
