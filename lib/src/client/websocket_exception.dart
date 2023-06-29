@@ -66,8 +66,11 @@ final class WSUnsupportedException extends WSException {
 /// {@category Entity}
 final class WSClientClosed extends WSException implements StateError {
   /// {@macro client_closed}
-  const WSClientClosed([super.message = 'WebSocket client is closed.']);
+  const WSClientClosed({
+    String message = 'WebSocket client is closed.',
+    this.stackTrace,
+  }) : super(message);
 
   @override
-  StackTrace? get stackTrace => StackTrace.current;
+  final StackTrace? stackTrace;
 }

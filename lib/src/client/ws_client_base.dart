@@ -31,12 +31,6 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   @override
   final Duration reconnectTimeout;
 
-  String? _lastUrl;
-
-  /// Last URL used to connect.
-  /// {@nodoc}
-  String? get lastUrl => _lastUrl;
-
   /// Output stream of data from native WebSocket client.
   /// {@nodoc}
   @protected
@@ -66,14 +60,13 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   @override
   @mustCallSuper
   FutureOr<void> connect(String url) async {
-    _lastUrl = url;
     setState((_) => WebSocketClientState.connecting(url: url));
   }
 
   @override
   @mustCallSuper
   FutureOr<void> add(Object data) async {
-    if ($kDebugWS) {
+    if ($debugWS) {
       var text = data.toString();
       text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
       fine('> $text');
@@ -118,14 +111,13 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   /// {@nodoc}
   @protected
   void onConnected(String url) {
-    _lastUrl = url;
     setState((_) => WebSocketClientState.open(url: url));
   }
 
   /// {@nodoc}
   @protected
   void onSent(Object data) {
-    if ($kDebugWS) {
+    if ($debugWS) {
       var text = data.toString();
       text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
       fine('Sent: $text');
@@ -138,7 +130,7 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   void onReceivedData(Object? data) {
     if (data == null || _dataController.isClosed) return;
     _dataController.add(data);
-    if ($kDebugWS) {
+    if ($debugWS) {
       var text = data.toString();
       text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
       fine('< $text');

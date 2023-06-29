@@ -308,6 +308,7 @@ void main() {
           await client.connect(url);
         }
       });
+
       // Test that the response time is acceptable
       test('has acceptable response time', () async {
         const message = 'Hello, World!';
@@ -334,4 +335,74 @@ void main() {
       ],
     }, */
   );
+
+  group('Closed', () {
+    late IWebSocketClient client;
+
+    setUpAll(() {
+      client = WebSocketClient();
+    });
+
+    tearDownAll(() {
+      client.close();
+    });
+
+    test('try to close a closed connection', () async {
+      expect(client.state.readyState.isClosed, isTrue);
+      await expectLater(
+        client.close(),
+        completes,
+      );
+      await expectLater(
+        client.close(),
+        completes,
+      );
+      expect(client.isClosed, isTrue);
+    });
+
+    test('try use closed client', () async {
+      expect(client.state.readyState.isClosed, isTrue);
+      await expectLater(
+        client.close(),
+        completes,
+      );
+      await expectLater(
+        client.connect('wss://echo.plugfox.dev:443/connect'),
+        throwsA(isException),
+      );
+      await expectLater(
+        client.add('Message'),
+        throwsA(isException),
+      );
+      await expectLater(
+        client.disconnect(),
+        throwsA(isException),
+      );
+      await expectLater(
+        client.close(),
+        completes,
+      );
+    });
+
+    test('WSClientClosed stacktrace', () {
+      expect(const WSClientClosed().stackTrace, isNull);
+      expect(const WSClientClosed(stackTrace: StackTrace.empty).stackTrace,
+          isA<StackTrace>());
+    });
+  });
+
+  group('Protocols', () {
+    test('Set protocols', () async {
+      final client1 = WebSocketClient(protocols: ['foo', 'bar']);
+      final client2 = WebSocketClient.connect('ws://localhost:80',
+          protocols: ['foo', 'bar']);
+      final client3 = WebSocketClient.fromClient(client1);
+      expect(client1, isA<WebSocketClient>());
+      expect(client2, isA<WebSocketClient>());
+      expect(client3, isA<WebSocketClient>());
+      await expectLater(client1.close(), completes);
+      await expectLater(client2.close(), completes);
+      await expectLater(client3.close(), completes);
+    });
+  });
 }

@@ -46,7 +46,7 @@ final class WebSocketClient$IO extends WebSocketClientBase {
     super.add(data);
     final client = _client;
     if (client == null) {
-      throw const WSClientClosed('WebSocket client is not connected.');
+      throw const WSClientClosed(message: 'WebSocket client is not connected.');
     }
     try {
       switch (data) {
