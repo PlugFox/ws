@@ -84,9 +84,11 @@ final class WebSocketMetrics {
 
   @override
   String toString() {
-    String dateTimeRepresentation(DateTime? time) => time != null
-        ? '${DateTime.now().difference(time).abs().inSeconds} seconds ago'
-        : 'never';
+    String dateTimeRepresentation(DateTime? time, {bool ago = false}) =>
+        time != null
+            ? '${DateTime.now().difference(time).abs().inSeconds} seconds '
+                '${ago ? 'ago' : 'from now'}}'
+            : 'never';
     return 'readyState: ${readyState.name}\n'
         'reconnectTimeout: ${reconnectTimeout.inSeconds} seconds\n'
         'transferredSize: $transferredSize\n'
@@ -95,10 +97,10 @@ final class WebSocketMetrics {
         'receivedCount: $receivedCount\n'
         'reconnects: ${reconnects.successful} / ${reconnects.total}\n'
         'lastSuccessfulConnectionTime: '
-        '${dateTimeRepresentation(lastSuccessfulConnectionTime)}\n'
+        '${dateTimeRepresentation(lastSuccessfulConnectionTime, ago: true)}\n'
         'disconnects: $disconnects\n'
         'lastDisconnectTime: '
-        '${dateTimeRepresentation(lastDisconnectTime)}\n'
+        '${dateTimeRepresentation(lastDisconnectTime, ago: true)}\n'
         'expectedReconnectTime: '
         '${dateTimeRepresentation(expectedReconnectTime)}\n'
         'lastDisconnectReason: '
