@@ -5,6 +5,7 @@ import 'package:ws/src/client/metrics.dart';
 import 'package:ws/src/client/state.dart';
 import 'package:ws/src/client/web_socket_ready_state.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
+import 'package:ws/src/manager/connection_manager.dart';
 
 /// {@nodoc}
 @internal
@@ -132,7 +133,10 @@ final class WebSocketMetricsManager {
           DateTime.now().add(reconnectTimeout),
         WebSocketReadyState.closed
             when reconnectTimeout > Duration.zero &&
-                lastDisconnectTime != null =>
+                lastDisconnectTime != null &&
+                !client.isClosed &&
+                WebSocketConnectionManager.instance
+                    .isReconnectionActive(client) =>
           lastDisconnectTime.add(reconnectTimeout),
         _ => null,
       },

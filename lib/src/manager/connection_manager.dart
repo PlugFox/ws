@@ -21,6 +21,11 @@ final class WebSocketConnectionManager {
   /// {@nodoc}
   final Expando<Timer> _timers = Expando<Timer>();
 
+  /// Is reconnection enabled.
+  /// {@nodoc}
+  bool isReconnectionActive(IWebSocketClient client) =>
+      _timers[client]?.isActive == true;
+
   /// {@nodoc}
   void startMonitoringConnection(IWebSocketClient client, String url) {
     stopMonitoringConnection(client);
