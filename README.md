@@ -38,7 +38,7 @@ dependencies:
 ## Example
 
 ![](example.png)
-[Example of using the ws library](<[Title](https://pub.dev/packages/ws/example)>) to connect to a WebSocket server
+[Example of using the ws library](https://pub.dev/packages/ws/example) to connect to a WebSocket server
 
 ## Reconnection
 
