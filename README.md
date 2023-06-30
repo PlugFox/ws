@@ -1,12 +1,15 @@
-# Cross-platform WebSocket client
+# WS: Cross-platform WebSocket client
 
 [![Pub](https://img.shields.io/pub/v/ws.svg)](https://pub.dev/packages/ws)
 [![Actions Status](https://github.com/PlugFox/ws/actions/workflows/checkout.yml/badge.svg)](https://github.com/PlugFox/ws/actions)
 [![Coverage](https://codecov.io/gh/PlugFox/ws/branch/master/graph/badge.svg)](https://codecov.io/gh/PlugFox/ws)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple.svg)](https://opensource.org/licenses/MIT)
 [![Linter](https://img.shields.io/badge/style-linter-40c4ff.svg)](https://pub.dev/packages/linter)
+[![GitHub stars](https://img.shields.io/github/stars/plugfox/ws?style=social)](https://github.com/plugfox/ws/)
 
 The `ws` package provides a cross-platform WebSocket client for both Dart and Flutter applications. It allows you to connect to a WebSocket server, send and receive messages, and handle the connection state changes.
+
+---
 
 ## Installation
 
@@ -34,52 +37,20 @@ dependencies:
 
 ## Example
 
-```dart
-import 'dart:async';
-import 'package:ws/ws.dart';
-
-void main([List<String>? args]) {
-  // The server URL
-  const url = 'wss://echo.plugfox.dev:443/connect';
-
-  // Setup a WebSocket client with auto reconnect
-  final client = WebSocketClient(reconnectTimeout: const Duration(seconds: 5))
-    // Observing the incoming messages
-    ..stream.listen((message) => print('< $message'))
-    // Observing the state changes
-    ..stateChanges.listen((state) => print('* $state'))
-    // Connect to the server
-    ..connect(url)
-    // Send a message
-    ..add('Hello, ').ignore()
-    // One more message after first one
-    ..add('world!').ignore();
-
-  // Close the connection after 2 seconds
-  Timer(const Duration(seconds: 2), client.close);
-
-  // Print the metrics after 3 seconds
-  Timer(const Duration(seconds: 3), () => print(client.metrics));
-}
-```
+![](example.png)
+[Example of using the ws library](<[Title](https://pub.dev/packages/ws/example)>) to connect to a WebSocket server
 
 ## Reconnection
 
 The `ws` package provides a cross-platform WebSocket client that supports automatic reconnection in case of connection loss. The client automatically tries to reconnect to the server when the connection is lost. To handle reconnection-related events, you can register listeners for the `stateChanges` stream, which notifies you about changes in the connection state. When the connection is closed, the client tries to reconnect with a delay, which increases exponentially with each unsuccessful attempt to prevent overloading the server.
 
----
-
 ## Metrics
 
 The `ws` package provides a cross-platform WebSocket client that supports metrics. The client automatically collects metrics about the number of sent and received messages, as well as the number of sent and received bytes. To get the metrics, you can use the `metrics` property, which returns a `WebSocketMetrics` object. The metrics are updated on demand, so you can get the latest values at any time.
 
----
-
 ## JSON
 
 The `ws` package provides a cross-platform WebSocket client that supports JSON. The client automatically decodes incoming messages from JSON to Dart objects. To get the decoded messages, you can use the `client.stream.json` property, which returns a `Stream<Map<String, Object?>>` of decoded messages.
-
----
 
 ## Features and Roadmap
 
@@ -95,8 +66,6 @@ The `ws` package provides a cross-platform WebSocket client that supports JSON. 
 - [ ] Reusing client between isolates
 - [ ] 95% test coverage
 
----
-
 ## More resources
 
 - [RFC 6455: The WebSocket Protocol](https://tools.ietf.org/html/rfc6455)
@@ -104,31 +73,31 @@ The `ws` package provides a cross-platform WebSocket client that supports JSON. 
 - [Dart HTML WebSocket library](https://api.dart.dev/stable/dart-html/WebSocket-class.html)
 - [Dart IO WebSocket library](https://api.dart.dev/stable/dart-io/WebSocket-class.html)
 
----
-
 ## Coverage
 
 [![](https://codecov.io/gh/PlugFox/ws/branch/master/graphs/sunburst.svg)](https://codecov.io/gh/PlugFox/ws/branch/master)
-
----
 
 ## Changelog
 
 Refer to the [Changelog](https://github.com/PlugFox/ws/blob/master/CHANGELOG.md) to get all release notes.
 
----
-
 ## Maintainers
 
 [Plague Fox](https://plugfox.dev)
 
----
+## Funding
+
+If you want to support the development of our library, there are several ways you can do it:
+
+- [Buy me a coffee](https://www.buymeacoffee.com/plugfox)
+- [Support on Patreon](https://www.patreon.com/plugfox)
+- [Subscribe through Boosty](https://boosty.to/plugfox)
+
+We appreciate any form of support, whether it's a financial donation or just a star on GitHub. It helps us to continue developing and improving our library. Thank you for your support!
 
 ## License
 
 [MIT](https://opensource.org/licenses/MIT)
-
----
 
 ## Tags
 

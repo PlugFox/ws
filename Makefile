@@ -36,6 +36,7 @@ analyze: get format
 	@dart analyze --fatal-infos --fatal-warnings
 
 check: analyze
+	@dart pub publish --dry-run
 	@dart pub global activate pana
 	@pana --json --no-warning --line-length 80 > log.pana.json
 

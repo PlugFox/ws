@@ -1,10 +1,39 @@
 name: ws
+
 description: >
   WS: A compact, highly efficient WebSocket library. Easily establish, manage, and reconnect WebSocket connections in real-time apps.
-version: 0.1.0
+
+version: 0.1.1
+
 homepage: https://github.com/plugfox/ws
+
 repository: https://github.com/plugfox/ws
+
 issue_tracker: https://github.com/plugfox/ws/issues
+
+funding:
+  - https://www.buymeacoffee.com/plugfox
+  - https://www.patreon.com/plugfox
+  - https://boosty.to/plugfox
+
+topics:
+  - ws
+  - websocket
+  - cross-platform
+  - reconnect
+  - socket
+
+platforms:
+  android:
+  ios:
+  linux:
+  macos:
+  web:
+  windows:
+
+screenshots:
+  - description: 'Example of using the ws library to connect to a WebSocket server.'
+    path: example.png
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
