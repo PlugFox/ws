@@ -17,17 +17,14 @@ void main([List<String>? args]) {
     ..stateChanges.listen((state) => print('* $state'))
     // Connect to the server url
     ..connect(url)
-    // Send a message 'Hello, '
-    ..add('Hello, ')
-    // One more message 'world!' after first one is sent
-    ..add('world!');
+    // Send a message
+    ..add('Hello, ') // > Hello,
+    // One more message after first is sent
+    ..add('world!'); // > world!
 
-  // Close the connection after 1 seconds
-  Timer(const Duration(seconds: 1), client.close);
-
-  // Print the metrics after 2 seconds
-  Timer(const Duration(seconds: 2), () => print('Metrics:\n${client.metrics}'));
-
-  // Exit the process after 3 seconds
-  Timer(const Duration(seconds: 3), () => io.exit(0));
+  Timer(const Duration(seconds: 1), () async {
+    await client.close(); // Close the connection
+    print('Metrics:\n${client.metrics}'); // Print the metrics
+    io.exit(0); // Exit the process
+  });
 }
