@@ -25,6 +25,8 @@ final class WebSocketClient$IO extends WebSocketClientBase {
 
   /// Native WebSocket client.
   /// {@nodoc}
+  // Close it at a [disconnect] or [close] method.
+  // ignore: close_sinks
   io.WebSocket? _client;
 
   /// Binding to data from native WebSocket client.
@@ -73,7 +75,7 @@ final class WebSocketClient$IO extends WebSocketClientBase {
     try {
       if (_client != null) await disconnect(1001, 'RECONNECTING');
       super.connect(url);
-      // Close it as a _client
+      // Close it at a [disconnect] or [close] method.
       // ignore: close_sinks
       final client =
           _client = await io.WebSocket.connect(url, protocols: protocols);
