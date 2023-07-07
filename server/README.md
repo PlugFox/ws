@@ -1,6 +1,19 @@
 # Web Socket Echo Server
 
-## How to connect to the server using Node.js
+# How to run the server
+
+```bash
+$ dart run server/bin/server.dart --port=8080 --isolates=2
+```
+
+or using Docker
+
+```bash
+$ docker build -t ws_echo_server server
+$ docker run -it --rm -p 8080:8080 ws_echo_server /app/bin/server -p 8080 -i 2
+```
+
+## How to connect using Node.js
 
 ```bash
 $ dart run server/bin/server.dart
@@ -11,7 +24,7 @@ Connected (press CTRL+C to quit)
 < hello
 ```
 
-## How to connect to the server using Python
+## How to connect using Python
 
 ```bash
 $ dart run server/bin/server.dart
@@ -22,7 +35,7 @@ Connected to ws://127.0.0.1:8080/connect.
 < hello
 ```
 
-## How to connect to the server using Dart
+## How to connect using Dart
 
 ```bash
 $ dart run server/bin/server.dart

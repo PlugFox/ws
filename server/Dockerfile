@@ -1,5 +1,5 @@
 # Use latest beta channel SDK.
-FROM dart:beta AS build
+FROM dart:stable AS build
 
 # Resolve app dependencies.
 WORKDIR /app
@@ -14,6 +14,7 @@ RUN dart pub get --offline \
 # Build minimal serving image from AOT-compiled `/server` and required system
 # libraries and configuration files stored in `/runtime/` from the build stage.
 FROM scratch
+WORKDIR /app/bin
 COPY --from=build /runtime/ /
 COPY --from=build /app/bin/server /app/bin/
 

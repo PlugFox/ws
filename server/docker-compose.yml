@@ -12,7 +12,7 @@ services:
       - 8080:8080
     expose:
       - 8080
-    entrypoint: ["/app/bin/server", "--isolates=2"]
+    entrypoint: ["/app/bin/server", "--port=8080", "--isolates=2"]
 
   # https://github.com/Shopify/toxiproxy
   toxiproxy:
