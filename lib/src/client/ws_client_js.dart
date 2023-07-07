@@ -89,13 +89,13 @@ final class WebSocketClient$JS extends WebSocketClientBase {
     try {
       if (_client != null) await disconnect(1001, 'RECONNECTING');
       super.connect(url);
-      _client = html.WebSocket(url, protocols);
+      final client = _client = html.WebSocket(url, protocols);
       final completer = Completer<void>();
-      _client?.onOpen.first.whenComplete(() {
+      client.onOpen.first.whenComplete(() {
         if (completer.isCompleted) return;
         completer.complete();
       }).ignore();
-      _errorBindSubscription = _client?.onError.listen(
+      _errorBindSubscription = client.onError.listen(
         (event) {
           if (completer.isCompleted) {
             onError(event, StackTrace.current);
@@ -107,7 +107,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
         onDone: disconnect,
         cancelOnError: false,
       );
-      _dataBindSubscription = _client?.onMessage
+      _dataBindSubscription = client.onMessage
           .map<Object?>((event) => event.data)
           .asyncMap<Object?>((data) => switch (data) {
                 String text => text,
@@ -124,7 +124,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
             onDone: disconnect,
             cancelOnError: false,
           );
-      _closeBindSubscription = _client?.onClose.listen(
+      _closeBindSubscription = client.onClose.listen(
         (event) => disconnect(event.code, event.reason),
         onError: onError,
         cancelOnError: false,
@@ -148,12 +148,20 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   @override
   FutureOr<void> disconnect(
       [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
+    final client = _client;
     await super.disconnect(code, reason);
     _errorBindSubscription?.cancel().ignore();
     _closeBindSubscription?.cancel().ignore();
     _dataBindSubscription?.cancel().ignore();
-    Future<void>.sync(() => _client?.close(code, reason)).ignore();
-    _client = null;
+    _errorBindSubscription = null;
+    _closeBindSubscription = null;
+    _dataBindSubscription = null;
+    if (client != null) {
+      try {
+        client.close(code, reason);
+      } on Object {/* ignore */}
+      _client = null;
+    }
     super.onDisconnected(code, reason);
   }
 

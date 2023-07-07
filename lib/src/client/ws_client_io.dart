@@ -73,9 +73,12 @@ final class WebSocketClient$IO extends WebSocketClientBase {
     try {
       if (_client != null) await disconnect(1001, 'RECONNECTING');
       super.connect(url);
-      _client = await io.WebSocket.connect(url, protocols: protocols);
-      _dataBindSubscription = _client
-          ?.asyncMap<Object?>((data) => switch (data) {
+      // Close it as a _client
+      // ignore: close_sinks
+      final client =
+          _client = await io.WebSocket.connect(url, protocols: protocols);
+      _dataBindSubscription = client
+          .asyncMap<Object?>((data) => switch (data) {
                 String text => text,
                 Uint8List bytes => bytes,
                 ByteBuffer bb => bb.asUint8List(),
@@ -122,10 +125,16 @@ final class WebSocketClient$IO extends WebSocketClientBase {
   @override
   FutureOr<void> disconnect(
       [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
+    final client = _client;
     await super.disconnect(code, reason);
     _dataBindSubscription?.cancel().ignore();
-    Future<void>.sync(() => _client?.close(code, reason)).ignore();
-    _client = null;
+    _dataBindSubscription = null;
+    if (client != null) {
+      try {
+        await client.close(code, reason);
+      } on Object {/* ignore */}
+      _client = null;
+    }
     super.onDisconnected(code, reason);
   }
 
