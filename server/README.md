@@ -26,7 +26,7 @@ Connected to ws://127.0.0.1:8080/connect.
 
 ```bash
 $ dart run server/bin/server.dart
-$ dart run --define=URL=ws://127.0.0.1:8080/connect example/ws_example.dart
+$ dart run --observe --define=URL=ws://127.0.0.1:8080/connect example/ws_example.dart
 * WebSocketClientState.connecting(ws://127.0.0.1:8080/connect)
 * WebSocketClientState.open(ws://127.0.0.1:8080/connect)
 < Hello,
