@@ -1,6 +1,6 @@
 // ignore_for_file: avoid_print
 import 'dart:async';
-import 'dart:io' as io;
+import 'dart:io' as io show exit;
 
 import 'package:ws/ws.dart';
 
