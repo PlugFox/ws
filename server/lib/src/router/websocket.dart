@@ -8,7 +8,7 @@ import 'package:web_socket_channel/web_socket_channel.dart'
 
 Middleware webSocket({required String path}) =>
     (Handler innerHandler) => (Request request) =>
-        request.method == 'GET' && request.requestedUri.path == path
+        request.method == 'GET' && request.requestedUri.path.startsWith(path)
             ? _webSocketHandler(request)
             : innerHandler(request);
 
