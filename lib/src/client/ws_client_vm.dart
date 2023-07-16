@@ -14,14 +14,14 @@ import 'package:ws/src/util/logger.dart';
 @internal
 IWebSocketClient $platformWebSocketClient(
         Duration reconnectTimeout, Iterable<String>? protocols) =>
-    WebSocketClient$IO(
+    WebSocketClient$VM(
         reconnectTimeout: reconnectTimeout, protocols: protocols);
 
 /// {@nodoc}
 @internal
-final class WebSocketClient$IO extends WebSocketClientBase {
+final class WebSocketClient$VM extends WebSocketClientBase {
   /// {@nodoc}
-  WebSocketClient$IO({super.reconnectTimeout, super.protocols});
+  WebSocketClient$VM({super.reconnectTimeout, super.protocols});
 
   /// Native WebSocket client.
   /// {@nodoc}
