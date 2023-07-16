@@ -37,12 +37,15 @@ abstract base class WebSocketOptions {
   WebSocketOptions({
     this.connectionRetryInterval,
     Iterable<String>? protocols,
-  }) : protocols = protocols?.toSet();
+    Duration? timeout,
+  })  : protocols = protocols?.where((e) => e.isNotEmpty).toSet(),
+        timeout = timeout ?? const Duration(seconds: 30);
 
   /// {@macro ws_options_common}
   factory WebSocketOptions.common({
     ConnectionRetryInterval? connectionRetryInterval,
     Iterable<String>? protocols,
+    Duration? timeout,
   }) = $WebSocketOptions$Common;
 
   /// {@template ws_options_vm}
@@ -90,6 +93,7 @@ abstract base class WebSocketOptions {
     Object? /*CompressionOptions*/ compression,
     Object? /*HttpClient*/ customClient,
     String? userAgent,
+    Duration? timeout,
   }) =>
       $vmOptions(
         connectionRetryInterval: connectionRetryInterval,
@@ -98,6 +102,7 @@ abstract base class WebSocketOptions {
         compression: compression,
         customClient: customClient,
         userAgent: userAgent,
+        timeout: timeout,
       );
 
   /// {@template ws_options_js}
@@ -111,15 +116,24 @@ abstract base class WebSocketOptions {
   ///
   /// The [protocols] argument is specifying the subprotocols the
   /// client is willing to speak.
+  ///
+  /// The [timeout] argument is specifying the maximum time to wait for the
+  /// connection to be established.
+  ///
+  /// The [useBlobForBinary] argument is specifying the Uint8List should be send as
+  /// Blob or as Typed data. By default, the data send as Typed data.
   /// {@endtemplate}
   factory WebSocketOptions.js({
     ConnectionRetryInterval? connectionRetryInterval,
     Iterable<String>? protocols,
-    // TODO(plugfox): Add BinaryType support, send as Blob or List<int>.
+    Duration? timeout,
+    bool? useBlobForBinary,
   }) =>
       $jsOptions(
         connectionRetryInterval: connectionRetryInterval,
         protocols: protocols,
+        timeout: timeout,
+        useBlobForBinary: useBlobForBinary,
       );
 
   /// Construct options for VM or JS platform depending on the current platform.
@@ -145,11 +159,8 @@ abstract base class WebSocketOptions {
   @nonVirtual
   final Set<String>? protocols;
 
-  // TODO(plugfox): Add support for the following options.
-  /// The connection timeout
-  //final Duration timeout;
-
-  // TODO(plugfox): Add support for the following options.
-  /// The data send for the first request
-  //final List<int>? data;
+  /// Maximum time to wait for the connection to be established.
+  /// If not specified, the timeout will be 30 seconds.
+  @nonVirtual
+  final Duration timeout;
 }

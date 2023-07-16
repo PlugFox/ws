@@ -10,11 +10,13 @@ WebSocketOptions $vmOptions({
   Object? /*CompressionOptions*/ compression,
   Object? /*HttpClient*/ customClient,
   String? userAgent,
+  Duration? timeout,
 }) {
   assert(false, 'This method should not be called at the JS platform.');
   return $WebSocketOptions$JS(
     connectionRetryInterval: connectionRetryInterval,
     protocols: protocols,
+    timeout: timeout,
   );
 }
 
@@ -23,10 +25,13 @@ WebSocketOptions $vmOptions({
 WebSocketOptions $jsOptions({
   ConnectionRetryInterval? connectionRetryInterval,
   Iterable<String>? protocols,
+  Duration? timeout,
+  bool? useBlobForBinary,
 }) =>
     $WebSocketOptions$JS(
       connectionRetryInterval: connectionRetryInterval,
       protocols: protocols,
+      timeout: timeout,
     );
 
 /// {@nodoc}
@@ -43,5 +48,10 @@ final class $WebSocketOptions$JS extends WebSocketOptions {
   $WebSocketOptions$JS({
     super.connectionRetryInterval,
     super.protocols,
-  });
+    super.timeout,
+    bool? useBlobForBinary,
+  }) : useBlobForBinary = useBlobForBinary ?? false;
+
+  /// {@nodoc}
+  final bool useBlobForBinary;
 }

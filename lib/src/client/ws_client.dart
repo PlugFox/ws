@@ -25,7 +25,7 @@ final class WebSocketClient implements IWebSocketClient {
   /// {@macro ws_client}
   WebSocketClient([WebSocketOptions? options])
       : _client = $platformWebSocketClient(options),
-        _options = options {
+        _options = options ?? WebSocketOptions.common() {
     WebSocketMetricsManager.instance.startObserving(this);
   }
 
@@ -36,7 +36,7 @@ final class WebSocketClient implements IWebSocketClient {
   WebSocketClient.fromClient(IWebSocketClient client,
       [WebSocketOptions? options])
       : _client = client,
-        _options = options {
+        _options = options ?? WebSocketOptions.common() {
     WebSocketMetricsManager.instance.startObserving(this);
   }
 
@@ -49,7 +49,7 @@ final class WebSocketClient implements IWebSocketClient {
 
   /// Current options.
   /// {@nodoc}
-  final WebSocketOptions? _options;
+  final WebSocketOptions _options;
 
   @override
   bool get isClosed => _isClosed;
@@ -82,9 +82,10 @@ final class WebSocketClient implements IWebSocketClient {
       WebSocketConnectionManager.instance.startMonitoringConnection(
         this,
         url,
-        _options?.connectionRetryInterval,
+        _options.connectionRetryInterval,
       );
-      return _client.connect(url);
+      return Future<void>.sync(() => _client.connect(url))
+          .timeout(_options.timeout);
     });
   }
 
@@ -94,7 +95,8 @@ final class WebSocketClient implements IWebSocketClient {
     if (_isClosed) return Future<void>.error(const WSClientClosed());
     return _eventQueue.push('disconnect', () {
       WebSocketConnectionManager.instance.stopMonitoringConnection(this);
-      return _client.disconnect(code, reason);
+      return Future<void>.sync(() => _client.disconnect(code, reason))
+          .timeout(_options.timeout);
     });
   }
 

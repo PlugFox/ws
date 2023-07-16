@@ -12,6 +12,7 @@ WebSocketOptions $vmOptions({
   Object? /*CompressionOptions*/ compression,
   Object? /*HttpClient*/ customClient,
   String? userAgent,
+  Duration? timeout,
 }) =>
     $WebSocketOptions$VM(
       connectionRetryInterval: connectionRetryInterval,
@@ -26,6 +27,7 @@ WebSocketOptions $vmOptions({
         _ => null,
       },
       userAgent: userAgent,
+      timeout: timeout,
     );
 
 /// {@nodoc}
@@ -33,11 +35,14 @@ WebSocketOptions $vmOptions({
 WebSocketOptions $jsOptions({
   ConnectionRetryInterval? connectionRetryInterval,
   Iterable<String>? protocols,
+  Duration? timeout,
+  bool? useBlobForBinary,
 }) {
   assert(false, 'This method should not be called at the VM platform.');
   return $WebSocketOptions$VM(
     connectionRetryInterval: connectionRetryInterval,
     protocols: protocols,
+    timeout: timeout,
   );
 }
 
@@ -56,6 +61,7 @@ final class $WebSocketOptions$VM extends WebSocketOptions {
   $WebSocketOptions$VM({
     super.connectionRetryInterval,
     super.protocols,
+    super.timeout,
     this.headers,
     this.compression,
     this.customClient,

@@ -26,6 +26,7 @@ void main() {
         min: const Duration(milliseconds: 500),
         max: const Duration(milliseconds: 1000),
       ),
+      useBlobForBinary: true,
     ),
   );
   test('WebSocketClient example', () async {

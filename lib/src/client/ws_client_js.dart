@@ -9,18 +9,31 @@ import 'package:ws/src/client/websocket_exception.dart';
 import 'package:ws/src/client/ws_client_base.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/client/ws_options.dart';
+import 'package:ws/src/client/ws_options_js.dart';
 import 'package:ws/src/util/logger.dart';
 
 /// {@nodoc}
 @internal
 IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
-    WebSocketClient$JS(protocols: options?.protocols);
+    switch (options) {
+      $WebSocketOptions$JS options => WebSocketClient$JS(
+          protocols: options.protocols,
+          options: options,
+        ),
+      _ => WebSocketClient$JS(
+          protocols: options?.protocols,
+        ),
+    };
 
 /// {@nodoc}
 @internal
 final class WebSocketClient$JS extends WebSocketClientBase {
   /// {@nodoc}
-  WebSocketClient$JS({super.protocols});
+  WebSocketClient$JS({super.protocols, $WebSocketOptions$JS? options})
+      : _options = options;
+
+  /// {@nodoc}
+  final $WebSocketOptions$JS? _options;
 
   /// Native WebSocket client.
   /// {@nodoc}
@@ -65,16 +78,23 @@ final class WebSocketClient$JS extends WebSocketClientBase {
       switch (data) {
         case String text:
           client.sendString(text);
-        case TypedData td:
-          client.sendTypedData(td);
-        case ByteBuffer bb:
-          client.sendByteBuffer(bb);
         case html.Blob blob:
           client.sendBlob(blob);
-        case List<int> bytes:
-          client.sendBlob(_blobCodec.write(bytes));
         default:
-          throw ArgumentError.value(data, 'data', 'Invalid data type.');
+          if (_options?.useBlobForBinary == true) {
+            client.sendBlob(_blobCodec.write(data));
+          } else {
+            switch (data) {
+              case TypedData td:
+                client.sendTypedData(td);
+              case ByteBuffer bb:
+                client.sendByteBuffer(bb);
+              case List<int> bytes:
+                client.sendTypedData(Uint8List.fromList(bytes));
+              default:
+                throw ArgumentError.value(data, 'data', 'Invalid data type.');
+            }
+          }
       }
     } on Object catch (error, stackTrace) {
       warning(error, stackTrace, 'WebSocketClient\$JS.add: $error');

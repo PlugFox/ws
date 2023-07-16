@@ -8,5 +8,6 @@ final class $WebSocketOptions$Common extends WebSocketOptions {
   $WebSocketOptions$Common({
     super.connectionRetryInterval,
     super.protocols,
+    super.timeout,
   });
 }
