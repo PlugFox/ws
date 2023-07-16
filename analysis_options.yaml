@@ -19,8 +19,9 @@ analyzer:
     strict-inference: true
 
   errors:
+    todo: ignore
+
     # Info
-    todo: info
     directives_ordering: info
     always_declare_return_types: info
 

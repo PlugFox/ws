@@ -116,6 +116,7 @@ abstract base class WebSocketOptions {
   factory WebSocketOptions.js({
     ConnectionRetryInterval? connectionRetryInterval,
     Iterable<String>? protocols,
+    // TODO(plugfox): Add BinaryType support, send as Blob or List<int>.
   }) =>
       $jsOptions(
         connectionRetryInterval: connectionRetryInterval,
