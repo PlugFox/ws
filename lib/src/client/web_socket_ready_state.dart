@@ -1,5 +1,6 @@
 /// The [IWebSocketPlatformTransport.readyState] property
 /// returns the current state of the WebSocket connection.
+/// {@category Client}
 /// {@category Entity}
 enum WebSocketReadyState {
   /// Socket has been created. The connection is not yet open.

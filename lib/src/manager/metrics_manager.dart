@@ -107,15 +107,15 @@ final class WebSocketMetricsManager {
 
   /// {@nodoc}
   @internal
-  WebSocketMetrics buildMetric(IWebSocketClient client) {
+  WebSocketMetrics buildMetricFor(IWebSocketClient client) {
     final metrics = _getMetrics(client);
     final readyState = client.state.readyState;
     final lastDisconnectTime = metrics.lastDisconnectTime;
-    final reconnectTimeout = client.reconnectTimeout;
+    final reconnectionStatus =
+        WebSocketConnectionManager.instance.getStatusFor(client);
     return WebSocketMetrics(
       timestamp: DateTime.now(),
       readyState: readyState,
-      reconnectTimeout: reconnectTimeout,
       transferredSize: metrics.transferredSize,
       receivedSize: metrics.receivedSize,
       transferredCount: metrics.transferredCount,
@@ -126,20 +126,14 @@ final class WebSocketMetricsManager {
       lastDisconnectTime: lastDisconnectTime,
       lastDisconnect: metrics.lastDisconnect,
       lastUrl: metrics.lastUrl,
-      expectedReconnectTime: switch (readyState) {
+      isReconnectionActive: reconnectionStatus.active,
+      currentReconnectAttempts: reconnectionStatus.attempt,
+      nextReconnectionAttempt: switch (readyState) {
         WebSocketReadyState.open => null,
         WebSocketReadyState.connecting => DateTime.now(),
-        WebSocketReadyState.disconnecting
-            when reconnectTimeout > Duration.zero =>
-          DateTime.now().add(reconnectTimeout),
-        WebSocketReadyState.closed
-            when reconnectTimeout > Duration.zero &&
-                lastDisconnectTime != null &&
-                !client.isClosed &&
-                WebSocketConnectionManager.instance
-                    .isReconnectionActive(client) =>
-          lastDisconnectTime.add(reconnectTimeout),
-        _ => null,
+        WebSocketReadyState.disconnecting => null,
+        WebSocketReadyState.closed =>
+          reconnectionStatus.nextReconnectionAttempt,
       },
     );
   }

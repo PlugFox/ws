@@ -10,7 +10,7 @@ final class WebSocketMetrics {
   const WebSocketMetrics({
     required this.timestamp,
     required this.readyState,
-    required this.reconnectTimeout,
+    required this.nextReconnectionAttempt,
     required this.transferredSize,
     required this.receivedSize,
     required this.transferredCount,
@@ -19,8 +19,9 @@ final class WebSocketMetrics {
     required this.lastSuccessfulConnectionTime,
     required this.disconnects,
     required this.lastDisconnectTime,
-    required this.expectedReconnectTime,
     required this.lastDisconnect,
+    required this.isReconnectionActive,
+    required this.currentReconnectAttempts,
     required this.lastUrl,
   });
 
@@ -50,11 +51,6 @@ final class WebSocketMetrics {
         'readyState',
         WebSocketReadyState.fromCode,
         () => WebSocketReadyState.closed,
-      ),
-      reconnectTimeout: extract<int, Duration>(
-        'reconnectTimeout',
-        (v) => Duration(milliseconds: v),
-        () => Duration.zero,
       ),
       transferredSize: extract<String, BigInt>(
         'transferredSize',
@@ -120,8 +116,18 @@ final class WebSocketMetrics {
         (v) => v,
         () => null,
       ),
-      expectedReconnectTime: extract<int, DateTime?>(
-        'expectedReconnectTime',
+      isReconnectionActive: extract<bool, bool>(
+        'isReconnectionActive',
+        (v) => v,
+        () => false,
+      ),
+      currentReconnectAttempts: extract<int, int>(
+        'currentReconnectAttempts',
+        (v) => v,
+        () => 0,
+      ),
+      nextReconnectionAttempt: extract<int, DateTime?>(
+        'nextReconnectionAttempt',
         DateTime.fromMillisecondsSinceEpoch,
         () => null,
       ),
@@ -132,7 +138,6 @@ final class WebSocketMetrics {
   Map<String, Object?> toJson() => <String, Object?>{
         'timestamp': timestamp.millisecondsSinceEpoch,
         'readyState': readyState.code,
-        'reconnectTimeout': reconnectTimeout.inMilliseconds,
         'transferredSize': transferredSize.toString(),
         'receivedSize': receivedSize.toString(),
         'transferredCount': transferredCount.toString(),
@@ -143,9 +148,12 @@ final class WebSocketMetrics {
             lastSuccessfulConnectionTime?.millisecondsSinceEpoch,
         'disconnects': disconnects,
         'lastDisconnectTime': lastDisconnectTime?.millisecondsSinceEpoch,
-        'expectedReconnectTime': expectedReconnectTime?.millisecondsSinceEpoch,
+        'nextReconnectionAttempt':
+            nextReconnectionAttempt?.millisecondsSinceEpoch,
         'lastDisconnectCode': lastDisconnect.code,
         'lastDisconnectReason': lastDisconnect.reason,
+        'isReconnectionActive': isReconnectionActive,
+        'currentReconnectAttempts': currentReconnectAttempts,
         'lastUrl': lastUrl,
       };
 
@@ -154,9 +162,6 @@ final class WebSocketMetrics {
 
   /// The current state of the connection.
   final WebSocketReadyState readyState;
-
-  /// Timeout between reconnection attempts.
-  final Duration reconnectTimeout;
 
   /// The total number of bytes sent.
   final BigInt transferredSize;
@@ -183,10 +188,16 @@ final class WebSocketMetrics {
   final DateTime? lastDisconnectTime;
 
   /// The time of the next expected reconnect.
-  final DateTime? expectedReconnectTime;
+  final DateTime? nextReconnectionAttempt;
 
   /// The last disconnect reason.
   final ({int? code, String? reason}) lastDisconnect;
+
+  /// Is the client currently planning to reconnect?
+  final bool isReconnectionActive;
+
+  /// The current number of reconnection attempts.
+  final int currentReconnectAttempts;
 
   /// The last URL used to connect.
   final String? lastUrl;
@@ -194,7 +205,6 @@ final class WebSocketMetrics {
   @override
   int get hashCode => Object.hashAll([
         readyState,
-        reconnectTimeout,
         transferredSize,
         receivedSize,
         transferredCount,
@@ -203,8 +213,10 @@ final class WebSocketMetrics {
         lastSuccessfulConnectionTime,
         disconnects,
         lastDisconnectTime,
-        expectedReconnectTime,
+        nextReconnectionAttempt,
         lastDisconnect,
+        isReconnectionActive,
+        currentReconnectAttempts,
         lastUrl,
       ]);
 
@@ -219,19 +231,20 @@ final class WebSocketMetrics {
                 '${ago ? 'ago' : 'from now'}'
             : 'never';
     return '- readyState: ${readyState.name}\n'
-        '- reconnectTimeout: ${reconnectTimeout.inSeconds} seconds\n'
         '- transferredSize: $transferredSize\n'
         '- receivedSize: $receivedSize\n'
         '- transferredCount: $transferredCount\n'
         '- receivedCount: $receivedCount\n'
+        '- isReconnectionActive: $isReconnectionActive\n'
+        '- currentReconnectAttempts: $currentReconnectAttempts\n'
         '- reconnects: ${reconnects.successful} / ${reconnects.total}\n'
         '- lastSuccessfulConnectionTime: '
         '${dateTimeRepresentation(lastSuccessfulConnectionTime, ago: true)}\n'
         '- disconnects: $disconnects\n'
         '- lastDisconnectTime: '
         '${dateTimeRepresentation(lastDisconnectTime, ago: true)}\n'
-        '- expectedReconnectTime: '
-        '${dateTimeRepresentation(expectedReconnectTime)}\n'
+        '- nextReconnectionAttempt: '
+        '${dateTimeRepresentation(nextReconnectionAttempt)}\n'
         '- lastDisconnect: '
         '${lastDisconnect.code ?? 'unknown'} '
         '(${lastDisconnect.reason ?? 'unknown'})\n'
