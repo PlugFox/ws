@@ -25,6 +25,9 @@ typedef ConnectionRetryInterval = ({Duration min, Duration max});
 /// The [protocols] argument is specifying the subprotocols the
 /// client is willing to speak.
 ///
+/// The [timeout] argument is specifying the maximum time to wait for the
+/// connection to be established.
+///
 /// Other arguments are platform dependent.
 ///
 /// {@endtemplate}
@@ -85,6 +88,9 @@ abstract base class WebSocketOptions {
   /// If [customClient] is provided, the `WebSocket` created will be configured.
   ///
   /// If [userAgent] is provided, the `WebSocket` created will be configured.
+  ///
+  /// The [timeout] argument is specifying the maximum time to wait for the
+  /// connection to be established.
   /// {@endtemplate}
   factory WebSocketOptions.vm({
     ConnectionRetryInterval? connectionRetryInterval,
@@ -120,8 +126,9 @@ abstract base class WebSocketOptions {
   /// The [timeout] argument is specifying the maximum time to wait for the
   /// connection to be established.
   ///
-  /// The [useBlobForBinary] argument is specifying the Uint8List should be send as
-  /// Blob or as Typed data. By default, the data send as Typed data.
+  /// The [useBlobForBinary] argument is specifying the Uint8List
+  /// should be send as Blob or as Typed data.
+  /// By default, the data send as Typed data.
   /// {@endtemplate}
   factory WebSocketOptions.js({
     ConnectionRetryInterval? connectionRetryInterval,

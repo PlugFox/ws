@@ -1,4 +1,4 @@
-## 1.0.0-pre.2
+## 1.0.0-pre.3
 
 - **BREAKING CHANGE**: Change options to separate, platform-specific object
 - You can now pass a headers and other options to the IO websocket client
