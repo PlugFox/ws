@@ -112,7 +112,6 @@ abstract base class WebSocketOptions {
   /// The [protocols] argument is specifying the subprotocols the
   /// client is willing to speak.
   /// {@endtemplate}
-  @internal
   factory WebSocketOptions.js({
     ConnectionRetryInterval? connectionRetryInterval,
     Iterable<String>? protocols,
@@ -145,4 +144,12 @@ abstract base class WebSocketOptions {
   /// If not specified, the protocols will not be used.
   @nonVirtual
   final Set<String>? protocols;
+
+  // TODO(plugfox): Add support for the following options.
+  /// The connection timeout
+  //final Duration timeout;
+
+  // TODO(plugfox): Add support for the following options.
+  /// The data send for the first request
+  //final List<int>? data;
 }
