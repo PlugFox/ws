@@ -6,9 +6,6 @@ import 'package:ws/src/client/state.dart';
 /// WebSocket client interface.
 /// {@category Client}
 abstract interface class IWebSocketClient implements Sink<Object> {
-  /// Timeout between reconnection attempts.
-  abstract final Duration reconnectTimeout;
-
   /// Whether the WebSocket connection is closed.
   bool get isClosed;
 

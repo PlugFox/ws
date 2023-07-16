@@ -8,20 +8,19 @@ import 'package:ws/src/client/web_socket_ready_state.dart';
 import 'package:ws/src/client/websocket_exception.dart';
 import 'package:ws/src/client/ws_client_base.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
+import 'package:ws/src/client/ws_options.dart';
 import 'package:ws/src/util/logger.dart';
 
 /// {@nodoc}
 @internal
-IWebSocketClient $platformWebSocketClient(
-        Duration reconnectTimeout, Iterable<String>? protocols) =>
-    WebSocketClient$JS(
-        reconnectTimeout: reconnectTimeout, protocols: protocols);
+IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
+    WebSocketClient$JS(protocols: options?.protocols);
 
 /// {@nodoc}
 @internal
 final class WebSocketClient$JS extends WebSocketClientBase {
   /// {@nodoc}
-  WebSocketClient$JS({super.reconnectTimeout, super.protocols});
+  WebSocketClient$JS({super.protocols});
 
   /// Native WebSocket client.
   /// {@nodoc}

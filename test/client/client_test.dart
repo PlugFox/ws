@@ -1,17 +1,38 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:test/test.dart';
 import 'package:ws/interface.dart';
 import 'package:ws/ws.dart';
 
 void main() {
+  final defaultWSOptions = WebSocketOptions.selector(
+    vm: () => WebSocketOptions.vm(
+      connectionRetryInterval: (
+        min: const Duration(milliseconds: 500),
+        max: const Duration(milliseconds: 1000),
+      ),
+      compression: const CompressionOptions(),
+      customClient: HttpClient(),
+      headers: const <String, Object?>{
+        HttpHeaders.userAgentHeader: 'ws/1.0',
+        HttpHeaders.acceptHeader: 'application/json',
+      },
+      userAgent: 'ws/1.0',
+    ),
+    js: () => WebSocketOptions.js(
+      connectionRetryInterval: (
+        min: const Duration(milliseconds: 500),
+        max: const Duration(milliseconds: 1000),
+      ),
+    ),
+  );
   test('WebSocketClient example', () async {
     await runZoned<Future<void>>(
       () async {
         const url = 'wss://echo.plugfox.dev:443/connect';
-        final client = WebSocketClient(
-            reconnectTimeout: const Duration(milliseconds: 750));
+        final client = WebSocketClient(defaultWSOptions);
         expect(client.state, isA<WebSocketClientState$Closed>());
         expect(client.metrics, isA<WebSocketMetrics>());
         client.stream.drain<void>().ignore();
@@ -46,7 +67,7 @@ void main() {
       late IWebSocketClient client;
 
       setUp(() {
-        client = WebSocketClient(reconnectTimeout: const Duration(seconds: 1));
+        client = WebSocketClient(defaultWSOptions);
       });
 
       tearDown(() {
@@ -77,7 +98,7 @@ void main() {
     late IWebSocketClient client;
 
     setUpAll(() {
-      client = WebSocketClient(reconnectTimeout: const Duration(seconds: 1));
+      client = WebSocketClient(defaultWSOptions);
     });
 
     tearDownAll(() {
@@ -246,7 +267,7 @@ void main() {
     late IWebSocketClient client;
 
     setUpAll(() {
-      client = WebSocketClient(reconnectTimeout: const Duration(seconds: 1));
+      client = WebSocketClient(defaultWSOptions);
     });
 
     tearDownAll(() {
@@ -280,7 +301,7 @@ void main() {
     late IWebSocketClient client;
 
     setUpAll(() {
-      client = WebSocketClient(reconnectTimeout: const Duration(seconds: 1));
+      client = WebSocketClient(defaultWSOptions);
     });
 
     tearDownAll(() {
@@ -329,7 +350,7 @@ void main() {
       late IWebSocketClient client;
 
       setUpAll(() {
-        client = WebSocketClient(reconnectTimeout: const Duration(seconds: 1));
+        client = WebSocketClient(defaultWSOptions);
       });
 
       tearDownAll(() {
@@ -426,9 +447,16 @@ void main() {
 
   group('Protocols', () {
     test('Set protocols', () async {
-      final client1 = WebSocketClient(protocols: ['foo', 'bar']);
-      final client2 = WebSocketClient.connect('ws://localhost:80',
-          protocols: ['foo', 'bar']);
+      final commonOptions = WebSocketOptions.common(
+        connectionRetryInterval: (
+          min: const Duration(milliseconds: 500),
+          max: const Duration(milliseconds: 1000),
+        ),
+        protocols: const <String>['foo', 'bar'],
+      );
+      final client1 = WebSocketClient(commonOptions);
+      final client2 =
+          WebSocketClient.connect('ws://localhost:80', commonOptions);
       final client3 = WebSocketClient.fromClient(client1);
       expect(client1, isA<WebSocketClient>());
       expect(client2, isA<WebSocketClient>());
@@ -436,6 +464,38 @@ void main() {
       await expectLater(client1.close(), completes);
       await expectLater(client2.close(), completes);
       await expectLater(client3.close(), completes);
+    });
+  });
+
+  group('Fake client', () {
+    test('Construct', () async {
+      final commonOptions = WebSocketOptions.common(
+        connectionRetryInterval: (
+          min: const Duration(milliseconds: 500),
+          max: const Duration(milliseconds: 1000),
+        ),
+        protocols: const <String>['foo', 'bar'],
+      );
+      final clientFake =
+          WebSocketClientFake(protocols: commonOptions.protocols);
+      final client = WebSocketClient.fromClient(clientFake, commonOptions);
+      expect(clientFake, isA<IWebSocketClient>());
+      expect(client, isA<WebSocketClient>());
+      expect(clientFake, isA<WebSocketClientFake>());
+      expect(client.metrics, isA<WebSocketMetrics>());
+      expect(client.state, isA<WebSocketClientState>());
+      expect(client.stream, isA<WebSocketMessagesStream>());
+      expect(client.stateChanges, isA<Stream<WebSocketClientState>>());
+      expect(client.isClosed, isFalse);
+      expect(client.state, isA<WebSocketClientState$Closed>());
+      await expectLater(client.connect('ws://localhost:80'), completes);
+      expect(client.state, isA<WebSocketClientState$Open>());
+      await expectLater(client.add('Hello, world!'), completes);
+      await expectLater(client.disconnect(), completes);
+      expect(client.state, isA<WebSocketClientState$Closed>());
+      await expectLater(client.close(), completes);
+      expect(client.state, isA<WebSocketClientState$Closed>());
+      expect(client.isClosed, isTrue);
     });
   });
 }

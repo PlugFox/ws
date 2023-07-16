@@ -8,21 +8,25 @@ import 'package:ws/src/client/ws_options.dart';
 WebSocketOptions $vmOptions({
   ConnectionRetryInterval? connectionRetryInterval,
   Iterable<String>? protocols,
-  Map<String, dynamic>? headers,
-  CompressionOptions? compression,
-  HttpClient? customClient,
+  Map<String, Object?>? headers,
+  Object? /*CompressionOptions*/ compression,
+  Object? /*HttpClient*/ customClient,
   String? userAgent,
-}) {
-  assert(false, 'This method should not be called at the JS platform.');
-  return $WebSocketOptions$VM(
-    connectionRetryInterval: connectionRetryInterval,
-    protocols: protocols,
-    headers: headers,
-    compression: compression,
-    customClient: customClient,
-    userAgent: userAgent,
-  );
-}
+}) =>
+    $WebSocketOptions$VM(
+      connectionRetryInterval: connectionRetryInterval,
+      protocols: protocols,
+      headers: headers,
+      compression: switch (compression) {
+        CompressionOptions compression => compression,
+        _ => null,
+      },
+      customClient: switch (customClient) {
+        HttpClient customClient => customClient,
+        _ => null,
+      },
+      userAgent: userAgent,
+    );
 
 /// {@nodoc}
 @internal

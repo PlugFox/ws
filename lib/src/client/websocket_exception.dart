@@ -2,6 +2,7 @@
 /// This is a custom exception class for WebSocket.
 /// Do not confuse it with a native exception WebSocketException from dart:io
 /// {@endtemplate}
+/// {@category Client}
 /// {@category Entity}
 sealed class WSException implements Exception {
   /// {@macro websocket_exception}
@@ -17,6 +18,7 @@ sealed class WSException implements Exception {
 /// {@template not_connected_exception}
 /// Exception thrown when a WebSocket is not connected.
 /// {@endtemplate}
+/// {@category Client}
 /// {@category Entity}
 final class WSNotConnected extends WSException {
   /// {@macro not_connected_exception}
@@ -26,6 +28,7 @@ final class WSNotConnected extends WSException {
 /// {@template unknown_exception}
 /// Unknown WebSocket exception.
 /// {@endtemplate}
+/// {@category Client}
 /// {@category Entity}
 final class WSUnknownException extends WSException {
   /// {@macro unknown_exception}
@@ -36,6 +39,7 @@ final class WSUnknownException extends WSException {
 /// {@template socket_exception}
 /// Exception thrown when a socket operation fails.
 /// {@endtemplate}
+/// {@category Client}
 /// {@category Entity}
 final class WSSocketException extends WSException {
   /// {@macro socket_exception}
@@ -45,6 +49,7 @@ final class WSSocketException extends WSException {
 /// {@template http_exception}
 /// Exception thrown when a socket operation fails.
 /// {@endtemplate}
+/// {@category Client}
 /// {@category Entity}
 final class WSHttpException extends WSException {
   /// {@macro http_exception}
@@ -54,6 +59,7 @@ final class WSHttpException extends WSException {
 /// {@template unsupported_exception}
 /// The operation was not allowed by the object.
 /// {@endtemplate}
+/// {@category Client}
 /// {@category Entity}
 final class WSUnsupportedException extends WSException {
   /// {@macro unsupported_exception}
@@ -63,6 +69,7 @@ final class WSUnsupportedException extends WSException {
 /// {@template client_closed}
 /// The operation was not allowed by the object.
 /// {@endtemplate}
+/// {@category Client}
 /// {@category Entity}
 final class WSClientClosed extends WSException implements StateError {
   /// {@macro client_closed}

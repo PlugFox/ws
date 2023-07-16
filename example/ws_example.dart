@@ -10,7 +10,7 @@ void main([List<String>? args]) {
       defaultValue: 'wss://echo.plugfox.dev:443/connect');
 
   // Setup a WebSocket client with auto reconnect
-  final client = WebSocketClient(reconnectTimeout: const Duration(seconds: 5))
+  final client = WebSocketClient()
     // Observing the incoming messages from the server
     ..stream.listen((message) => print('< $message'))
     // Observing the state changes (connecting, open, disconnecting, closed)

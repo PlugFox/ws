@@ -10,9 +10,7 @@ import 'package:ws/src/util/logger.dart';
 @internal
 abstract base class WebSocketClientBase implements IWebSocketClient {
   /// {@nodoc}
-  WebSocketClientBase(
-      {this.reconnectTimeout = const Duration(seconds: 5),
-      Iterable<String>? protocols})
+  WebSocketClientBase({Iterable<String>? protocols})
       : _dataController = StreamController<Object>.broadcast(),
         _stateController = StreamController<WebSocketClientState>.broadcast(),
         _state = WebSocketClientState.initial(),
@@ -27,9 +25,6 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   /// {@nodoc}
   @protected
   final List<String>? protocols;
-
-  @override
-  final Duration reconnectTimeout;
 
   /// Output stream of data from native WebSocket client.
   /// {@nodoc}

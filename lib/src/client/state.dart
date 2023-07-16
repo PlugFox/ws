@@ -2,24 +2,11 @@ import 'package:meta/meta.dart';
 import 'package:ws/src/client/status_codes.dart';
 import 'package:ws/src/client/web_socket_ready_state.dart';
 
-/// Whether the stream controller is permanently closed.
-///
-/// The controller becomes closed by calling the [close] method.
-///
-/// If the controller is closed,
-/// the "done" event might not have been delivered yet,
-/// but it has been scheduled, and it is too late to add more events.
-//bool get isClosed;
-
-/// A future which is completed when the stream controller is done.
-//Future<void> get done;
-
 /// {@template web_socket_client_state}
 /// WebSocket client state.
-///
+/// {@endtemplate}
 /// {@category Client}
 /// {@category Entity}
-/// {@endtemplate}
 @immutable
 sealed class WebSocketClientState {
   /// {@macro web_socket_client_state}

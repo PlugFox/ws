@@ -1,26 +1,36 @@
-import 'dart:io' as io;
-
 import 'package:meta/meta.dart';
+import 'package:ws/src/client/ws_options_common.dart';
 import 'package:ws/src/client/ws_options_vm.dart'
     // ignore: uri_does_not_exist
     if (dart.library.html) 'package:ws/src/client/ws_options_js.dart';
 
-/// Backoff strategy for reconnecting.
+/// [Backoff full jitter strategy](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) for reconnecting.
 /// Tweaks for reconnect backoff algorithm (min delay, max delay)
+///
+/// {@category Client}
+/// {@category Options}
+/// {@category Entity}
 typedef ConnectionRetryInterval = ({Duration min, Duration max});
 
 /// {@template ws_options}
 /// Web socket platform dependent options.
 ///
+/// Common options for VM and JS platforms:
+///
 /// The [connectionRetryInterval] argument is specifying the
-/// backoff strategy for reconnecting.
+/// [backoff full jitter strategy](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) for reconnecting.
 /// Tweaks for reconnect backoff algorithm (min delay, max delay)
 /// If not specified, the reconnecting will be disabled.
 ///
 /// The [protocols] argument is specifying the subprotocols the
 /// client is willing to speak.
 ///
+/// Other arguments are platform dependent.
+///
 /// {@endtemplate}
+/// {@category Client}
+/// {@category Options}
+/// {@category Entity}
 @immutable
 abstract base class WebSocketOptions {
   /// {@macro ws_options}
@@ -33,7 +43,7 @@ abstract base class WebSocketOptions {
   factory WebSocketOptions.common({
     ConnectionRetryInterval? connectionRetryInterval,
     Iterable<String>? protocols,
-  }) = WebSocketOptions$Common;
+  }) = $WebSocketOptions$Common;
 
   /// {@template ws_options_vm}
   /// Options for VM (Mobile, Desktop, Server, Console) platform.
@@ -77,8 +87,8 @@ abstract base class WebSocketOptions {
     ConnectionRetryInterval? connectionRetryInterval,
     Iterable<String>? protocols,
     Map<String, dynamic>? headers,
-    io.CompressionOptions? compression,
-    io.HttpClient? customClient,
+    Object? /*CompressionOptions*/ compression,
+    Object? /*HttpClient*/ customClient,
     String? userAgent,
   }) =>
       $vmOptions(
@@ -134,25 +144,4 @@ abstract base class WebSocketOptions {
   /// If not specified, the protocols will not be used.
   @nonVirtual
   final Set<String>? protocols;
-}
-
-/// {@template ws_options_common}
-/// Options for all platforms.
-///
-/// The [connectionRetryInterval] argument is specifying the
-/// backoff strategy for reconnecting.
-/// Tweaks for reconnect backoff algorithm (min delay, max delay)
-/// If not specified, the reconnecting will be disabled.
-///
-/// The [protocols] argument is specifying the subprotocols the
-/// client is willing to speak.
-///
-/// {@endtemplate}
-@internal
-final class WebSocketOptions$Common extends WebSocketOptions {
-  /// {@macro ws_options_common}
-  WebSocketOptions$Common({
-    super.connectionRetryInterval,
-    super.protocols,
-  });
 }

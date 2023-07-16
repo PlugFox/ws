@@ -8,20 +8,32 @@ import 'package:ws/src/client/web_socket_ready_state.dart';
 import 'package:ws/src/client/websocket_exception.dart';
 import 'package:ws/src/client/ws_client_base.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
+import 'package:ws/src/client/ws_options.dart';
+import 'package:ws/src/client/ws_options_vm.dart';
 import 'package:ws/src/util/logger.dart';
 
 /// {@nodoc}
 @internal
-IWebSocketClient $platformWebSocketClient(
-        Duration reconnectTimeout, Iterable<String>? protocols) =>
-    WebSocketClient$VM(
-        reconnectTimeout: reconnectTimeout, protocols: protocols);
+IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
+    switch (options) {
+      $WebSocketOptions$VM options => WebSocketClient$VM(
+          protocols: options.protocols,
+          options: options,
+        ),
+      _ => WebSocketClient$VM(
+          protocols: options?.protocols,
+        ),
+    };
 
 /// {@nodoc}
 @internal
 final class WebSocketClient$VM extends WebSocketClientBase {
   /// {@nodoc}
-  WebSocketClient$VM({super.reconnectTimeout, super.protocols});
+  WebSocketClient$VM({super.protocols, $WebSocketOptions$VM? options})
+      : _options = options;
+
+  /// {@nodoc}
+  final $WebSocketOptions$VM? _options;
 
   /// Native WebSocket client.
   /// {@nodoc}
@@ -75,10 +87,19 @@ final class WebSocketClient$VM extends WebSocketClientBase {
     try {
       if (_client != null) await disconnect(1001, 'RECONNECTING');
       super.connect(url);
+      if (_options?.userAgent case String userAgent) {
+        io.WebSocket.userAgent = userAgent;
+      }
       // Close it at a [disconnect] or [close] method.
       // ignore: close_sinks
-      final client =
-          _client = await io.WebSocket.connect(url, protocols: protocols);
+      final client = _client = await io.WebSocket.connect(
+        url,
+        protocols: protocols,
+        headers: _options?.headers,
+        compression:
+            _options?.compression ?? io.CompressionOptions.compressionDefault,
+        customClient: _options?.customClient,
+      );
       _dataBindSubscription = client
           .asyncMap<Object?>((data) => switch (data) {
                 String text => text,

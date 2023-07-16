@@ -1,3 +1,11 @@
+## 1.0.0-pre.1
+
+- **BREAKING CHANGE**: Change options to separate, platform-specific object
+- You can now pass a headers and other options to the IO websocket client
+- Backoff full jitter strategy for reconnection attempts
+- Add more metrics
+- Public Fake WebSocket client for testing
+
 ## 0.1.2
 
 - Update README.md

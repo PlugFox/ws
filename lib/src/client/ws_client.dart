@@ -1,15 +1,19 @@
 import 'dart:async';
 
+import 'package:ws/src/client/message_stream.dart';
+import 'package:ws/src/client/metrics.dart';
+import 'package:ws/src/client/state.dart';
+import 'package:ws/src/client/websocket_exception.dart';
 import 'package:ws/src/client/ws_client_fake.dart'
     // ignore: uri_does_not_exist
     if (dart.library.html) 'package:ws/src/client/ws_client_js.dart'
     // ignore: uri_does_not_exist
     if (dart.library.io) 'package:ws/src/client/ws_client_vm.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
+import 'package:ws/src/client/ws_options.dart';
 import 'package:ws/src/manager/connection_manager.dart';
 import 'package:ws/src/manager/metrics_manager.dart';
 import 'package:ws/src/util/event_queue.dart';
-import 'package:ws/ws.dart';
 
 /// {@template ws_client}
 /// WebSocket client.
@@ -19,11 +23,9 @@ import 'package:ws/ws.dart';
 /// {@category Client}
 final class WebSocketClient implements IWebSocketClient {
   /// {@macro ws_client}
-  WebSocketClient(
-      {Duration reconnectTimeout = const Duration(seconds: 5),
-      Iterable<String>? protocols})
-      : reconnectTimeout = reconnectTimeout.abs(),
-        _client = $platformWebSocketClient(reconnectTimeout.abs(), protocols) {
+  WebSocketClient([WebSocketOptions? options])
+      : _client = $platformWebSocketClient(options),
+        _options = options {
     WebSocketMetricsManager.instance.startObserving(this);
   }
 
@@ -32,32 +34,30 @@ final class WebSocketClient implements IWebSocketClient {
   /// with reconnecting and concurrency protection.
   /// {@macro ws_client}
   WebSocketClient.fromClient(IWebSocketClient client,
-      {Duration reconnectTimeout = const Duration(seconds: 5)})
-      : reconnectTimeout = reconnectTimeout.abs(),
-        _client = client {
+      [WebSocketOptions? options])
+      : _client = client,
+        _options = options {
     WebSocketMetricsManager.instance.startObserving(this);
   }
 
   /// {@macro ws_client}
-  factory WebSocketClient.connect(String url,
-          {Duration reconnectTimeout = const Duration(seconds: 5),
-          Iterable<String>? protocols}) =>
-      WebSocketClient(reconnectTimeout: reconnectTimeout, protocols: protocols)
-        ..connect(url).ignore();
+  factory WebSocketClient.connect(String url, [WebSocketOptions? options]) =>
+      WebSocketClient(options)..connect(url).ignore();
 
   final IWebSocketClient _client;
   final WebSocketEventQueue _eventQueue = WebSocketEventQueue();
+
+  /// Current options.
+  /// {@nodoc}
+  final WebSocketOptions? _options;
 
   @override
   bool get isClosed => _isClosed;
   bool _isClosed = false;
 
-  @override
-  final Duration reconnectTimeout;
-
   /// Get the metrics for this client.
   WebSocketMetrics get metrics =>
-      WebSocketMetricsManager.instance.buildMetric(this);
+      WebSocketMetricsManager.instance.buildMetricFor(this);
 
   @override
   WebSocketMessagesStream get stream => _client.stream;
@@ -79,7 +79,11 @@ final class WebSocketClient implements IWebSocketClient {
   Future<void> connect(String url) {
     if (_isClosed) return Future<void>.error(const WSClientClosed());
     return _eventQueue.push('connect', () {
-      WebSocketConnectionManager.instance.startMonitoringConnection(this, url);
+      WebSocketConnectionManager.instance.startMonitoringConnection(
+        this,
+        url,
+        _options?.connectionRetryInterval,
+      );
       return _client.connect(url);
     });
   }

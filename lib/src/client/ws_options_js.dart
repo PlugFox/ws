@@ -6,14 +6,10 @@ import 'package:ws/src/client/ws_options.dart';
 WebSocketOptions $vmOptions({
   ConnectionRetryInterval? connectionRetryInterval,
   Iterable<String>? protocols,
-  // ignore: type_annotate_public_apis, inference_failure_on_untyped_parameter
-  headers,
-  // ignore: type_annotate_public_apis, inference_failure_on_untyped_parameter
-  compression,
-  // ignore: type_annotate_public_apis, inference_failure_on_untyped_parameter
-  customClient,
-  // ignore: type_annotate_public_apis, inference_failure_on_untyped_parameter
-  userAgent,
+  Map<String, Object?>? headers,
+  Object? /*CompressionOptions*/ compression,
+  Object? /*HttpClient*/ customClient,
+  String? userAgent,
 }) {
   assert(false, 'This method should not be called at the JS platform.');
   return $WebSocketOptions$JS(
