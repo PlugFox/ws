@@ -54,17 +54,18 @@ The `ws` package provides a cross-platform WebSocket client that supports JSON. 
 
 ## Features and Roadmap
 
-- [x] Cross-platform WebSocket client for Dart and Flutter
-- [x] Support for secure WebSocket connections (wss://)
-- [x] Connection state changes
-- [x] Fake client
-- [x] Reconnection to new URL
-- [x] Concurrency
-- [x] Auto reconnection after network problems
-- [x] Handy stream of messages with automatic JSON decoding
-- [x] Metrics & TX/RX bytes and counters
-- [ ] Reusing client between isolates
-- [ ] 95% test coverage
+- ✅ Cross-platform WebSocket client for Dart and Flutter
+- ✅ Support for secure WebSocket connections (wss://)
+- ✅ Connection state changes
+- ✅ Fake client
+- ✅ Reconnection to new URL
+- ✅ Concurrency
+- ✅ Backoff [full jitter strategy](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) for reconnection attempts
+- ✅ Handy stream of messages with automatic JSON decoding
+- ✅ Metrics & TX/RX bytes and counters
+- ✅ Platform-specific options
+- ❌ Reusing client between isolates
+- ❌ 95% test coverage
 
 ## More resources
 
@@ -83,7 +84,7 @@ Refer to the [Changelog](https://github.com/PlugFox/ws/blob/master/CHANGELOG.md)
 
 ## Maintainers
 
-[Plague Fox](https://plugfox.dev)
+[Matiunin Mikhail aka Plague Fox](https://plugfox.dev)
 
 ## Funding
 

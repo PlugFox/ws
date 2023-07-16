@@ -5,12 +5,26 @@ import 'dart:io' as io show exit;
 import 'package:ws/ws.dart';
 
 void main([List<String>? args]) {
-  // The server URL (pass it as --define=URL=...)
+  // The Web Socket server URL.
+  // Pass it as `--define=URL=...` for `String.fromEnvironment('URL')`
+  // or extract from env by `Platform.environment['URL']`
+  // or parse it using `dart:args`
   const url = String.fromEnvironment('URL',
       defaultValue: 'wss://echo.plugfox.dev:443/connect');
 
-  // Setup a WebSocket client with auto reconnect
-  final client = WebSocketClient()
+  // Setup a WebSocket client with auto reconnecting
+  // Also, we can enqueue sending before the connection is established.
+  final client = WebSocketClient(
+    // Common options for all platforms
+    // Or use `.js(..)`, `.vm(..)`, `.selector(..)` instead of `.common(..)`
+    WebSocketOptions.common(
+      // The delay between reconnection attempts will be between 500ms and 15s
+      connectionRetryInterval: (
+        min: const Duration(milliseconds: 500),
+        max: const Duration(seconds: 15),
+      ),
+    ),
+  )
     // Observing the incoming messages from the server
     ..stream.listen((message) => print('< $message'))
     // Observing the state changes (connecting, open, disconnecting, closed)
@@ -22,6 +36,7 @@ void main([List<String>? args]) {
     // One more message after first is sent
     ..add('world!'); // > world!
 
+  // Close the connection after 1 second
   Timer(const Duration(seconds: 1), () async {
     await client.close(); // Close the connection
     print('Metrics:\n${client.metrics}'); // Print the metrics
