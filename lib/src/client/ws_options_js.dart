@@ -1,8 +1,7 @@
+// Ignore web related imports at the GitHub Actions coverage.
+// coverage:ignore-file
 import 'package:meta/meta.dart';
 import 'package:ws/src/client/ws_options.dart';
-
-// Ignore web related imports at the GitHub Actions coverage.
-// coverage:ignore-start
 
 /// {@nodoc}
 @internal
@@ -35,6 +34,7 @@ WebSocketOptions $jsOptions({
       connectionRetryInterval: connectionRetryInterval,
       protocols: protocols,
       timeout: timeout,
+      useBlobForBinary: useBlobForBinary,
     );
 
 /// {@nodoc}
@@ -58,5 +58,3 @@ final class $WebSocketOptions$JS extends WebSocketOptions {
   /// {@nodoc}
   final bool useBlobForBinary;
 }
-
-// coverage:ignore-end

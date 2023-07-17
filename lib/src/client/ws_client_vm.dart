@@ -104,7 +104,7 @@ final class WebSocketClient$VM extends WebSocketClientBase {
       _dataBindSubscription = client
           .asyncMap<Object?>((data) => switch (data) {
                 String text => text, // coverage:ignore-line
-                TypedData td => td.buffer.asInt8List(), // coverage:ignore-line
+                TypedData td => td, // coverage:ignore-line
                 ByteBuffer bb => bb.asUint8List(), // coverage:ignore-line
                 List<int> bytes => bytes, // coverage:ignore-line
                 _ => data, // coverage:ignore-line

@@ -1,3 +1,5 @@
+// Ignore web related imports at the GitHub Actions coverage.
+// coverage:ignore-file
 import 'dart:async';
 import 'dart:convert';
 import 'dart:html' as html show WebSocket, Blob, Event, CloseEvent, FileReader;
@@ -11,9 +13,6 @@ import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/client/ws_options.dart';
 import 'package:ws/src/client/ws_options_js.dart';
 import 'package:ws/src/util/logger.dart';
-
-// Ignore web related imports at the GitHub Actions coverage.
-// coverage:ignore-start
 
 /// {@nodoc}
 @internal
@@ -135,7 +134,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
           .asyncMap<Object?>((data) => switch (data) {
                 String text => text, // coverage:ignore-line
                 html.Blob blob => _blobCodec.read(blob), // coverage:ignore-line
-                TypedData td => td.buffer.asInt8List(), // coverage:ignore-line
+                TypedData td => td, // coverage:ignore-line
                 ByteBuffer bb => bb.asInt8List(), // coverage:ignore-line
                 List<int> bytes => bytes, // coverage:ignore-line
                 _ => data, // coverage:ignore-line
@@ -255,5 +254,3 @@ final class _BlobCodec {
     return completer.future;
   }
 }
-
-// coverage:ignore-end
