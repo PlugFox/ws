@@ -23,7 +23,7 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
             : null;
 
   @override
-  bool get isClosed => _isClosed;
+  bool get isClosed => _isClosed; // coverage:ignore-line
   bool _isClosed = false;
 
   /// {@nodoc}
@@ -65,11 +65,13 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   @override
   @mustCallSuper
   FutureOr<void> add(Object data) async {
+    // coverage:ignore-start
     if ($debugWS) {
       var text = data.toString();
       text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
       fine('> $text');
     }
+    // coverage:ignore-end
   }
 
   @override
@@ -90,9 +92,8 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
     _isClosed = true;
     try {
       await disconnect(code, reason);
-    } on Object {
-      /* ignore */
-    }
+    } on Object {/* ignore */} // coverage:ignore-line
+
     _dataController.close().ignore();
     _stateController.close().ignore();
   }
@@ -116,24 +117,30 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   /// {@nodoc}
   @protected
   void onSent(Object data) {
+    // coverage:ignore-start
     if ($debugWS) {
       var text = data.toString();
       text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
       fine('Sent: $text');
     }
+    // coverage:ignore-end
   }
 
   /// On data received callback.
   /// {@nodoc}
   @protected
   void onReceivedData(Object? data) {
+    // coverage:ignore-start
     if (data == null || _dataController.isClosed) return;
+    // coverage:ignore-end
     _dataController.add(data);
+    // coverage:ignore-start
     if ($debugWS) {
       var text = data.toString();
       text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
       fine('< $text');
     }
+    // coverage:ignore-end
   }
 
   /// {@nodoc}

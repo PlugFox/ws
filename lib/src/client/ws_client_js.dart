@@ -184,7 +184,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
     if (client != null) {
       try {
         client.close(code, reason);
-      } on Object {/* ignore */}
+      } on Object {/* ignore */} // coverage:ignore-line
       _client = null;
     }
     super.onDisconnected(code, reason);

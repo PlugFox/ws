@@ -42,5 +42,23 @@ void main() {
       expect(obj.transferredCount, equals(metrics.transferredCount));
       expect(obj.transferredSize, equals(metrics.transferredSize));
     });
+
+    test('from Empty Json', () async {
+      // toJson, fromJson
+      final metrics = WebSocketMetrics.fromJson(const <String, Object?>{});
+      expect(metrics, isA<WebSocketMetrics>());
+      final json = metrics.toJson();
+      expect(json, isA<Map<String, Object?>>());
+    });
+
+    test('from corrupted Json', () async {
+      // toJson, fromJson
+      final metrics = WebSocketMetrics.fromJson(const <String, Object?>{
+        'readyState': 'unknown',
+      });
+      expect(metrics, isA<WebSocketMetrics>());
+      final json = metrics.toJson();
+      expect(json, isA<Map<String, Object?>>());
+    });
   });
 }

@@ -61,6 +61,44 @@ void main() {
     );
   });
 
+  group('Closed client', () {
+    const url = 'wss://echo.plugfox.dev:443/connect';
+
+    late IWebSocketClient client;
+
+    setUp(() {
+      client = WebSocketClient(defaultWSOptions);
+    });
+
+    tearDown(() {
+      client.close();
+    });
+
+    test('connect', () async {
+      await client.close();
+      expect(client.state, isA<WebSocketClientState$Closed>());
+      expect(() => client.connect(url), throwsException);
+    });
+
+    test('add', () async {
+      await client.close();
+      expect(client.state, isA<WebSocketClientState$Closed>());
+      expect(() => client.add(url), throwsException);
+    });
+
+    test('disconnect', () async {
+      await client.close();
+      expect(client.state, isA<WebSocketClientState$Closed>());
+      expect(() => client.disconnect(), throwsException);
+    });
+
+    test('close', () async {
+      await client.close();
+      expect(client.state, isA<WebSocketClientState$Closed>());
+      expect(() => client.close(), returnsNormally);
+    });
+  });
+
   group(
     'WebSocketClient init',
     () {

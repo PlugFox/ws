@@ -37,6 +37,7 @@ void Function(
   StackTrace? stackTrace,
   String? reason,
 ]) _logAll(String prefix, int level) => (message, [stackTrace, reason]) {
+      // coverage:ignore-start
       if (!$debugWS && Zone.current[#dev.plugfox.ws.debug] != true) return;
       developer.log(
         '[ws] ${reason ?? message}',
@@ -45,4 +46,5 @@ void Function(
         error: message is Exception || message is Error ? message : null,
         stackTrace: stackTrace,
       );
+      // coverage:ignore-end
     };
