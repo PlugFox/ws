@@ -1,10 +1,6 @@
-import 'dart:io' as io;
+import 'dart:async';
 
 import 'package:shelf/shelf.dart' show Request, Response;
+import 'package:ws_server/src/util/responses.dart';
 
-Response $healthCheck(Request request) => Response.ok(
-      '{"data": {"status": "ok"}}',
-      headers: <String, String>{
-        'Content-Type': io.ContentType.json.value,
-      },
-    );
+FutureOr<Response> $healthCheck(Request request) => Responses.ok(null);
