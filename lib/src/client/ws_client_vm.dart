@@ -101,13 +101,18 @@ final class WebSocketClient$VM extends WebSocketClientBase {
             _options?.compression ?? io.CompressionOptions.compressionDefault,
         customClient: _options?.customClient,
       );
+      // coverage:ignore-start
       _dataBindSubscription = client
           .asyncMap<Object?>((data) => switch (data) {
-                String text => text, // coverage:ignore-line
-                TypedData td => td, // coverage:ignore-line
-                ByteBuffer bb => bb.asUint8List(), // coverage:ignore-line
-                List<int> bytes => bytes, // coverage:ignore-line
-                _ => data, // coverage:ignore-line
+                String text => text,
+                ByteBuffer bb => bb.asUint8List(),
+                TypedData td => Uint8List.view(
+                    td.buffer,
+                    td.offsetInBytes,
+                    td.lengthInBytes,
+                  ),
+                List<int> bytes => bytes,
+                _ => data,
               })
           .listen(
             onReceivedData,
@@ -115,6 +120,7 @@ final class WebSocketClient$VM extends WebSocketClientBase {
             onDone: () => disconnect(1000, 'SUBSCRIPTION_CLOSED'),
             cancelOnError: false,
           );
+      // coverage:ignore-end
       if (!readyState.isOpen) {
         disconnect(1001, 'IS_NOT_OPEN_AFTER_CONNECT');
         assert(

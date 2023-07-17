@@ -144,7 +144,7 @@ void main() {
       final message = utf8.encode('Hello, World!');
       client.add(message);
       final received =
-          await client.stream.first.timeout(const Duration(seconds: 5));
+          await client.stream.bytes.first.timeout(const Duration(seconds: 5));
       expect(
           received,
           isA<List<int>>()
@@ -152,6 +152,10 @@ void main() {
       expect(
         received,
         equals(message),
+      );
+      expect(
+        utf8.decode(received),
+        equals('Hello, World!'),
       );
     });
 
