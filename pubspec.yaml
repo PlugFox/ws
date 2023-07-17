@@ -3,7 +3,7 @@ name: ws
 description: >
   WS: A compact, highly efficient WebSocket library. Easily establish, manage, and reconnect WebSocket connections in real-time apps.
 
-version: 1.0.0-pre.3
+version: 1.0.0-pre.4
 
 homepage: https://github.com/plugfox/ws
 
