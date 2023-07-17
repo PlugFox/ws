@@ -82,7 +82,7 @@ final class WebSocketConnectionManager {
             _stopTimer(client);
             if (client.isClosed) return;
             final attempt = _attempts[client] ?? 0;
-            final delay = _backoffDelay(attempt, minMs, maxMs);
+            final delay = backoffDelay(attempt, minMs, maxMs);
             if (delay <= Duration.zero) {
               config('Reconnecting to $lastUrl immediately.');
               Future<void>.sync(() => client.connect(lastUrl)).ignore();
@@ -124,12 +124,13 @@ final class WebSocketConnectionManager {
 
   /// Full jitter technique.
   /// https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
-  Duration _backoffDelay(int step, int minDelay, int maxDelay) {
+  /// {@nodoc}
+  @internal
+  static Duration backoffDelay(int step, int minDelay, int maxDelay) {
     if (minDelay >= maxDelay) return Duration(milliseconds: maxDelay);
     final val = math.min(maxDelay, minDelay * math.pow(2, step.clamp(0, 31)));
     final interval = _rnd.nextInt(val.toInt());
-    final milliseconds = math.min(maxDelay, minDelay + interval);
-    return Duration(milliseconds: milliseconds);
+    return Duration(milliseconds: math.min(maxDelay, minDelay + interval));
   }
 
   /// Randomizer for full jitter technique.

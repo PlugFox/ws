@@ -107,7 +107,7 @@ class WebSocketTask<T> {
 
   /// {@nodoc}
   void reject(Object error, [StackTrace? stackTrace]) {
-    if (_completer.isCompleted) return;
+    if (_completer.isCompleted) return; // coverage:ignore-line
     _completer.completeError(error, stackTrace);
   }
 }
