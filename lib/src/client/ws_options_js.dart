@@ -1,6 +1,7 @@
 import 'package:meta/meta.dart';
 import 'package:ws/src/client/ws_options.dart';
 
+// Ignore web related imports at the GitHub Actions coverage.
 // coverage:ignore-start
 
 /// {@nodoc}
@@ -21,8 +22,6 @@ WebSocketOptions $vmOptions({
     timeout: timeout,
   );
 }
-
-// coverage:ignore-end
 
 /// {@nodoc}
 @internal
@@ -59,3 +58,5 @@ final class $WebSocketOptions$JS extends WebSocketOptions {
   /// {@nodoc}
   final bool useBlobForBinary;
 }
+
+// coverage:ignore-end

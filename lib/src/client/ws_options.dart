@@ -111,6 +111,9 @@ abstract base class WebSocketOptions {
         timeout: timeout,
       );
 
+  // Ignore web related imports at the GitHub Actions coverage.
+  // coverage:ignore-start
+
   /// {@template ws_options_js}
   /// Options for JS (Browser) platform.
   /// Do not use this class at the VM platform.
@@ -143,16 +146,18 @@ abstract base class WebSocketOptions {
         useBlobForBinary: useBlobForBinary,
       );
 
+  // coverage:ignore-end
+
   /// Construct options for VM or JS platform depending on the current platform.
   ///
   /// {@macro ws_options}
   factory WebSocketOptions.selector({
     required WebSocketOptions Function() vm,
-    required WebSocketOptions Function() js,
+    required WebSocketOptions Function() js, // coverage:ignore-line
   }) =>
       $selectorOptions(
         vm: vm,
-        js: js,
+        js: js, // coverage:ignore-line
       );
 
   /// Backoff strategy for reconnecting.

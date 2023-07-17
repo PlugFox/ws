@@ -12,6 +12,9 @@ import 'package:ws/src/client/ws_options.dart';
 import 'package:ws/src/client/ws_options_js.dart';
 import 'package:ws/src/util/logger.dart';
 
+// Ignore web related imports at the GitHub Actions coverage.
+// coverage:ignore-start
+
 /// {@nodoc}
 @internal
 IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
@@ -252,3 +255,5 @@ final class _BlobCodec {
     return completer.future;
   }
 }
+
+// coverage:ignore-end
