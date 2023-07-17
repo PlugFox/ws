@@ -12,6 +12,7 @@ import 'model/web_socket_ready_state_test.dart' as web_socket_ready_state_test;
 import 'model/websocket_exception_test.dart' as websocket_exception_test;
 import 'options/options_test.dart' as options_test;
 import 'platform/platform_test.dart' as platform_test;
+import 'states_stream/states_stream_test.dart' as states_stream_test;
 
 void main() {
   group('WS tests', () {
@@ -26,5 +27,6 @@ void main() {
     logger_test.main();
     connection_manager_test.main();
     options_test.main();
+    states_stream_test.main();
   });
 }
