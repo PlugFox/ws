@@ -155,6 +155,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
         cancelOnError: false,
       );
       await completer.future;
+      // coverage:ignore-start
       if (!readyState.isOpen) {
         disconnect(1001, 'IS_NOT_OPEN_AFTER_CONNECT');
         assert(
@@ -162,6 +163,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
           'Invalid readyState code after connect: $readyState',
         );
       }
+      // coverage:ignore-end
       super.onConnected(url);
     } on Object catch (error, stackTrace) {
       onError(error, stackTrace);

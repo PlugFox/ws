@@ -163,6 +163,11 @@ void main() {
       );
     });
 
+    test('emit unsupported data type', () async {
+      expect(client.state, equals(const WebSocketClientState.open(url: url)));
+      await expectLater(client.add(true), throwsException);
+    });
+
     test('can send and receive a string message', () async {
       const message = 'Hello, World!';
       client.add(message);
