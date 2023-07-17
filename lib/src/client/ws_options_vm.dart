@@ -30,6 +30,8 @@ WebSocketOptions $vmOptions({
       timeout: timeout,
     );
 
+// coverage:ignore-start
+
 /// {@nodoc}
 @internal
 WebSocketOptions $jsOptions({
@@ -45,6 +47,8 @@ WebSocketOptions $jsOptions({
     timeout: timeout,
   );
 }
+
+// coverage:ignore-end
 
 /// {@nodoc}
 @internal

@@ -67,7 +67,7 @@ final class WebSocketClient$VM extends WebSocketClientBase {
       switch (data) {
         case String text:
           client.addUtf8Text(utf8.encode(text));
-        case Uint8List bytes:
+        case TypedData bytes:
           client.add(bytes);
         case ByteBuffer bb:
           client.add(bb.asUint8List());
@@ -101,11 +101,16 @@ final class WebSocketClient$VM extends WebSocketClientBase {
             _options?.compression ?? io.CompressionOptions.compressionDefault,
         customClient: _options?.customClient,
       );
+      // coverage:ignore-start
       _dataBindSubscription = client
           .asyncMap<Object?>((data) => switch (data) {
                 String text => text,
-                Uint8List bytes => bytes,
                 ByteBuffer bb => bb.asUint8List(),
+                TypedData td => Uint8List.view(
+                    td.buffer,
+                    td.offsetInBytes,
+                    td.lengthInBytes,
+                  ),
                 List<int> bytes => bytes,
                 _ => data,
               })
@@ -115,6 +120,9 @@ final class WebSocketClient$VM extends WebSocketClientBase {
             onDone: () => disconnect(1000, 'SUBSCRIPTION_CLOSED'),
             cancelOnError: false,
           );
+      // coverage:ignore-end
+
+      // coverage:ignore-start
       if (!readyState.isOpen) {
         disconnect(1001, 'IS_NOT_OPEN_AFTER_CONNECT');
         assert(
@@ -122,6 +130,7 @@ final class WebSocketClient$VM extends WebSocketClientBase {
           'Invalid readyState code after connect: $readyState',
         );
       }
+      // coverage:ignore-end
       super.onConnected(url);
     } on Object catch (error, stackTrace) {
       onError(error, stackTrace);
@@ -140,7 +149,7 @@ final class WebSocketClient$VM extends WebSocketClientBase {
     if (client != null) {
       try {
         await client.close(code, reason);
-      } on Object {/* ignore */}
+      } on Object {/* ignore */} // coverage:ignore-line
       _client = null;
     }
     super.onDisconnected(code, reason);

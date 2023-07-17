@@ -7,10 +7,12 @@ import 'package:ws/src/client/state_stream.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/client/ws_options.dart';
 
+// coverage:ignore-start
 /// {@nodoc}
 @internal
 IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
     WebSocketClientFake(protocols: options?.protocols);
+// coverage:ignore-end
 
 /// {@template ws_client_fake}
 /// Fake WebSocket client for testing purposes.
@@ -24,7 +26,8 @@ final class WebSocketClientFake implements IWebSocketClient {
       : protocols = protocols?.toList(),
         _controller = StreamController<Object>.broadcast(),
         _stateController = StreamController<WebSocketClientState>.broadcast(),
-        isClosed = false;
+        _isClosed = false,
+        _state = WebSocketClientState.initial();
 
   /// {@nodoc}
   @visibleForTesting
@@ -32,11 +35,13 @@ final class WebSocketClientFake implements IWebSocketClient {
 
   @override
   @visibleForTesting
-  bool isClosed;
+  bool get isClosed => _isClosed;
+  bool _isClosed;
 
   @override
   @visibleForTesting
-  WebSocketClientState state = WebSocketClientState.initial();
+  WebSocketClientState get state => _state;
+  WebSocketClientState _state;
 
   final StreamController<WebSocketClientState> _stateController;
 
@@ -64,19 +69,19 @@ final class WebSocketClientFake implements IWebSocketClient {
   @override
   @visibleForTesting
   FutureOr<void> connect(String url) async {
-    _stateController.add(state = WebSocketClientState.connecting(url: url));
+    _stateController.add(_state = WebSocketClientState.connecting(url: url));
     await Future<void>.delayed(const Duration(milliseconds: 25));
-    _stateController.add(state = WebSocketClientState.open(url: url));
+    _stateController.add(_state = WebSocketClientState.open(url: url));
   }
 
   @override
   @visibleForTesting
   FutureOr<void> disconnect(
       [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
-    _stateController.add(state = WebSocketClientState.disconnecting(
+    _stateController.add(_state = WebSocketClientState.disconnecting(
         closeCode: code, closeReason: reason));
     await Future<void>.delayed(const Duration(milliseconds: 25));
-    _stateController.add(state =
+    _stateController.add(_state =
         WebSocketClientState.closed(closeCode: code, closeReason: reason));
   }
 
@@ -84,8 +89,9 @@ final class WebSocketClientFake implements IWebSocketClient {
   @visibleForTesting
   FutureOr<void> close(
       [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) async {
+    _isClosed = true;
     await disconnect(code, reason);
-    isClosed = true;
+    await Future<void>.delayed(Duration.zero);
     await _stateController.close();
     await _controller.close();
   }

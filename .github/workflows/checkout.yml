@@ -68,6 +68,9 @@ jobs:
         timeout-minutes: 1
         run: dart analyze --fatal-infos --fatal-warnings lib/
 
+      #- name: 🌐 Setup Chrome
+      #  uses: browser-actions/setup-chrome@latest
+
       - name: 🧪 Run tests
         timeout-minutes: 2
         run: |

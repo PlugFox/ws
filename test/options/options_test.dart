@@ -132,7 +132,7 @@ void main() => group('Options', () {
                 options,
                 isA<$WebSocketOptions$JS>().having(
                   (options) => options.useBlobForBinary,
-                  'compression',
+                  'useBlobForBinary',
                   isTrue,
                 ));
           });

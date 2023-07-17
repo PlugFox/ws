@@ -1,3 +1,5 @@
+// Ignore web related imports at the GitHub Actions coverage.
+// coverage:ignore-file
 import 'dart:async';
 import 'dart:convert';
 import 'dart:html' as html show WebSocket, Blob, Event, CloseEvent, FileReader;
@@ -132,8 +134,11 @@ final class WebSocketClient$JS extends WebSocketClientBase {
           .asyncMap<Object?>((data) => switch (data) {
                 String text => text,
                 html.Blob blob => _blobCodec.read(blob),
-                /* html.Blob blob => (blob as ByteBuffer).asUint8List(), */
-                TypedData td => td.buffer.asInt8List(),
+                TypedData td => Uint8List.view(
+                    td.buffer,
+                    td.offsetInBytes,
+                    td.lengthInBytes,
+                  ),
                 ByteBuffer bb => bb.asInt8List(),
                 List<int> bytes => bytes,
                 _ => data,
@@ -150,6 +155,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
         cancelOnError: false,
       );
       await completer.future;
+      // coverage:ignore-start
       if (!readyState.isOpen) {
         disconnect(1001, 'IS_NOT_OPEN_AFTER_CONNECT');
         assert(
@@ -157,6 +163,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
           'Invalid readyState code after connect: $readyState',
         );
       }
+      // coverage:ignore-end
       super.onConnected(url);
     } on Object catch (error, stackTrace) {
       onError(error, stackTrace);
@@ -179,7 +186,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
     if (client != null) {
       try {
         client.close(code, reason);
-      } on Object {/* ignore */}
+      } on Object {/* ignore */} // coverage:ignore-line
       _client = null;
     }
     super.onDisconnected(code, reason);
@@ -205,7 +212,13 @@ final class _BlobCodec {
       case String text:
         return html.Blob([Uint8List.fromList(utf8.encode(text))]);
       case TypedData td:
-        return html.Blob([td.buffer.asUint8List()]);
+        return html.Blob([
+          Uint8List.view(
+            td.buffer,
+            td.offsetInBytes,
+            td.lengthInBytes,
+          )
+        ]);
       case ByteBuffer bb:
         return html.Blob([bb.asUint8List()]);
       case List<int> bytes:
