@@ -1,6 +1,8 @@
 import 'package:meta/meta.dart';
 import 'package:ws/src/client/ws_options.dart';
 
+// coverage:ignore-start
+
 /// {@nodoc}
 @internal
 WebSocketOptions $vmOptions({
@@ -19,6 +21,8 @@ WebSocketOptions $vmOptions({
     timeout: timeout,
   );
 }
+
+// coverage:ignore-end
 
 /// {@nodoc}
 @internal

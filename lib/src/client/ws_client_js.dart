@@ -130,13 +130,12 @@ final class WebSocketClient$JS extends WebSocketClientBase {
       _dataBindSubscription = client.onMessage
           .map<Object?>((event) => event.data)
           .asyncMap<Object?>((data) => switch (data) {
-                String text => text,
-                html.Blob blob => _blobCodec.read(blob),
-                /* html.Blob blob => (blob as ByteBuffer).asUint8List(), */
-                TypedData td => td.buffer.asInt8List(),
-                ByteBuffer bb => bb.asInt8List(),
-                List<int> bytes => bytes,
-                _ => data,
+                String text => text, // coverage:ignore-line
+                html.Blob blob => _blobCodec.read(blob), // coverage:ignore-line
+                TypedData td => td.buffer.asInt8List(), // coverage:ignore-line
+                ByteBuffer bb => bb.asInt8List(), // coverage:ignore-line
+                List<int> bytes => bytes, // coverage:ignore-line
+                _ => data, // coverage:ignore-line
               })
           .listen(
             onReceivedData,

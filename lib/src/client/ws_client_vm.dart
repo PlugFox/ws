@@ -67,7 +67,7 @@ final class WebSocketClient$VM extends WebSocketClientBase {
       switch (data) {
         case String text:
           client.addUtf8Text(utf8.encode(text));
-        case Uint8List bytes:
+        case TypedData bytes:
           client.add(bytes);
         case ByteBuffer bb:
           client.add(bb.asUint8List());
@@ -103,11 +103,11 @@ final class WebSocketClient$VM extends WebSocketClientBase {
       );
       _dataBindSubscription = client
           .asyncMap<Object?>((data) => switch (data) {
-                String text => text,
-                Uint8List bytes => bytes,
-                ByteBuffer bb => bb.asUint8List(),
-                List<int> bytes => bytes,
-                _ => data,
+                String text => text, // coverage:ignore-line
+                TypedData td => td.buffer.asInt8List(), // coverage:ignore-line
+                ByteBuffer bb => bb.asUint8List(), // coverage:ignore-line
+                List<int> bytes => bytes, // coverage:ignore-line
+                _ => data, // coverage:ignore-line
               })
           .listen(
             onReceivedData,

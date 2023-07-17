@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:test/test.dart';
 import 'package:ws/interface.dart';
@@ -26,7 +27,7 @@ void main() {
         min: const Duration(milliseconds: 500),
         max: const Duration(milliseconds: 1000),
       ),
-      useBlobForBinary: true,
+      useBlobForBinary: false,
     ),
   );
   test('WebSocketClient example', () async {
@@ -281,8 +282,8 @@ void main() {
       }
     });
 
-    // Test that binary data can be sent
-    test('can send binary data', () async {
+    // Test that List<int> can be sent
+    test('can send List<int> data', () async {
       final binaryData =
           List<int>.generate(512, (i) => i % 256); // 0.5 KiB binary data
       client.add(binaryData);
@@ -294,7 +295,138 @@ void main() {
               .having((l) => l.length, 'length', equals(binaryData.length)));
       expect(received, equals(binaryData));
     });
+
+    // Test that Uint8List can be sent
+    test('can send Uint8List data', () async {
+      final binaryData = Uint8List.fromList(
+          List<int>.generate(512, (i) => i % 256)); // 0.5 KiB binary data
+      client.add(binaryData);
+      final received =
+          await client.stream.first.timeout(const Duration(seconds: 5));
+      expect(
+          received,
+          isA<List<int>>()
+              .having((l) => l.length, 'length', equals(binaryData.length)));
+    });
+
+    // Test that ByteBuffer can be sent
+    test('can send ByteBuffer data', () async {
+      final buffer = Uint8List.fromList(List<int>.generate(512, (i) => i % 256))
+          .buffer; // 0.5 KiB binary data
+      client.add(buffer);
+      final received =
+          await client.stream.first.timeout(const Duration(seconds: 5));
+      expect(
+          received,
+          isA<List<int>>()
+              .having((l) => l.length, 'length', equals(buffer.lengthInBytes)));
+    });
+
+    // Test that ByteBuffer can be sent
+    test('can send ByteBuffer data', () async {
+      final buffer = Uint8List.fromList(List<int>.generate(512, (i) => i % 256))
+          .buffer; // 0.5 KiB binary data
+      client.add(buffer);
+      final received =
+          await client.stream.first.timeout(const Duration(seconds: 5));
+      expect(
+          received,
+          isA<List<int>>()
+              .having((l) => l.length, 'length', equals(buffer.lengthInBytes)));
+    });
   });
+
+  group(
+    'Binary data as a Blob',
+    () {
+      const url = 'wss://echo.plugfox.dev:443/connect';
+
+      late IWebSocketClient client;
+
+      setUpAll(() {
+        client = WebSocketClient(WebSocketOptions.js(
+          connectionRetryInterval: (
+            min: const Duration(milliseconds: 500),
+            max: const Duration(milliseconds: 1000),
+          ),
+          useBlobForBinary: true,
+        ));
+      });
+
+      tearDownAll(() {
+        client.close();
+      });
+
+      setUp(() async {
+        if (!client.state.readyState.isOpen) {
+          await client.connect(url);
+        }
+      });
+
+      // Test that List<int> can be sent
+      test('can send List<int> data', () async {
+        final binaryData =
+            List<int>.generate(512, (i) => i % 256); // 0.5 KiB binary data
+        client.add(binaryData);
+        final received =
+            await client.stream.first.timeout(const Duration(seconds: 5));
+        expect(
+            received,
+            isA<List<int>>()
+                .having((l) => l.length, 'length', equals(binaryData.length)));
+        expect(received, equals(binaryData));
+      });
+
+      // Test that Uint8List can be sent
+      test('can send Uint8List data', () async {
+        final binaryData = Uint8List.fromList(
+            List<int>.generate(512, (i) => i % 256)); // 0.5 KiB binary data
+        client.add(binaryData);
+        final received =
+            await client.stream.first.timeout(const Duration(seconds: 5));
+        expect(
+            received,
+            isA<List<int>>()
+                .having((l) => l.length, 'length', equals(binaryData.length)));
+      });
+
+      // Test that ByteBuffer can be sent
+      test('can send ByteBuffer data', () async {
+        final buffer =
+            Uint8List.fromList(List<int>.generate(512, (i) => i % 256))
+                .buffer; // 0.5 KiB binary data
+        client.add(buffer);
+        final received =
+            await client.stream.first.timeout(const Duration(seconds: 5));
+        expect(
+            received,
+            isA<List<int>>().having(
+                (l) => l.length, 'length', equals(buffer.lengthInBytes)));
+      });
+
+      // Test that ByteBuffer can be sent
+      test('can send ByteBuffer data', () async {
+        final buffer =
+            Uint8List.fromList(List<int>.generate(512, (i) => i % 256))
+                .buffer; // 0.5 KiB binary data
+        client.add(buffer);
+        final received =
+            await client.stream.first.timeout(const Duration(seconds: 5));
+        expect(
+            received,
+            isA<List<int>>().having(
+                (l) => l.length, 'length', equals(buffer.lengthInBytes)));
+      });
+    },
+    onPlatform: <String, Object?>{
+      'vm': <Object?>[
+        const Skip('This case only works on Browser'),
+      ],
+      'browser': <Object?>[
+        const Timeout.factor(2),
+      ],
+    },
+  );
 
   group('URLs', () {
     const url = 'wss://echo.plugfox.dev:443/connect';
