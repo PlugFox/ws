@@ -95,7 +95,7 @@ abstract base class WebSocketOptions {
   factory WebSocketOptions.vm({
     ConnectionRetryInterval? connectionRetryInterval,
     Iterable<String>? protocols,
-    Map<String, dynamic>? headers,
+    Map<String, Object?>? headers,
     Object? /*CompressionOptions*/ compression,
     Object? /*HttpClient*/ customClient,
     String? userAgent,

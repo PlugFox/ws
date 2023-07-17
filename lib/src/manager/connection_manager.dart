@@ -82,6 +82,14 @@ final class WebSocketConnectionManager {
             if (client.isClosed) return;
             final attempt = _attempts[client] ?? 0;
             final delay = _backoffDelay(attempt, minMs, maxMs);
+            if (delay <= Duration.zero) {
+              config('Reconnecting to $lastUrl immediately.');
+              Future<void>.sync(() => client.connect(lastUrl)).ignore();
+              _attempts[client] = attempt + 1;
+              return;
+            }
+            config('Reconnecting to $lastUrl '
+                'after ${delay.inMilliseconds} ms.');
             _nextReconnectionAttempts[client] = DateTime.now().add(delay);
             _timers[client] = Timer(
               delay,
@@ -92,7 +100,7 @@ final class WebSocketConnectionManager {
                 } else if (client.state.readyState.isClosed) {
                   config('Auto reconnecting to $lastUrl '
                       'after ${delay.inMilliseconds} ms.');
-                  client.connect(lastUrl);
+                  Future<void>.sync(() => client.connect(lastUrl)).ignore();
                 }
               },
             );

@@ -84,7 +84,7 @@ final class $WebSocketOptions$VM extends WebSocketOptions {
   ///   - `upgrade`
   ///
   /// If any of these are passed in the [headers] map they will be ignored.
-  final Map<String, dynamic>? headers;
+  final Map<String, Object?>? headers;
 
   /// If [compression] is provided, the [WebSocket] created will be configured
   /// to negotiate with the specified [CompressionOptions]. If none is specified
