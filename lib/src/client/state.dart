@@ -55,6 +55,8 @@ sealed class WebSocketClientState {
 
 /// Connection has not yet been established.
 /// {@macro web_socket_client_state}
+/// {@category Client}
+/// {@category Entity}
 final class WebSocketClientState$Connecting extends WebSocketClientState {
   /// {@macro web_socket_client_state}
   const WebSocketClientState$Connecting({
@@ -81,6 +83,8 @@ final class WebSocketClientState$Connecting extends WebSocketClientState {
 
 /// Connection is open and ready to communicate.
 /// {@macro web_socket_client_state}
+/// {@category Client}
+/// {@category Entity}
 final class WebSocketClientState$Open extends WebSocketClientState {
   /// {@macro web_socket_client_state}
   const WebSocketClientState$Open({
@@ -107,6 +111,8 @@ final class WebSocketClientState$Open extends WebSocketClientState {
 
 /// Connection is in the process of closing.
 /// {@macro web_socket_client_state}
+/// {@category Client}
+/// {@category Entity}
 final class WebSocketClientState$Disconnecting extends WebSocketClientState {
   /// {@macro web_socket_client_state}
   const WebSocketClientState$Disconnecting({
@@ -145,6 +151,8 @@ final class WebSocketClientState$Disconnecting extends WebSocketClientState {
 
 /// Connection is closed temporarily or permanently.
 /// {@macro web_socket_client_state}
+/// {@category Client}
+/// {@category Entity}
 final class WebSocketClientState$Closed extends WebSocketClientState {
   /// {@macro web_socket_client_state}
   const WebSocketClientState$Closed({

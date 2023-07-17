@@ -57,7 +57,7 @@ final class WebSocketEventQueue {
         final event = _queue.first;
         try {
           if (_isClosed) {
-            event.reject(const WSClientClosed(), StackTrace.current);
+            event.reject(const WSClientClosedException(), StackTrace.current);
           } else {
             await event();
           }

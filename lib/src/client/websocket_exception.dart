@@ -6,7 +6,14 @@
 /// {@category Entity}
 sealed class WSException implements Exception {
   /// {@macro websocket_exception}
-  const WSException([this.message = 'An WebSocket error occurred.']);
+  const WSException(
+      {this.originalException, this.message = 'An WebSocket error occurred.'});
+
+  /// Original exception.
+  final Object? originalException;
+
+  /// Code of exception.
+  abstract final String code;
 
   /// Message of exception.
   final String message;
@@ -20,64 +27,54 @@ sealed class WSException implements Exception {
 /// {@endtemplate}
 /// {@category Client}
 /// {@category Entity}
-final class WSNotConnected extends WSException {
+final class WSNotConnectedException extends WSException {
   /// {@macro not_connected_exception}
-  const WSNotConnected([super.message = 'WebSocket is not connected.']);
-}
-
-/// {@template unknown_exception}
-/// Unknown WebSocket exception.
-/// {@endtemplate}
-/// {@category Client}
-/// {@category Entity}
-final class WSUnknownException extends WSException {
-  /// {@macro unknown_exception}
-  const WSUnknownException(
-      [super.message = 'An unknown WebSocket error occurred.']);
-}
-
-/// {@template socket_exception}
-/// Exception thrown when a socket operation fails.
-/// {@endtemplate}
-/// {@category Client}
-/// {@category Entity}
-final class WSSocketException extends WSException {
-  /// {@macro socket_exception}
-  const WSSocketException(super.message);
-}
-
-/// {@template http_exception}
-/// Exception thrown when a socket operation fails.
-/// {@endtemplate}
-/// {@category Client}
-/// {@category Entity}
-final class WSHttpException extends WSException {
-  /// {@macro http_exception}
-  const WSHttpException(super.message);
-}
-
-/// {@template unsupported_exception}
-/// The operation was not allowed by the object.
-/// {@endtemplate}
-/// {@category Client}
-/// {@category Entity}
-final class WSUnsupportedException extends WSException {
-  /// {@macro unsupported_exception}
-  const WSUnsupportedException(super.message);
-}
-
-/// {@template client_closed}
-/// The operation was not allowed by the object.
-/// {@endtemplate}
-/// {@category Client}
-/// {@category Entity}
-final class WSClientClosed extends WSException implements StateError {
-  /// {@macro client_closed}
-  const WSClientClosed({
-    String message = 'WebSocket client is closed.',
-    this.stackTrace,
-  }) : super(message);
+  const WSNotConnectedException(
+      {super.originalException, super.message = 'WebSocket is not connected.'});
 
   @override
-  final StackTrace? stackTrace;
+  String get code => 'ws_not_connected';
+}
+
+/// {@template client_closed_exception}
+/// Exception thrown when a WebSocket client is closed.
+/// {@endtemplate}
+/// {@category Client}
+/// {@category Entity}
+final class WSClientClosedException extends WSException {
+  /// {@macro client_closed_exception}
+  const WSClientClosedException(
+      {super.originalException, super.message = 'WebSocket client is closed.'});
+
+  @override
+  String get code => 'ws_client_closed';
+}
+
+/// {@template client_send_exception}
+/// Send operation failed.
+/// {@endtemplate}
+/// {@category Client}
+/// {@category Entity}
+final class WSSendException extends WSException {
+  /// {@macro client_send_exception}
+  const WSSendException(
+      {super.originalException, super.message = 'WebSocket send failed.'});
+
+  @override
+  String get code => 'ws_send_exception';
+}
+
+/// {@template client_disconnect_exception}
+/// Disconnect operation failed.
+/// {@endtemplate}
+/// {@category Client}
+/// {@category Entity}
+final class WSDisconnectException extends WSException {
+  /// {@macro client_disconnect_exception}
+  const WSDisconnectException(
+      {super.originalException,
+      super.message = 'WebSocket error occurred during disconnect.'});
+
+  @override
+  String get code => 'ws_disconnect_exception';
 }

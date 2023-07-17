@@ -439,10 +439,8 @@ void main() {
       );
     });
 
-    test('WSClientClosed stacktrace', () {
-      expect(const WSClientClosed().stackTrace, isNull);
-      expect(const WSClientClosed(stackTrace: StackTrace.empty).stackTrace,
-          isA<StackTrace>());
+    test('WSClientClosed', () {
+      expect(const WSClientClosedException(), isA<WSClientClosedException>());
     });
   });
 

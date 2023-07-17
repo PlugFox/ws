@@ -55,17 +55,24 @@ The `ws` package provides a cross-platform WebSocket client that supports JSON. 
 ## Features and Roadmap
 
 - ✅ Cross-platform WebSocket client for Dart and Flutter
-- ✅ Support for secure WebSocket connections (wss://)
+- ✅ Support for secure WebSocket connections `wss://`
+- ✅ Specifying custom protocols
 - ✅ Connection state changes
-- ✅ Fake client
 - ✅ Reconnection to new URL
 - ✅ Concurrency
 - ✅ Backoff [full jitter strategy](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) for reconnection attempts
 - ✅ Handy stream of messages with automatic JSON decoding
 - ✅ Metrics & TX/RX bytes and counters
 - ✅ Platform-specific options
+- ✅ Connection timeout
+- ✅ Creating Web Socket client from custom implementation
+- ✅ Fake client for testing
+- ✅ Custom exceptions
+- ❌ Automatic ping/pong
 - ❌ Reusing client between isolates
 - ❌ 95% test coverage
+- ❌ Interceptors (middlewares)
+- ❌ RPC support
 
 ## More resources
 

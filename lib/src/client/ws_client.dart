@@ -70,33 +70,62 @@ final class WebSocketClient implements IWebSocketClient {
 
   @override
   Future<void> add(Object data) async {
-    if (_isClosed) return Future<void>.error(const WSClientClosed());
-    await _eventQueue.push('add', () => _client.add(data));
+    if (_isClosed) return Future<void>.error(const WSClientClosedException());
+    await _eventQueue.push('add', () async {
+      try {
+        await _client.add(data);
+      } on WSException {
+        rethrow;
+      } on Object catch (error, stackTrace) {
+        Error.throwWithStackTrace(
+          WSSendException(originalException: error),
+          stackTrace,
+        );
+      }
+    });
     WebSocketMetricsManager.instance.sent(this, data);
   }
 
   @override
   Future<void> connect(String url) {
-    if (_isClosed) return Future<void>.error(const WSClientClosed());
-    return _eventQueue.push('connect', () {
+    if (_isClosed) return Future<void>.error(const WSClientClosedException());
+    return _eventQueue.push('connect', () async {
       WebSocketConnectionManager.instance.startMonitoringConnection(
         this,
         url,
         _options.connectionRetryInterval,
       );
-      return Future<void>.sync(() => _client.connect(url))
-          .timeout(_options.timeout);
+      try {
+        await Future<void>.sync(() => _client.connect(url))
+            .timeout(_options.timeout);
+      } on WSException {
+        rethrow;
+      } on Object catch (error, stackTrace) {
+        Error.throwWithStackTrace(
+          WSNotConnectedException(originalException: error),
+          stackTrace,
+        );
+      }
     });
   }
 
   @override
   Future<void> disconnect(
       [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
-    if (_isClosed) return Future<void>.error(const WSClientClosed());
-    return _eventQueue.push('disconnect', () {
+    if (_isClosed) return Future<void>.error(const WSClientClosedException());
+    return _eventQueue.push('disconnect', () async {
       WebSocketConnectionManager.instance.stopMonitoringConnection(this);
-      return Future<void>.sync(() => _client.disconnect(code, reason))
-          .timeout(_options.timeout);
+      try {
+        await Future<void>.sync(() => _client.disconnect(code, reason))
+            .timeout(_options.timeout);
+      } on WSException {
+        rethrow;
+      } on Object catch (error, stackTrace) {
+        Error.throwWithStackTrace(
+          WSDisconnectException(originalException: error),
+          stackTrace,
+        );
+      }
     });
   }
 
@@ -112,6 +141,13 @@ final class WebSocketClient implements IWebSocketClient {
       Future<void>.sync(_eventQueue.close).ignore();
       // Close the internal client connection and free resources.
       await _client.close(code, reason);
+    } on WSException {
+      rethrow;
+    } on Object catch (error, stackTrace) {
+      Error.throwWithStackTrace(
+        WSDisconnectException(originalException: error),
+        stackTrace,
+      );
     } finally {
       // Stop observing metrics.
       // Wait for the next microtask to ensure that the metrics are updated

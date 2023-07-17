@@ -116,6 +116,7 @@ final class WebSocketConnectionManager {
   }
 
   void _stopTimer(IWebSocketClient client) {
+    _nextReconnectionAttempts[client] = null;
     _timers[client]?.cancel();
     _timers[client] = null;
   }

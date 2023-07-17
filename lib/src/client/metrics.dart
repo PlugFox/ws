@@ -4,6 +4,8 @@ import 'package:ws/src/client/web_socket_ready_state.dart';
 /// {@template metrics}
 /// WebSocket metrics.
 /// {@endtemplate}
+/// {@category Client}
+/// {@category Entity}
 @immutable
 final class WebSocketMetrics {
   /// {@macro metrics}

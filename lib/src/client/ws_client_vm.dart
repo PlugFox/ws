@@ -60,7 +60,8 @@ final class WebSocketClient$VM extends WebSocketClientBase {
     super.add(data);
     final client = _client;
     if (client == null) {
-      throw const WSClientClosed(message: 'WebSocket client is not connected.');
+      throw const WSClientClosedException(
+          message: 'WebSocket client is not connected.');
     }
     try {
       switch (data) {
@@ -122,22 +123,6 @@ final class WebSocketClient$VM extends WebSocketClientBase {
         );
       }
       super.onConnected(url);
-    } on io.SocketException catch (error, stackTrace) {
-      // That error is only for I/O environment.
-      final exception = WSSocketException(error.message);
-      onError(exception, stackTrace);
-      Future<void>.sync(() => disconnect(1006, 'CONNECTION_FAILED')).ignore();
-      Error.throwWithStackTrace(exception, stackTrace);
-    } on io.HttpException catch (error, stackTrace) {
-      // That error is only for I/O environment.
-      final exception = WSHttpException(error.message);
-      onError(exception, stackTrace);
-      Future<void>.sync(() => disconnect(1006, 'CONNECTION_FAILED')).ignore();
-      Error.throwWithStackTrace(exception, stackTrace);
-    } on io.WebSocketException catch (error, stackTrace) {
-      onError(error, stackTrace);
-      Future<void>.sync(() => disconnect(1006, 'CONNECTION_FAILED')).ignore();
-      rethrow;
     } on Object catch (error, stackTrace) {
       onError(error, stackTrace);
       Future<void>.sync(() => disconnect(1006, 'CONNECTION_FAILED')).ignore();

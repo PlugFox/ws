@@ -5,40 +5,42 @@ import 'package:ws/ws.dart';
 
 void main() {
   group('WSException tests', () {
-    test('WSNotConnected message and toString', () {
-      final exception = WSNotConnected();
+    test('WSNotConnected code, message and toString', () {
+      final exception = WSNotConnectedException();
       expect(exception, isA<WSException>());
       expect(exception.message, equals('WebSocket is not connected.'));
       expect(exception.toString(), equals('WebSocket is not connected.'));
+      expect(exception.code, equals('ws_not_connected'));
+      expect(exception.originalException, isNull);
     });
 
-    test('WSUnknownException message and toString', () {
-      final exception = WSUnknownException();
+    test('WSClientClosed code, message and toString', () {
+      final exception = WSClientClosedException();
       expect(exception, isA<WSException>());
-      expect(exception.message, equals('An unknown WebSocket error occurred.'));
-      expect(
-          exception.toString(), equals('An unknown WebSocket error occurred.'));
+      expect(exception.message, equals('WebSocket client is closed.'));
+      expect(exception.toString(), equals('WebSocket client is closed.'));
+      expect(exception.code, equals('ws_client_closed'));
+      expect(exception.originalException, isNull);
     });
 
-    test('WSSocketException message and toString', () {
-      final exception = WSSocketException('Socket error.');
+    test('WSSendException code, message and toString', () {
+      final exception = WSSendException();
       expect(exception, isA<WSException>());
-      expect(exception.message, equals('Socket error.'));
-      expect(exception.toString(), equals('Socket error.'));
+      expect(exception.message, equals('WebSocket send failed.'));
+      expect(exception.toString(), equals('WebSocket send failed.'));
+      expect(exception.code, equals('ws_send_exception'));
+      expect(exception.originalException, isNull);
     });
 
-    test('WSHttpException message and toString', () {
-      final exception = WSHttpException('HTTP error.');
+    test('WSDisconnectException code, message and toString', () {
+      final exception = WSDisconnectException();
       expect(exception, isA<WSException>());
-      expect(exception.message, equals('HTTP error.'));
-      expect(exception.toString(), equals('HTTP error.'));
-    });
-
-    test('WSUnsupportedException message and toString', () {
-      final exception = WSUnsupportedException('Unsupported operation.');
-      expect(exception, isA<WSException>());
-      expect(exception.message, equals('Unsupported operation.'));
-      expect(exception.toString(), equals('Unsupported operation.'));
+      expect(exception.message,
+          equals('WebSocket error occurred during disconnect.'));
+      expect(exception.toString(),
+          equals('WebSocket error occurred during disconnect.'));
+      expect(exception.code, equals('ws_disconnect_exception'));
+      expect(exception.originalException, isNull);
     });
   });
 }

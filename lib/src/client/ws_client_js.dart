@@ -72,7 +72,8 @@ final class WebSocketClient$JS extends WebSocketClientBase {
     super.add(data);
     final client = _client;
     if (client == null) {
-      throw const WSClientClosed(message: 'WebSocket client is not connected.');
+      throw const WSClientClosedException(
+          message: 'WebSocket client is not connected.');
     }
     try {
       switch (data) {
@@ -119,7 +120,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
           if (completer.isCompleted) {
             onError(event, StackTrace.current);
           } else {
-            completer.completeError(const WSNotConnected());
+            completer.completeError(const WSNotConnectedException());
           }
         },
         onError: onError,
