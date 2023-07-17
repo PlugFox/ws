@@ -1,21 +1,13 @@
-import 'dart:convert';
-import 'dart:io' as io;
+import 'dart:async';
 
-import 'package:shelf/shelf.dart' show Request, Response;
+import 'package:shelf/shelf.dart' as shelf;
+import 'package:ws_server/src/util/responses.dart';
 
-Response $notFound(Request request) => Response.notFound(
-      jsonEncode(<String, Object?>{
-        'error': <String, Object?>{
-          'status': io.HttpStatus.notFound,
-          'message': 'Not Found',
-          'details': <String, Object?>{
-            'path': request.url.path,
-            'method': request.method,
-            'headers': request.headers,
-          },
-        },
+FutureOr<shelf.Response> $notFound(shelf.Request request) => Responses.error(
+      NotFoundException(data: <String, Object?>{
+        'path': request.url.path,
+        'query': request.url.queryParameters,
+        'method': request.method,
+        'headers': request.headers,
       }),
-      headers: <String, String>{
-        'Content-Type': io.ContentType.json.value,
-      },
     );

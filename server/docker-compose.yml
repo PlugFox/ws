@@ -2,7 +2,7 @@
 # docker-compose down
 # docker-compose logs -f
 
-version: '3.9'
+version: "3.9"
 
 services:
   server:
@@ -16,7 +16,7 @@ services:
 
   # https://github.com/Shopify/toxiproxy
   toxiproxy:
-    image: 'ghcr.io/shopify/toxiproxy:2.5.0'
+    image: "ghcr.io/shopify/toxiproxy:2.5.0"
     container_name: toxiproxy
     ports:
       - target: 8474
@@ -33,4 +33,4 @@ services:
       - server
     #environment:
     #  - LOG_LEVEL=debug
-    command: ['-config', '/config/toxiproxy.json','-host', '0.0.0.0']
+    command: ["-config", "/config/toxiproxy.json", "-host", "0.0.0.0"]

@@ -3,30 +3,40 @@
 import 'dart:async';
 import 'dart:io' as io;
 
-import 'package:ws_server/src/shared_server.dart';
-import 'package:ws_server/src/util/options.dart';
-import 'package:ws_server/src/util/shutdown_handler.dart';
+import 'package:shelf/shelf.dart' as shelf;
+import 'package:shelf/shelf_io.dart' as shelf_io;
+import 'package:ws_server/src/middleware/handle_errors.dart';
+import 'package:ws_server/src/middleware/injector.dart';
+import 'package:ws_server/src/middleware/log_pipeline.dart';
+import 'package:ws_server/src/router/rest_router.dart';
+import 'package:ws_server/src/router/websocket.dart';
+import 'package:ws_server/src/util/cors.dart';
+import 'package:ws_server/src/util/run_server.dart';
 
 /// Starts the server.
 /// dart run server/bin/server.dart
-void main(List<String> arguments) => Future<void>(() async {
-      // Allow shutdown via Ctrl+C
-      $shutdownHandler().whenComplete(() => io.exit(0)).ignore();
-      print('Press Ctrl+C to exit.');
+void main(List<String> arguments) => runServer<void>(
+      config: null,
+      serve: _serve,
+      arguments: arguments,
+    );
 
-      // Extract startup options
-      final options = $extractOptions(arguments);
-
-      // Isolate pool
-      final connection = (
-        address: io.InternetAddress.anyIPv4,
-        port: options.port,
-      );
-      for (var i = 1; i <= options.isolates; i++) {
-        SharedServer(connection: connection, label: 'Server-$i')();
-      }
-      print(
-        'Serving ${options.isolates} handlers at '
-        'http://${connection.address.host}:${connection.port}',
+/// The entry point for the isolate.
+void _serve(io.InternetAddress address, int port, [config]) =>
+    Future<void>(() async {
+      //fine('Starting isolate ${Isolate.current.debugName ?? 'unknown'}');
+      final pipeline = shelf.Pipeline()
+          .addMiddleware(handleErrors())
+          .addMiddleware(injector(<String, Object>{}))
+          .addMiddleware(webSocket(path: '/connect'))
+          .addMiddleware(logPipeline())
+          .addMiddleware(cors())
+          .addHandler($restRouter);
+      await shelf_io.serve(
+        pipeline,
+        address,
+        port,
+        poweredByHeader: 'WS Server',
+        shared: true,
       );
     });
