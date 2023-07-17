@@ -43,6 +43,7 @@ Middleware handleErrors({bool showStackTrace = false}) => (Handler handler) =>
               },
             );
           },
+          test: (Object error) => error is HijackException ? false : true,
         );
 
 String _errorRepresentation(Object? error) => switch (error) {
