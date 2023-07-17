@@ -2,7 +2,11 @@ import 'dart:async';
 import 'dart:collection';
 
 import 'package:meta/meta.dart';
-import 'package:ws/interface.dart';
+import 'package:ws/src/client/message_stream.dart';
+import 'package:ws/src/client/state.dart';
+import 'package:ws/src/client/state_stream.dart';
+import 'package:ws/src/client/web_socket_ready_state.dart';
+import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/util/constants.dart';
 import 'package:ws/src/util/logger.dart';
 
@@ -49,8 +53,8 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   final StreamController<WebSocketClientState> _stateController;
 
   @override
-  late final Stream<WebSocketClientState> stateChanges =
-      _stateController.stream;
+  late final WebSocketStatesStream stateChanges =
+      WebSocketStatesStream(_stateController.stream);
 
   @override
   @mustCallSuper

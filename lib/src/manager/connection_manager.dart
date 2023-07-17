@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:meta/meta.dart';
-import 'package:ws/interface.dart';
+import 'package:ws/src/client/state.dart';
+import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/util/logger.dart';
 
 /// {@nodoc}

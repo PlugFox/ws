@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:ws/src/client/message_stream.dart';
 import 'package:ws/src/client/metrics.dart';
 import 'package:ws/src/client/state.dart';
+import 'package:ws/src/client/state_stream.dart';
 import 'package:ws/src/client/websocket_exception.dart';
 import 'package:ws/src/client/ws_client_fake.dart'
     // ignore: uri_does_not_exist
@@ -63,7 +64,7 @@ final class WebSocketClient implements IWebSocketClient {
   WebSocketMessagesStream get stream => _client.stream;
 
   @override
-  Stream<WebSocketClientState> get stateChanges => _client.stateChanges;
+  WebSocketStatesStream get stateChanges => _client.stateChanges;
 
   @override
   WebSocketClientState get state => _client.state;

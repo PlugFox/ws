@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:meta/meta.dart';
 import 'package:ws/src/client/message_stream.dart';
 import 'package:ws/src/client/state.dart';
+import 'package:ws/src/client/state_stream.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/client/ws_options.dart';
 
@@ -41,7 +42,8 @@ final class WebSocketClientFake implements IWebSocketClient {
 
   @override
   @visibleForTesting
-  Stream<WebSocketClientState> get stateChanges => _stateController.stream;
+  late final WebSocketStatesStream stateChanges =
+      WebSocketStatesStream(_stateController.stream);
 
   final StreamController<Object> _controller;
 
