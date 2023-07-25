@@ -10,24 +10,23 @@ import 'package:ws/src/util/logger.dart';
 @internal
 final class WebSocketConnectionManager {
   /// {@nodoc}
-  static final WebSocketConnectionManager instance =
-      WebSocketConnectionManager._internal();
+  WebSocketConnectionManager(IWebSocketClient client)
+      : _client = WeakReference<IWebSocketClient>(client);
 
   /// {@nodoc}
-  WebSocketConnectionManager._internal();
+  final WeakReference<IWebSocketClient> _client;
 
   /// {@nodoc}
-  final Expando<StreamSubscription<void>> _watchers =
-      Expando<StreamSubscription<void>>();
+  StreamSubscription<void>? _watcher;
 
   /// {@nodoc}
-  final Expando<Timer> _timers = Expando<Timer>();
+  Timer? _timer;
 
   /// {@nodoc}
-  final Expando<int> _attempts = Expando<int>();
+  int? _attempt;
 
   /// {@nodoc}
-  final Expando<DateTime> _nextReconnectionAttempts = Expando<DateTime>();
+  DateTime? _nextReconnectionAttempt;
 
   /// Recive the current status of reconnection for the client.
   /// {@nodoc}
@@ -35,34 +34,36 @@ final class WebSocketConnectionManager {
     int attempt,
     bool active,
     DateTime? nextReconnectionAttempt,
-  }) getStatusFor(IWebSocketClient client) => (
-        attempt: _attempts[client] ?? 0,
-        active: _timers[client]?.isActive == true,
-        nextReconnectionAttempt: _nextReconnectionAttempts[client],
+  }) get status => (
+        attempt: _attempt ?? 0,
+        active: _timer?.isActive == true,
+        nextReconnectionAttempt: _nextReconnectionAttempt,
       );
 
   /// {@nodoc}
   void startMonitoringConnection(
-    IWebSocketClient client,
     String url,
     ({Duration max, Duration min})? connectionRetryInterval,
   ) {
-    stopMonitoringConnection(client);
-    if (client.isClosed || connectionRetryInterval == null) return;
+    stopMonitoringConnection();
+    final client = _client.target;
+    if (client == null || client.isClosed || connectionRetryInterval == null) {
+      return;
+    }
     final stateChangesHandler = _handleStateChange(
       client,
       url,
       connectionRetryInterval.min.inMilliseconds,
       connectionRetryInterval.max.inMilliseconds,
     );
-    _watchers[client] =
+    _watcher =
         client.stateChanges.listen(stateChangesHandler, cancelOnError: false);
   }
 
   /// {@nodoc}
-  void stopMonitoringConnection(IWebSocketClient client) {
-    _stopSubscription(client);
-    _stopTimer(client);
+  void stopMonitoringConnection() {
+    _stopSubscription();
+    _stopTimer();
   }
 
   /// {@nodoc}
@@ -75,29 +76,29 @@ final class WebSocketConnectionManager {
       (state) {
         switch (state) {
           case WebSocketClientState$Open _:
-            _stopTimer(client);
-            _attempts[client] = null; // reset attempt
-            _nextReconnectionAttempts[client] = null; // reset expected time
+            _stopTimer();
+            _attempt = null; // reset attempt
+            _nextReconnectionAttempt = null; // reset expected time
           case WebSocketClientState$Closed _:
-            _stopTimer(client);
+            _stopTimer();
             if (client.isClosed) return;
-            final attempt = _attempts[client] ?? 0;
+            final attempt = _attempt ?? 0;
             final delay = backoffDelay(attempt, minMs, maxMs);
             if (delay <= Duration.zero) {
               config('Reconnecting to $lastUrl immediately.');
               Future<void>.sync(() => client.connect(lastUrl)).ignore();
-              _attempts[client] = attempt + 1;
+              _attempt = attempt + 1;
               return;
             }
             config('Reconnecting to $lastUrl '
                 'after ${delay.inMilliseconds} ms.');
-            _nextReconnectionAttempts[client] = DateTime.now().add(delay);
-            _timers[client] = Timer(
+            _nextReconnectionAttempt = DateTime.now().add(delay);
+            _timer = Timer(
               delay,
               () {
-                _nextReconnectionAttempts[client] = null;
+                _nextReconnectionAttempt = null;
                 if (client.isClosed) {
-                  _stopTimer(client);
+                  _stopTimer();
                 } else if (client.state.readyState.isClosed) {
                   config('Auto reconnecting to $lastUrl '
                       'after ${delay.inMilliseconds} ms.');
@@ -105,21 +106,21 @@ final class WebSocketConnectionManager {
                 }
               },
             );
-            _attempts[client] = attempt + 1;
+            _attempt = attempt + 1;
           case WebSocketClientState$Connecting _:
           case WebSocketClientState$Disconnecting _:
         }
       };
 
-  void _stopSubscription(IWebSocketClient client) {
-    _watchers[client]?.cancel().ignore();
-    _watchers[client] = null;
+  void _stopSubscription() {
+    _watcher?.cancel().ignore();
+    _watcher = null;
   }
 
-  void _stopTimer(IWebSocketClient client) {
-    _nextReconnectionAttempts[client] = null;
-    _timers[client]?.cancel();
-    _timers[client] = null;
+  void _stopTimer() {
+    _nextReconnectionAttempt = null;
+    _timer?.cancel();
+    _timer = null;
   }
 
   /// Full jitter technique.
