@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:developer' as developer;
 
 import 'package:meta/meta.dart';
@@ -38,7 +37,7 @@ void Function(
   String? reason,
 ]) _logAll(String prefix, int level) => (message, [stackTrace, reason]) {
       // coverage:ignore-start
-      if (!$debugWS && Zone.current[#dev.plugfox.ws.debug] != true) return;
+      if (!$debugWS) return;
       developer.log(
         '[ws] ${reason ?? message}',
         level: level,
