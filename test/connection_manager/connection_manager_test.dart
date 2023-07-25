@@ -1,12 +1,15 @@
 import 'package:test/test.dart';
+import 'package:ws/src/client/ws_client.dart';
 import 'package:ws/src/manager/connection_manager.dart';
 
 void main() => group('ConnectionManager', () {
-      test('should be a singleton', () {
+      test('should not be a singleton', () {
+        final client = WebSocketClient();
         expect(
-          WebSocketConnectionManager.instance,
-          same(WebSocketConnectionManager.instance),
+          WebSocketConnectionManager(client),
+          isNot(same(WebSocketConnectionManager(client))),
         );
+        client.close();
       });
 
       test('backoffDelay', () {

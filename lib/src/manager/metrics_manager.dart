@@ -5,49 +5,46 @@ import 'package:ws/src/client/metrics.dart';
 import 'package:ws/src/client/state.dart';
 import 'package:ws/src/client/web_socket_ready_state.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
-import 'package:ws/src/manager/connection_manager.dart';
 
 /// {@nodoc}
 @internal
 final class WebSocketMetricsManager {
   /// {@nodoc}
-  static final WebSocketMetricsManager instance =
-      WebSocketMetricsManager._internal();
+  WebSocketMetricsManager(IWebSocketClient client)
+      : _client = WeakReference<IWebSocketClient>(client);
 
   /// {@nodoc}
-  WebSocketMetricsManager._internal();
+  final WeakReference<IWebSocketClient> _client;
 
   /// {@nodoc}
-  final Expando<StreamSubscription<Object>> _receiveObservers =
-      Expando<StreamSubscription<Object>>();
+  StreamSubscription<Object>? _receiveObserver;
 
   /// {@nodoc}
-  final Expando<StreamSubscription<WebSocketClientState>> _stateObservers =
-      Expando<StreamSubscription<WebSocketClientState>>();
+  StreamSubscription<WebSocketClientState>? _stateObserver;
 
   /// {@nodoc}
-  final Expando<$WebSocketMetrics> _metrics = Expando<$WebSocketMetrics>();
+  final $WebSocketMetrics _metrics = $WebSocketMetrics();
 
   /// {@nodoc}
-  void startObserving(IWebSocketClient client) {
-    stopObserving(client);
-    final metrics = _getMetrics(client);
-    _receiveObservers[client] = client.stream.listen(
+  void startObserving() {
+    stopObserving();
+    final metrics = _metrics;
+    _receiveObserver = _client.target?.stream.listen(
       (data) => _onDataReceived(metrics, data),
       cancelOnError: false,
     );
-    _stateObservers[client] = client.stateChanges.listen(
+    _stateObserver = _client.target?.stateChanges.listen(
       (state) => _onStateChanged(metrics, state),
       cancelOnError: false,
     );
   }
 
   /// {@nodoc}
-  void stopObserving(IWebSocketClient client) {
-    _receiveObservers[client]?.cancel().ignore();
-    _stateObservers[client]?.cancel().ignore();
-    _receiveObservers[client] = null;
-    _stateObservers[client] = null;
+  void stopObserving() {
+    _receiveObserver?.cancel().ignore();
+    _stateObserver?.cancel().ignore();
+    _receiveObserver = null;
+    _stateObserver = null;
   }
 
   void _onDataReceived($WebSocketMetrics metrics, Object data) {
@@ -92,12 +89,8 @@ final class WebSocketMetricsManager {
   }
 
   /// {@nodoc}
-  $WebSocketMetrics _getMetrics(IWebSocketClient client) =>
-      _metrics[client] ??= $WebSocketMetrics();
-
-  /// {@nodoc}
   @internal
-  void sent(IWebSocketClient client, Object data) => _getMetrics(client)
+  void sent(IWebSocketClient client, Object data) => _metrics
     ..transferredCount += BigInt.one
     ..transferredSize += switch (data) {
       String text => BigInt.from(text.length),
@@ -107,12 +100,15 @@ final class WebSocketMetricsManager {
 
   /// {@nodoc}
   @internal
-  WebSocketMetrics buildMetricFor(IWebSocketClient client) {
-    final metrics = _getMetrics(client);
-    final readyState = client.state.readyState;
+  WebSocketMetrics buildMetric({
+    required bool active,
+    required int attempt,
+    required DateTime? nextReconnectionAttempt,
+  }) {
+    final metrics = _metrics;
+    final readyState =
+        _client.target?.state.readyState ?? WebSocketReadyState.closed;
     final lastDisconnectTime = metrics.lastDisconnectTime;
-    final reconnectionStatus =
-        WebSocketConnectionManager.instance.getStatusFor(client);
     return WebSocketMetrics(
       timestamp: DateTime.now(),
       readyState: readyState,
@@ -126,14 +122,13 @@ final class WebSocketMetricsManager {
       lastDisconnectTime: lastDisconnectTime,
       lastDisconnect: metrics.lastDisconnect,
       lastUrl: metrics.lastUrl,
-      isReconnectionActive: reconnectionStatus.active,
-      currentReconnectAttempts: reconnectionStatus.attempt,
+      isReconnectionActive: active,
+      currentReconnectAttempts: attempt,
       nextReconnectionAttempt: switch (readyState) {
         WebSocketReadyState.open => null,
         WebSocketReadyState.connecting => DateTime.now(),
         WebSocketReadyState.disconnecting => null,
-        WebSocketReadyState.closed =>
-          reconnectionStatus.nextReconnectionAttempt,
+        WebSocketReadyState.closed => nextReconnectionAttempt,
       },
     );
   }

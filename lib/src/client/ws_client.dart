@@ -27,7 +27,7 @@ final class WebSocketClient implements IWebSocketClient {
   WebSocketClient([WebSocketOptions? options])
       : _client = $platformWebSocketClient(options),
         _options = options ?? WebSocketOptions.common() {
-    WebSocketMetricsManager.instance.startObserving(this);
+    _init();
   }
 
   /// Creates a [WebSocketClient] from an existing [IWebSocketClient].
@@ -38,7 +38,7 @@ final class WebSocketClient implements IWebSocketClient {
       [WebSocketOptions? options])
       : _client = client,
         _options = options ?? WebSocketOptions.common() {
-    WebSocketMetricsManager.instance.startObserving(this);
+    _init();
   }
 
   /// {@macro ws_client}
@@ -47,6 +47,10 @@ final class WebSocketClient implements IWebSocketClient {
 
   final IWebSocketClient _client;
   final WebSocketEventQueue _eventQueue = WebSocketEventQueue();
+  late final WebSocketMetricsManager _metricsManager =
+      WebSocketMetricsManager(this);
+  late final WebSocketConnectionManager _connectionManager =
+      WebSocketConnectionManager(this);
 
   /// Current options.
   /// {@nodoc}
@@ -57,8 +61,18 @@ final class WebSocketClient implements IWebSocketClient {
   bool _isClosed = false;
 
   /// Get the metrics for this client.
-  WebSocketMetrics get metrics =>
-      WebSocketMetricsManager.instance.buildMetricFor(this);
+  WebSocketMetrics get metrics {
+    final (
+      :bool active,
+      :int attempt,
+      :DateTime? nextReconnectionAttempt,
+    ) = _connectionManager.status;
+    return _metricsManager.buildMetric(
+      active: active,
+      attempt: attempt,
+      nextReconnectionAttempt: nextReconnectionAttempt,
+    );
+  }
 
   @override
   WebSocketMessagesStream get stream => _client.stream;
@@ -68,6 +82,10 @@ final class WebSocketClient implements IWebSocketClient {
 
   @override
   WebSocketClientState get state => _client.state;
+
+  void _init() {
+    _metricsManager.startObserving();
+  }
 
   @override
   Future<void> add(Object data) async {
@@ -84,15 +102,14 @@ final class WebSocketClient implements IWebSocketClient {
         );
       }
     });
-    WebSocketMetricsManager.instance.sent(this, data);
+    _metricsManager.sent(this, data);
   }
 
   @override
   Future<void> connect(String url) {
     if (_isClosed) return Future<void>.error(const WSClientClosedException());
     return _eventQueue.push('connect', () async {
-      WebSocketConnectionManager.instance.startMonitoringConnection(
-        this,
+      _connectionManager.startMonitoringConnection(
         url,
         _options.connectionRetryInterval,
       );
@@ -115,7 +132,7 @@ final class WebSocketClient implements IWebSocketClient {
       [int? code = 1000, String? reason = 'NORMAL_CLOSURE']) {
     if (_isClosed) return Future<void>.error(const WSClientClosedException());
     return _eventQueue.push('disconnect', () async {
-      WebSocketConnectionManager.instance.stopMonitoringConnection(this);
+      _connectionManager.stopMonitoringConnection();
       try {
         await Future<void>.sync(() => _client.disconnect(code, reason))
             .timeout(_options.timeout);
@@ -136,7 +153,7 @@ final class WebSocketClient implements IWebSocketClient {
     try {
       _isClosed = true;
       // Stop monitoring the connection.
-      WebSocketConnectionManager.instance.stopMonitoringConnection(this);
+      _connectionManager.stopMonitoringConnection();
       // Clear the event queue and prevent new events from being processed.
       // Returns when the queue is empty and no new events are being processed.
       Future<void>.sync(_eventQueue.close).ignore();
@@ -154,7 +171,7 @@ final class WebSocketClient implements IWebSocketClient {
       // Wait for the next microtask to ensure that the metrics are updated
       // from state stream, before stopping observing.
       scheduleMicrotask(() {
-        WebSocketMetricsManager.instance.stopObserving(this);
+        _metricsManager.stopObserving();
       });
     }
   }
