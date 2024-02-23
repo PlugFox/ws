@@ -69,7 +69,7 @@ The `ws` package provides a cross-platform WebSocket client that supports JSON. 
 - ✅ Fake client for testing
 - ✅ Custom exceptions
 - ✅ 90% test coverage
-- ❌ First message after connection/reconnection
+- ✅ First message after connection/reconnection
 - ❌ Automatic ping/pong for keep-alive & connection health check
 - ❌ Reusing client between isolates
 - ❌ Interceptors (middlewares)

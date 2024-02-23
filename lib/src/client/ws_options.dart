@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:meta/meta.dart';
+import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/client/ws_options_common.dart';
 import 'package:ws/src/client/ws_options_vm.dart'
     // ignore: uri_does_not_exist
@@ -41,6 +44,7 @@ abstract base class WebSocketOptions {
     this.connectionRetryInterval,
     Iterable<String>? protocols,
     Duration? timeout,
+    this.afterConnect,
   })  : protocols = protocols?.where((e) => e.isNotEmpty).toSet(),
         timeout = timeout ?? const Duration(seconds: 30);
 
@@ -49,6 +53,7 @@ abstract base class WebSocketOptions {
     ConnectionRetryInterval? connectionRetryInterval,
     Iterable<String>? protocols,
     Duration? timeout,
+    FutureOr<void> Function(IWebSocketClient)? afterConnect,
   }) = $WebSocketOptions$Common;
 
   /// {@template ws_options_vm}
@@ -100,6 +105,7 @@ abstract base class WebSocketOptions {
     Object? /*HttpClient*/ customClient,
     String? userAgent,
     Duration? timeout,
+    FutureOr<void> Function(IWebSocketClient)? afterConnect,
   }) =>
       $vmOptions(
         connectionRetryInterval: connectionRetryInterval,
@@ -109,6 +115,7 @@ abstract base class WebSocketOptions {
         customClient: customClient,
         userAgent: userAgent,
         timeout: timeout,
+        afterConnect: afterConnect,
       );
 
   // Ignore web related imports at the GitHub Actions coverage.
@@ -138,12 +145,14 @@ abstract base class WebSocketOptions {
     Iterable<String>? protocols,
     Duration? timeout,
     bool? useBlobForBinary,
+    FutureOr<void> Function(IWebSocketClient)? afterConnect,
   }) =>
       $jsOptions(
         connectionRetryInterval: connectionRetryInterval,
         protocols: protocols,
         timeout: timeout,
         useBlobForBinary: useBlobForBinary,
+        afterConnect: afterConnect,
       );
 
   // coverage:ignore-end
@@ -175,4 +184,11 @@ abstract base class WebSocketOptions {
   /// If not specified, the timeout will be 30 seconds.
   @nonVirtual
   final Duration timeout;
+
+  /// Callback function to be called after the connection is established,
+  /// but before the client allow to send user messages.
+  ///
+  /// Good place to send authentication data, subscribe to channels, or
+  /// send any other initial data.
+  final FutureOr<void> Function(IWebSocketClient client)? afterConnect;
 }
