@@ -383,6 +383,32 @@ void main() {
     });
   });
 
+  group('First message after connect', () {
+    const url = 'wss://echo.plugfox.dev:443/connect';
+
+    late IWebSocketClient client;
+
+    setUpAll(() {
+      client = WebSocketClient(WebSocketOptions.common(
+        afterConnect: (c) => c.add('auth.abc.123'),
+      ));
+    });
+
+    tearDownAll(() {
+      client.close();
+    });
+
+    test('Can send first message from options', () async {
+      await client.connect(url);
+      var received =
+          await client.stream.first.timeout(const Duration(seconds: 5));
+      expect(received, equals('auth.abc.123'));
+      client.add('message');
+      received = await client.stream.first.timeout(const Duration(seconds: 5));
+      expect(received, equals('message'));
+    });
+  });
+
   group(
     'Binary data as a Blob',
     () {

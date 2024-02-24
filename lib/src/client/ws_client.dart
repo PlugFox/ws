@@ -126,7 +126,7 @@ final class WebSocketClient implements IWebSocketClient {
       }
       try {
         // Send first messages after connection is established:
-        await _options.afterConnect?.call(this);
+        await _options.afterConnect?.call(_client);
       } on Object {
         _client.disconnect(1006, 'AFTER_CONNECT_ERROR');
       }
