@@ -4,6 +4,7 @@ import 'dart:async';
 
 import 'package:meta/meta.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
+import 'package:ws/src/client/ws_interceptor.dart';
 import 'package:ws/src/client/ws_options.dart';
 
 /// {@nodoc}
@@ -17,6 +18,7 @@ WebSocketOptions $vmOptions({
   String? userAgent,
   Duration? timeout,
   FutureOr<void> Function(IWebSocketClient)? afterConnect,
+  Iterable<WSInterceptor>? interceptors,
 }) {
   assert(false, 'This method should not be called at the JS platform.');
   return $WebSocketOptions$JS(
@@ -24,6 +26,7 @@ WebSocketOptions $vmOptions({
     protocols: protocols,
     timeout: timeout,
     afterConnect: afterConnect,
+    interceptors: interceptors,
   );
 }
 
@@ -34,6 +37,7 @@ WebSocketOptions $jsOptions({
   Iterable<String>? protocols,
   Duration? timeout,
   FutureOr<void> Function(IWebSocketClient)? afterConnect,
+  Iterable<WSInterceptor>? interceptors,
   bool? useBlobForBinary,
 }) =>
     $WebSocketOptions$JS(
@@ -42,6 +46,7 @@ WebSocketOptions $jsOptions({
       timeout: timeout,
       useBlobForBinary: useBlobForBinary,
       afterConnect: afterConnect,
+      interceptors: interceptors,
     );
 
 /// {@nodoc}
@@ -60,6 +65,7 @@ final class $WebSocketOptions$JS extends WebSocketOptions {
     super.protocols,
     super.timeout,
     super.afterConnect,
+    super.interceptors,
     bool? useBlobForBinary,
   }) : useBlobForBinary = useBlobForBinary ?? false;
 

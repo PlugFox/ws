@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:meta/meta.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
+import 'package:ws/src/client/ws_interceptor.dart';
 import 'package:ws/src/client/ws_options.dart';
 
 /// {@nodoc}
@@ -16,6 +17,7 @@ WebSocketOptions $vmOptions({
   String? userAgent,
   Duration? timeout,
   FutureOr<void> Function(IWebSocketClient)? afterConnect,
+  Iterable<WSInterceptor>? interceptors,
 }) =>
     $WebSocketOptions$VM(
       connectionRetryInterval: connectionRetryInterval,
@@ -32,6 +34,7 @@ WebSocketOptions $vmOptions({
       userAgent: userAgent,
       timeout: timeout,
       afterConnect: afterConnect,
+      interceptors: interceptors,
     );
 
 // coverage:ignore-start
@@ -44,6 +47,7 @@ WebSocketOptions $jsOptions({
   Duration? timeout,
   bool? useBlobForBinary,
   FutureOr<void> Function(IWebSocketClient)? afterConnect,
+  Iterable<WSInterceptor>? interceptors,
 }) {
   assert(false, 'This method should not be called at the VM platform.');
   return $WebSocketOptions$VM(
@@ -51,6 +55,7 @@ WebSocketOptions $jsOptions({
     protocols: protocols,
     timeout: timeout,
     afterConnect: afterConnect,
+    interceptors: interceptors,
   );
 }
 
@@ -73,6 +78,7 @@ final class $WebSocketOptions$VM extends WebSocketOptions {
     super.protocols,
     super.timeout,
     super.afterConnect,
+    super.interceptors,
     this.headers,
     this.compression,
     this.customClient,

@@ -10,5 +10,6 @@ final class $WebSocketOptions$Common extends WebSocketOptions {
     super.protocols,
     super.timeout,
     super.afterConnect,
+    super.interceptors,
   });
 }

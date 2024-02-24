@@ -1,3 +1,5 @@
+// ignore_for_file: avoid_types_on_closure_parameters, omit_local_variable_types
+
 import 'dart:async';
 import 'dart:collection';
 
@@ -7,6 +9,7 @@ import 'package:ws/src/client/state.dart';
 import 'package:ws/src/client/state_stream.dart';
 import 'package:ws/src/client/web_socket_ready_state.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
+import 'package:ws/src/client/ws_interceptor.dart';
 import 'package:ws/src/util/constants.dart';
 import 'package:ws/src/util/logger.dart';
 
@@ -14,13 +17,20 @@ import 'package:ws/src/util/logger.dart';
 @internal
 abstract base class WebSocketClientBase implements IWebSocketClient {
   /// {@nodoc}
-  WebSocketClientBase({Iterable<String>? protocols})
-      : _dataController = StreamController<Object>.broadcast(),
+  WebSocketClientBase({
+    Iterable<String>? protocols,
+    Iterable<WSInterceptor>? interceptors,
+  })  : _dataController = StreamController<Object>.broadcast(),
         _stateController = StreamController<WebSocketClientState>.broadcast(),
         _state = WebSocketClientState.initial(),
         protocols = protocols != null
-            ? UnmodifiableListView(protocols.toList(growable: false))
-            : null;
+            ? UnmodifiableListView<String>(protocols.toList(growable: false))
+            : null {
+    final chain =
+        interceptors?.toList(growable: false) ?? const <WSInterceptor>[];
+    _buildSendChain(chain);
+    _buildReceiveChain(chain);
+  }
 
   @override
   bool get isClosed => _isClosed; // coverage:ignore-line
@@ -29,6 +39,12 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   /// {@nodoc}
   @protected
   final List<String>? protocols;
+
+  /// On message sent callback interceptors chain.
+  late final void Function(Object data) _onSentChain;
+
+  /// On message received callback interceptors chain.
+  late final void Function(Object data) _onReceivedDataChain;
 
   /// Output stream of data from native WebSocket client.
   /// {@nodoc}
@@ -62,16 +78,14 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
     setState((_) => WebSocketClientState.connecting(url: url));
   }
 
+  @protected
+  @visibleForOverriding
+  void push(Object data);
+
   @override
-  @mustCallSuper
-  FutureOr<void> add(Object data) async {
-    // coverage:ignore-start
-    if ($debugWS) {
-      var text = data.toString();
-      text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
-      fine('> $text');
-    }
-    // coverage:ignore-end
+  @nonVirtual
+  FutureOr<void> add(Object data) {
+    _onSentChain(data);
   }
 
   @override
@@ -93,7 +107,6 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
     try {
       await disconnect(code, reason);
     } on Object {/* ignore */} // coverage:ignore-line
-
     _dataController.close().ignore();
     _stateController.close().ignore();
   }
@@ -114,33 +127,12 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
     setState((_) => WebSocketClientState.open(url: url));
   }
 
-  /// {@nodoc}
-  @protected
-  void onSent(Object data) {
-    // coverage:ignore-start
-    if ($debugWS) {
-      var text = data.toString();
-      text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
-      fine('Sent: $text');
-    }
-    // coverage:ignore-end
-  }
-
   /// On data received callback.
   /// {@nodoc}
   @protected
   void onReceivedData(Object? data) {
-    // coverage:ignore-start
-    if (data == null || _dataController.isClosed) return;
-    // coverage:ignore-end
-    _dataController.add(data);
-    // coverage:ignore-start
-    if ($debugWS) {
-      var text = data.toString();
-      text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
-      fine('< $text');
-    }
-    // coverage:ignore-end
+    if (data == null) return;
+    _onReceivedDataChain(data);
   }
 
   /// {@nodoc}
@@ -156,4 +148,43 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   /// {@nodoc}
   @protected
   void onError(Object error, StackTrace stackTrace) {}
+
+  /// Build push interceptors
+  void _buildSendChain(List<WSInterceptor> interceptors) {
+    void Function(Object) fn = (Object data) {
+      push(data);
+      // coverage:ignore-start
+      if ($debugWS) {
+        var text = data.toString();
+        text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
+        fine('> $text');
+      }
+      // coverage:ignore-end
+    };
+    for (var i = interceptors.length - 1; i >= 0; i--) {
+      final interceptor = interceptors[i];
+      fn = (data) => interceptor.onSend(data, fn);
+    }
+    _onSentChain = fn;
+  }
+
+  /// Build receive interceptors
+  void _buildReceiveChain(List<WSInterceptor> interceptors) {
+    void Function(Object) fn = (Object data) {
+      if (_dataController.isClosed) return;
+      _dataController.add(data);
+      // coverage:ignore-start
+      if ($debugWS) {
+        var text = data.toString();
+        text = text.length > 100 ? '${text.substring(0, 97)}...' : text;
+        fine('< $text');
+      }
+      // coverage:ignore-end
+    };
+    for (var i = interceptors.length - 1; i >= 0; i--) {
+      final interceptor = interceptors[i];
+      fn = (data) => interceptor.onMessage(data, fn);
+    }
+    _onReceivedDataChain = fn;
+  }
 }

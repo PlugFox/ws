@@ -19,11 +19,20 @@ import 'package:ws/src/util/logger.dart';
 IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
     switch (options) {
       $WebSocketOptions$JS options => WebSocketClient$JS(
+          interceptors: options.interceptors,
           protocols: options.protocols,
           options: options,
         ),
       _ => WebSocketClient$JS(
+          interceptors: options?.interceptors,
           protocols: options?.protocols,
+          options: $WebSocketOptions$JS(
+            protocols: options?.protocols,
+            connectionRetryInterval: options?.connectionRetryInterval,
+            timeout: options?.timeout,
+            afterConnect: options?.afterConnect,
+            interceptors: options?.interceptors,
+          ),
         ),
     };
 
@@ -31,8 +40,11 @@ IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
 @internal
 final class WebSocketClient$JS extends WebSocketClientBase {
   /// {@nodoc}
-  WebSocketClient$JS({super.protocols, $WebSocketOptions$JS? options})
-      : _options = options;
+  WebSocketClient$JS({
+    super.interceptors,
+    super.protocols,
+    $WebSocketOptions$JS? options,
+  }) : _options = options;
 
   /// {@nodoc}
   final $WebSocketOptions$JS? _options;
@@ -70,10 +82,9 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   }
 
   @override
-  FutureOr<void> add(Object data) {
-    super.add(data);
+  void push(Object data) {
     final client = _client;
-    if (client == null) {
+    if (client == null || client.readyState != html.WebSocket.OPEN) {
       throw const WSClientClosedException(
           message: 'WebSocket client is not connected.');
     }
@@ -144,7 +155,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
                 _ => data,
               })
           .listen(
-            onReceivedData,
+            super.onReceivedData,
             onError: onError,
             onDone: disconnect,
             cancelOnError: false,

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:meta/meta.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
+import 'package:ws/src/client/ws_interceptor.dart';
 import 'package:ws/src/client/ws_options_common.dart';
 import 'package:ws/src/client/ws_options_vm.dart'
     // ignore: uri_does_not_exist
@@ -45,8 +46,11 @@ abstract base class WebSocketOptions {
     Iterable<String>? protocols,
     Duration? timeout,
     this.afterConnect,
+    Iterable<WSInterceptor>? interceptors,
   })  : protocols = protocols?.where((e) => e.isNotEmpty).toSet(),
-        timeout = timeout ?? const Duration(seconds: 30);
+        timeout = timeout ?? const Duration(seconds: 30),
+        interceptors = List<WSInterceptor>.unmodifiable(
+            interceptors ?? const <WSInterceptor>[]);
 
   /// {@macro ws_options_common}
   factory WebSocketOptions.common({
@@ -54,6 +58,7 @@ abstract base class WebSocketOptions {
     Iterable<String>? protocols,
     Duration? timeout,
     FutureOr<void> Function(IWebSocketClient)? afterConnect,
+    Iterable<WSInterceptor>? interceptors,
   }) = $WebSocketOptions$Common;
 
   /// {@template ws_options_vm}
@@ -106,6 +111,7 @@ abstract base class WebSocketOptions {
     String? userAgent,
     Duration? timeout,
     FutureOr<void> Function(IWebSocketClient)? afterConnect,
+    Iterable<WSInterceptor>? interceptors,
   }) =>
       $vmOptions(
         connectionRetryInterval: connectionRetryInterval,
@@ -116,6 +122,7 @@ abstract base class WebSocketOptions {
         userAgent: userAgent,
         timeout: timeout,
         afterConnect: afterConnect,
+        interceptors: interceptors,
       );
 
   // Ignore web related imports at the GitHub Actions coverage.
@@ -146,6 +153,7 @@ abstract base class WebSocketOptions {
     Duration? timeout,
     bool? useBlobForBinary,
     FutureOr<void> Function(IWebSocketClient)? afterConnect,
+    Iterable<WSInterceptor>? interceptors,
   }) =>
       $jsOptions(
         connectionRetryInterval: connectionRetryInterval,
@@ -153,6 +161,7 @@ abstract base class WebSocketOptions {
         timeout: timeout,
         useBlobForBinary: useBlobForBinary,
         afterConnect: afterConnect,
+        interceptors: interceptors,
       );
 
   // coverage:ignore-end
@@ -191,4 +200,7 @@ abstract base class WebSocketOptions {
   /// Good place to send authentication data, subscribe to channels, or
   /// send any other initial data.
   final FutureOr<void> Function(IWebSocketClient client)? afterConnect;
+
+  /// Interceptors for WebSocket messages.
+  final List<WSInterceptor>? interceptors;
 }
