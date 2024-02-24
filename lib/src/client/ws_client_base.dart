@@ -163,7 +163,8 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
     };
     for (var i = interceptors.length - 1; i >= 0; i--) {
       final interceptor = interceptors[i];
-      fn = (data) => interceptor.onSend(data, fn);
+      final next = fn;
+      fn = (data) => interceptor.onSend(data, next);
     }
     _onSentChain = fn;
   }
@@ -181,9 +182,10 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
       }
       // coverage:ignore-end
     };
-    for (var i = interceptors.length - 1; i >= 0; i--) {
+    for (var i = 0; i < interceptors.length; i++) {
       final interceptor = interceptors[i];
-      fn = (data) => interceptor.onMessage(data, fn);
+      final next = fn;
+      fn = (data) => interceptor.onMessage(data, next);
     }
     _onReceivedDataChain = fn;
   }
