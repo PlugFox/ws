@@ -7,7 +7,6 @@ import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/client/ws_interceptor.dart';
 import 'package:ws/src/client/ws_options.dart';
 
-/// {@nodoc}
 @internal
 WebSocketOptions $vmOptions({
   ConnectionRetryInterval? connectionRetryInterval,
@@ -30,7 +29,6 @@ WebSocketOptions $vmOptions({
   );
 }
 
-/// {@nodoc}
 @internal
 WebSocketOptions $jsOptions({
   ConnectionRetryInterval? connectionRetryInterval,
@@ -49,7 +47,6 @@ WebSocketOptions $jsOptions({
       interceptors: interceptors,
     );
 
-/// {@nodoc}
 @internal
 WebSocketOptions $selectorOptions({
   required WebSocketOptions Function() vm,
@@ -57,7 +54,6 @@ WebSocketOptions $selectorOptions({
 }) =>
     js();
 
-/// {@nodoc}
 final class $WebSocketOptions$JS extends WebSocketOptions {
   /// {@macro ws_options_js}
   $WebSocketOptions$JS({
@@ -69,6 +65,5 @@ final class $WebSocketOptions$JS extends WebSocketOptions {
     bool? useBlobForBinary,
   }) : useBlobForBinary = useBlobForBinary ?? false;
 
-  /// {@nodoc}
   final bool useBlobForBinary;
 }

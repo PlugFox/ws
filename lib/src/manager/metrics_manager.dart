@@ -6,26 +6,19 @@ import 'package:ws/src/client/state.dart';
 import 'package:ws/src/client/web_socket_ready_state.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
 
-/// {@nodoc}
 @internal
 final class WebSocketMetricsManager {
-  /// {@nodoc}
   WebSocketMetricsManager(IWebSocketClient client)
       : _client = WeakReference<IWebSocketClient>(client);
 
-  /// {@nodoc}
   final WeakReference<IWebSocketClient> _client;
 
-  /// {@nodoc}
   StreamSubscription<Object>? _receiveObserver;
 
-  /// {@nodoc}
   StreamSubscription<WebSocketClientState>? _stateObserver;
 
-  /// {@nodoc}
   final $WebSocketMetrics _metrics = $WebSocketMetrics();
 
-  /// {@nodoc}
   void startObserving() {
     stopObserving();
     final metrics = _metrics;
@@ -39,7 +32,6 @@ final class WebSocketMetricsManager {
     );
   }
 
-  /// {@nodoc}
   void stopObserving() {
     _receiveObserver?.cancel().ignore();
     _stateObserver?.cancel().ignore();
@@ -88,7 +80,6 @@ final class WebSocketMetricsManager {
     }
   }
 
-  /// {@nodoc}
   @internal
   void sent(IWebSocketClient client, Object data) => _metrics
     ..transferredCount += BigInt.one
@@ -98,7 +89,6 @@ final class WebSocketMetricsManager {
       _ => BigInt.zero,
     };
 
-  /// {@nodoc}
   @internal
   WebSocketMetrics buildMetric({
     required bool active,
@@ -134,27 +124,21 @@ final class WebSocketMetricsManager {
   }
 }
 
-/// {@nodoc}
 @internal
 final class $WebSocketMetrics {
   /// The total number of bytes sent.
-  /// {@nodoc}
   BigInt transferredSize = BigInt.zero;
 
   /// The total number of bytes received.
-  /// {@nodoc}
   BigInt receivedSize = BigInt.zero;
 
   /// The total number of messages sent.
-  /// {@nodoc}
   BigInt transferredCount = BigInt.zero;
 
   /// The total number of messages received.
-  /// {@nodoc}
   BigInt receivedCount = BigInt.zero;
 
   /// The total number of times the connection has been re-established.
-  /// {@nodoc}
   ({int successful, int total}) reconnects = (successful: 0, total: 0);
 
   /// The total number of times the connection has been disconnected.

@@ -6,7 +6,6 @@ import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/client/ws_interceptor.dart';
 import 'package:ws/src/client/ws_options.dart';
 
-/// {@nodoc}
 @internal
 WebSocketOptions $vmOptions({
   ConnectionRetryInterval? connectionRetryInterval,
@@ -39,7 +38,6 @@ WebSocketOptions $vmOptions({
 
 // coverage:ignore-start
 
-/// {@nodoc}
 @internal
 WebSocketOptions $jsOptions({
   ConnectionRetryInterval? connectionRetryInterval,
@@ -61,7 +59,6 @@ WebSocketOptions $jsOptions({
 
 // coverage:ignore-end
 
-/// {@nodoc}
 @internal
 WebSocketOptions $selectorOptions({
   required WebSocketOptions Function() vm,
@@ -69,10 +66,8 @@ WebSocketOptions $selectorOptions({
 }) =>
     vm();
 
-/// {@nodoc}
 @internal
 final class $WebSocketOptions$VM extends WebSocketOptions {
-  /// {@nodoc}
   $WebSocketOptions$VM({
     super.connectionRetryInterval,
     super.protocols,

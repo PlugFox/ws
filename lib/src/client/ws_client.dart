@@ -53,7 +53,6 @@ final class WebSocketClient implements IWebSocketClient {
       WebSocketConnectionManager(this);
 
   /// Current options.
-  /// {@nodoc}
   final WebSocketOptions _options;
 
   @override

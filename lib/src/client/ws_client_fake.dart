@@ -8,7 +8,6 @@ import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/client/ws_options.dart';
 
 // coverage:ignore-start
-/// {@nodoc}
 @internal
 IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
     WebSocketClientFake(protocols: options?.protocols);
@@ -29,7 +28,6 @@ final class WebSocketClientFake implements IWebSocketClient {
         _isClosed = false,
         _state = WebSocketClientState.initial();
 
-  /// {@nodoc}
   @visibleForTesting
   final List<String>? protocols;
 

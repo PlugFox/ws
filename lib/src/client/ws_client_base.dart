@@ -13,10 +13,8 @@ import 'package:ws/src/client/ws_interceptor.dart';
 import 'package:ws/src/util/constants.dart';
 import 'package:ws/src/util/logger.dart';
 
-/// {@nodoc}
 @internal
 abstract base class WebSocketClientBase implements IWebSocketClient {
-  /// {@nodoc}
   WebSocketClientBase({
     Iterable<String>? protocols,
     Iterable<WSInterceptor>? interceptors,
@@ -36,7 +34,6 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   bool get isClosed => _isClosed; // coverage:ignore-line
   bool _isClosed = false;
 
-  /// {@nodoc}
   @protected
   final List<String>? protocols;
 
@@ -47,7 +44,6 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   late final void Function(Object data) _onReceivedDataChain;
 
   /// Output stream of data from native WebSocket client.
-  /// {@nodoc}
   @protected
   final StreamController<Object> _dataController;
 
@@ -56,7 +52,6 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
       WebSocketMessagesStream(_dataController.stream);
 
   /// Current ready state of the WebSocket connection.
-  /// {@nodoc}
   abstract final WebSocketReadyState readyState;
 
   @override
@@ -64,7 +59,6 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   WebSocketClientState _state;
 
   /// Output stream of state changes.
-  /// {@nodoc}
   @protected
   final StreamController<WebSocketClientState> _stateController;
 
@@ -111,7 +105,6 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
     _stateController.close().ignore();
   }
 
-  /// {@nodoc}
   @protected
   void setState(
       WebSocketClientState Function(WebSocketClientState state) change) {
@@ -121,21 +114,18 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
     info('WebSocketClient state changed to $newState');
   }
 
-  /// {@nodoc}
   @protected
   void onConnected(String url) {
     setState((_) => WebSocketClientState.open(url: url));
   }
 
   /// On data received callback.
-  /// {@nodoc}
   @protected
   void onReceivedData(Object? data) {
     if (data == null) return;
     _onReceivedDataChain(data);
   }
 
-  /// {@nodoc}
   @protected
   void onDisconnected(int? code, String? reason) {
     setState((_) => WebSocketClientState.closed(
@@ -145,7 +135,6 @@ abstract base class WebSocketClientBase implements IWebSocketClient {
   }
 
   /// Error callback.
-  /// {@nodoc}
   @protected
   void onError(Object error, StackTrace stackTrace) {}
 

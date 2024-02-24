@@ -4,10 +4,8 @@ import 'dart:collection';
 import 'package:meta/meta.dart';
 import 'package:ws/src/client/websocket_exception.dart';
 
-/// {@nodoc}
 @internal
 final class WebSocketEventQueue {
-  /// {@nodoc}
   WebSocketEventQueue();
 
   final DoubleLinkedQueue<WebSocketTask<Object?>> _queue =
@@ -16,7 +14,6 @@ final class WebSocketEventQueue {
   bool _isClosed = false;
 
   /// Push it at the end of the queue.
-  /// {@nodoc}
   Future<T> push<T>(String id, FutureOr<T> Function() fn) {
     final task = WebSocketTask<T>(id, fn);
     _queue.add(task);
@@ -27,8 +24,7 @@ final class WebSocketEventQueue {
   /*
   /// Push it at the end of the queue if it doesn't exist.
   /// Otherwise, return the result from existing one.
-  /// {@nodoc}
-  Future<T> pushIfNotExists<T>(String id, FutureOr<T> Function() fn,
+    Future<T> pushIfNotExists<T>(String id, FutureOr<T> Function() fn,
       [bool Function(WebSocketTask<T> task)? test]) {
     if (_queue.isEmpty) return push<T>(id, fn);
     final iter = _queue.iterator;
@@ -45,14 +41,12 @@ final class WebSocketEventQueue {
   /// Mark the queue as closed.
   /// The queue will be processed until it's empty.
   /// But all new and current events will be rejected with [WSClientClosed].
-  /// {@nodoc}
   FutureOr<void> close() async {
     _isClosed = true;
     await _processing;
   }
 
   /// Execute the queue.
-  /// {@nodoc}
   void _exec() => _processing ??= Future.doWhile(() async {
         final event = _queue.first;
         try {
@@ -76,27 +70,20 @@ final class WebSocketEventQueue {
       });
 }
 
-/// {@nodoc}
 @internal
 class WebSocketTask<T> {
-  /// {@nodoc}
   WebSocketTask(this.id, FutureOr<T> Function() fn)
       : _fn = fn,
         _completer = Completer<T>();
 
-  /// {@nodoc}
   final Completer<T> _completer;
 
-  /// {@nodoc}
   final String id;
 
-  /// {@nodoc}
   final FutureOr<T> Function() _fn;
 
-  /// {@nodoc}
   Future<T> get future => _completer.future;
 
-  /// {@nodoc}
   FutureOr<T> call() async {
     final result = await _fn();
     if (!_completer.isCompleted) {
@@ -105,7 +92,6 @@ class WebSocketTask<T> {
     return result;
   }
 
-  /// {@nodoc}
   void reject(Object error, [StackTrace? stackTrace]) {
     if (_completer.isCompleted) return; // coverage:ignore-line
     _completer.completeError(error, stackTrace);

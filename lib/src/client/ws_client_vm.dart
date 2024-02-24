@@ -12,7 +12,6 @@ import 'package:ws/src/client/ws_options.dart';
 import 'package:ws/src/client/ws_options_vm.dart';
 import 'package:ws/src/util/logger.dart';
 
-/// {@nodoc}
 @internal
 IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
     switch (options) {
@@ -34,28 +33,23 @@ IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
         ),
     };
 
-/// {@nodoc}
 @internal
 final class WebSocketClient$VM extends WebSocketClientBase {
-  /// {@nodoc}
   WebSocketClient$VM({
     super.interceptors,
     super.protocols,
     $WebSocketOptions$VM? options,
   }) : _options = options;
 
-  /// {@nodoc}
   final $WebSocketOptions$VM? _options;
 
   /// Native WebSocket client.
-  /// {@nodoc}
   // Close it at a [disconnect] or [close] method.
   // ignore: close_sinks
   io.WebSocket? _client;
 
   /// Binding to data from native WebSocket client.
   /// The subscription of [_communication] to [_controller].
-  /// {@nodoc}
   StreamSubscription<Object?>? _dataBindSubscription;
 
   @override
