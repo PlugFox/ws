@@ -12,38 +12,45 @@ import 'package:ws/src/client/ws_options.dart';
 import 'package:ws/src/client/ws_options_vm.dart';
 import 'package:ws/src/util/logger.dart';
 
-/// {@nodoc}
+/// Platform related callback to create a WebSocket client.
 @internal
 IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
     switch (options) {
       $WebSocketOptions$VM options => WebSocketClient$VM(
+          interceptors: options.interceptors,
           protocols: options.protocols,
           options: options,
         ),
       _ => WebSocketClient$VM(
+          interceptors: options?.interceptors,
           protocols: options?.protocols,
+          options: $WebSocketOptions$VM(
+            protocols: options?.protocols,
+            connectionRetryInterval: options?.connectionRetryInterval,
+            timeout: options?.timeout,
+            afterConnect: options?.afterConnect,
+            interceptors: options?.interceptors,
+          ),
         ),
     };
 
-/// {@nodoc}
 @internal
 final class WebSocketClient$VM extends WebSocketClientBase {
-  /// {@nodoc}
-  WebSocketClient$VM({super.protocols, $WebSocketOptions$VM? options})
-      : _options = options;
+  WebSocketClient$VM({
+    super.interceptors,
+    super.protocols,
+    $WebSocketOptions$VM? options,
+  }) : _options = options;
 
-  /// {@nodoc}
   final $WebSocketOptions$VM? _options;
 
   /// Native WebSocket client.
-  /// {@nodoc}
   // Close it at a [disconnect] or [close] method.
   // ignore: close_sinks
   io.WebSocket? _client;
 
   /// Binding to data from native WebSocket client.
   /// The subscription of [_communication] to [_controller].
-  /// {@nodoc}
   StreamSubscription<Object?>? _dataBindSubscription;
 
   @override
@@ -56,10 +63,9 @@ final class WebSocketClient$VM extends WebSocketClientBase {
   }
 
   @override
-  FutureOr<void> add(Object data) {
-    super.add(data);
+  void push(Object data) {
     final client = _client;
-    if (client == null) {
+    if (client == null || client.readyState != io.WebSocket.open) {
       throw const WSClientClosedException(
           message: 'WebSocket client is not connected.');
     }
@@ -115,7 +121,7 @@ final class WebSocketClient$VM extends WebSocketClientBase {
                 _ => data,
               })
           .listen(
-            onReceivedData,
+            super.onReceivedData,
             onError: onError,
             onDone: () => disconnect(1000, 'SUBSCRIPTION_CLOSED'),
             cancelOnError: false,

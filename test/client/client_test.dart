@@ -383,6 +383,32 @@ void main() {
     });
   });
 
+  group('First message after connect', () {
+    const url = 'wss://echo.plugfox.dev:443/connect';
+
+    late IWebSocketClient client;
+
+    setUpAll(() {
+      client = WebSocketClient(WebSocketOptions.common(
+        afterConnect: (c) => c.add('auth.abc.123'),
+      ));
+    });
+
+    tearDownAll(() {
+      client.close();
+    });
+
+    test('Can send first message from options', () async {
+      await client.connect(url);
+      var received =
+          await client.stream.first.timeout(const Duration(seconds: 5));
+      expect(received, equals('auth.abc.123'));
+      client.add('message');
+      received = await client.stream.first.timeout(const Duration(seconds: 5));
+      expect(received, equals('message'));
+    });
+  });
+
   group(
     'Binary data as a Blob',
     () {
@@ -674,6 +700,93 @@ void main() {
       await expectLater(client.close(), completes);
       expect(client.state, isA<WebSocketClientState$Closed>());
       expect(client.isClosed, isTrue);
+    });
+  });
+
+  group('Interceptors', () {
+    const url = 'wss://echo.plugfox.dev:443/connect';
+
+    test('Can send first message from options', () async {
+      var s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+      var r1 = 0, r2 = 0, r3 = 0, r4 = 0;
+      final client = WebSocketClient(WebSocketOptions.common(
+        interceptors: [
+          // 1
+          WSInterceptor.wrap(
+            onSend: (data) {
+              s1++;
+            },
+            onMessage: (data) {
+              r1++;
+            },
+          ),
+          // 2
+          WSInterceptor.wrap(),
+          // 3
+          WSInterceptor.wrap(
+            onSend: (data) {
+              s3++;
+            },
+          ),
+          // 4
+          WSInterceptor.wrap(
+            onMessage: (data) {
+              r4++;
+            },
+          ),
+        ],
+      ));
+
+      await client.connect(url);
+
+      await client.add('ping');
+
+      final response = await client.stream.first;
+      expect(response, equals('pong'));
+
+      // Send Interceptors
+      expect(s1, equals(1));
+      expect(s2, equals(0));
+      expect(s3, equals(1));
+      expect(s4, equals(0));
+
+      // Receive Interceptors
+      expect(r1, equals(1));
+      expect(r2, equals(0));
+      expect(r3, equals(0));
+      expect(r4, equals(1));
+
+      await client.close();
+    });
+
+    test('Dublicate send and receive', () async {
+      final client = WebSocketClient(WebSocketOptions.common(
+        interceptors: [
+          WSInterceptor.handlers(
+            onSend: (data, next) {
+              next(data);
+              next(data);
+            },
+            onMessage: (data, next) {
+              next(data);
+              next(data);
+            },
+          ),
+        ],
+      ));
+
+      await client.connect(url);
+
+      await client.add('ping');
+
+      final response = await client.stream
+          .take(4)
+          .toList()
+          .timeout(const Duration(seconds: 5));
+      expect(response, hasLength(4));
+      expect(response, equals(['pong', 'pong', 'pong', 'pong']));
+
+      await client.close();
     });
   });
 }

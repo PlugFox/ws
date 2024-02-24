@@ -1,11 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 
-/// {@nodoc}
 final Converter<String, Map<String, Object?>> _$jsonTextDecoder =
     const JsonDecoder().cast<String, Map<String, Object?>>();
 
-/// {@nodoc}
 final Converter<List<int>, Map<String, Object?>> _$jsonBytesDecoder =
     const Utf8Decoder().fuse<Map<String, Object?>>(
         const JsonDecoder().cast<String, Map<String, Object?>>());

@@ -1,7 +1,7 @@
 import 'package:shelf/shelf.dart';
 
-Middleware cors([Map<String, String>? headers]) =>
-    (innerHandler) => (request) => Future<Response>.sync(() => innerHandler(request)).then(
+Middleware cors([Map<String, String>? headers]) => (innerHandler) =>
+    (request) => Future<Response>.sync(() => innerHandler(request)).then(
           (response) => response.change(
             headers: <String, String>{
               ...response.headers,

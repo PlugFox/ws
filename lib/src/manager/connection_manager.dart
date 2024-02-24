@@ -6,30 +6,22 @@ import 'package:ws/src/client/state.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/util/logger.dart';
 
-/// {@nodoc}
 @internal
 final class WebSocketConnectionManager {
-  /// {@nodoc}
   WebSocketConnectionManager(IWebSocketClient client)
       : _client = WeakReference<IWebSocketClient>(client);
 
-  /// {@nodoc}
   final WeakReference<IWebSocketClient> _client;
 
-  /// {@nodoc}
   StreamSubscription<void>? _watcher;
 
-  /// {@nodoc}
   Timer? _timer;
 
-  /// {@nodoc}
   int? _attempt;
 
-  /// {@nodoc}
   DateTime? _nextReconnectionAttempt;
 
   /// Recive the current status of reconnection for the client.
-  /// {@nodoc}
   ({
     int attempt,
     bool active,
@@ -40,7 +32,6 @@ final class WebSocketConnectionManager {
         nextReconnectionAttempt: _nextReconnectionAttempt,
       );
 
-  /// {@nodoc}
   void startMonitoringConnection(
     String url,
     ({Duration max, Duration min})? connectionRetryInterval,
@@ -60,13 +51,11 @@ final class WebSocketConnectionManager {
         client.stateChanges.listen(stateChangesHandler, cancelOnError: false);
   }
 
-  /// {@nodoc}
   void stopMonitoringConnection() {
     _stopSubscription();
     _stopTimer();
   }
 
-  /// {@nodoc}
   void Function(WebSocketClientState state) _handleStateChange(
     IWebSocketClient client,
     String lastUrl,
@@ -125,7 +114,6 @@ final class WebSocketConnectionManager {
 
   /// Full jitter technique.
   /// https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
-  /// {@nodoc}
   @internal
   static Duration backoffDelay(int step, int minDelay, int maxDelay) {
     if (minDelay >= maxDelay) return Duration(milliseconds: maxDelay);
@@ -135,6 +123,5 @@ final class WebSocketConnectionManager {
   }
 
   /// Randomizer for full jitter technique.
-  /// {@nodoc}
   static final math.Random _rnd = math.Random();
 }

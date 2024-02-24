@@ -1,4 +1,8 @@
+import 'dart:async';
+
 import 'package:meta/meta.dart';
+import 'package:ws/src/client/ws_client_interface.dart';
+import 'package:ws/src/client/ws_interceptor.dart';
 import 'package:ws/src/client/ws_options_common.dart';
 import 'package:ws/src/client/ws_options_vm.dart'
     // ignore: uri_does_not_exist
@@ -13,8 +17,6 @@ import 'package:ws/src/client/ws_options_vm.dart'
 typedef ConnectionRetryInterval = ({Duration min, Duration max});
 
 /// {@template ws_options}
-/// Web socket platform dependent options.
-///
 /// Common options for VM and JS platforms:
 ///
 /// The [connectionRetryInterval] argument is specifying the
@@ -27,6 +29,15 @@ typedef ConnectionRetryInterval = ({Duration min, Duration max});
 ///
 /// The [timeout] argument is specifying the maximum time to wait for the
 /// connection to be established.
+///
+/// The [afterConnect] argument is specifying the callback function
+/// to be called after the connection is established,
+/// but before the client allow to send user messages.
+/// Good place to send authentication data, subscribe to channels,
+/// or send any other initial data.
+///
+/// The [interceptors] argument is specifying the interceptors
+/// for WebSocket messages.
 ///
 /// Other arguments are platform dependent.
 ///
@@ -41,14 +52,20 @@ abstract base class WebSocketOptions {
     this.connectionRetryInterval,
     Iterable<String>? protocols,
     Duration? timeout,
+    this.afterConnect,
+    Iterable<WSInterceptor>? interceptors,
   })  : protocols = protocols?.where((e) => e.isNotEmpty).toSet(),
-        timeout = timeout ?? const Duration(seconds: 30);
+        timeout = timeout ?? const Duration(seconds: 30),
+        interceptors = List<WSInterceptor>.unmodifiable(
+            interceptors ?? const <WSInterceptor>[]);
 
   /// {@macro ws_options_common}
   factory WebSocketOptions.common({
     ConnectionRetryInterval? connectionRetryInterval,
     Iterable<String>? protocols,
     Duration? timeout,
+    FutureOr<void> Function(IWebSocketClient)? afterConnect,
+    Iterable<WSInterceptor>? interceptors,
   }) = $WebSocketOptions$Common;
 
   /// {@template ws_options_vm}
@@ -91,6 +108,16 @@ abstract base class WebSocketOptions {
   ///
   /// The [timeout] argument is specifying the maximum time to wait for the
   /// connection to be established.
+  ///
+  /// The [afterConnect] argument is specifying the callback function
+  /// to be called after the connection is established,
+  /// but before the client allow to send user messages.
+  /// Good place to send authentication data, subscribe to channels,
+  /// or send any other initial data.
+  ///
+  /// The [interceptors] argument is specifying the interceptors
+  /// for WebSocket messages.
+  ///
   /// {@endtemplate}
   factory WebSocketOptions.vm({
     ConnectionRetryInterval? connectionRetryInterval,
@@ -100,6 +127,8 @@ abstract base class WebSocketOptions {
     Object? /*HttpClient*/ customClient,
     String? userAgent,
     Duration? timeout,
+    FutureOr<void> Function(IWebSocketClient)? afterConnect,
+    Iterable<WSInterceptor>? interceptors,
   }) =>
       $vmOptions(
         connectionRetryInterval: connectionRetryInterval,
@@ -109,6 +138,8 @@ abstract base class WebSocketOptions {
         customClient: customClient,
         userAgent: userAgent,
         timeout: timeout,
+        afterConnect: afterConnect,
+        interceptors: interceptors,
       );
 
   // Ignore web related imports at the GitHub Actions coverage.
@@ -129,21 +160,35 @@ abstract base class WebSocketOptions {
   /// The [timeout] argument is specifying the maximum time to wait for the
   /// connection to be established.
   ///
+  /// The [afterConnect] argument is specifying the callback function
+  /// to be called after the connection is established,
+  /// but before the client allow to send user messages.
+  /// Good place to send authentication data, subscribe to channels,
+  /// or send any other initial data.
+  ///
+  /// The [interceptors] argument is specifying the interceptors
+  /// for WebSocket messages.
+  ///
   /// The [useBlobForBinary] argument is specifying the Uint8List
   /// should be send as Blob or as Typed data.
   /// By default, the data send as Typed data.
+  ///
   /// {@endtemplate}
   factory WebSocketOptions.js({
     ConnectionRetryInterval? connectionRetryInterval,
     Iterable<String>? protocols,
     Duration? timeout,
     bool? useBlobForBinary,
+    FutureOr<void> Function(IWebSocketClient)? afterConnect,
+    Iterable<WSInterceptor>? interceptors,
   }) =>
       $jsOptions(
         connectionRetryInterval: connectionRetryInterval,
         protocols: protocols,
         timeout: timeout,
         useBlobForBinary: useBlobForBinary,
+        afterConnect: afterConnect,
+        interceptors: interceptors,
       );
 
   // coverage:ignore-end
@@ -175,4 +220,14 @@ abstract base class WebSocketOptions {
   /// If not specified, the timeout will be 30 seconds.
   @nonVirtual
   final Duration timeout;
+
+  /// Callback function to be called after the connection is established,
+  /// but before the client allow to send user messages.
+  ///
+  /// Good place to send authentication data, subscribe to channels, or
+  /// send any other initial data.
+  final FutureOr<void> Function(IWebSocketClient client)? afterConnect;
+
+  /// Interceptors for WebSocket messages.
+  final List<WSInterceptor>? interceptors;
 }

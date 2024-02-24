@@ -53,7 +53,6 @@ final class WebSocketClient implements IWebSocketClient {
       WebSocketConnectionManager(this);
 
   /// Current options.
-  /// {@nodoc}
   final WebSocketOptions _options;
 
   @override
@@ -123,6 +122,12 @@ final class WebSocketClient implements IWebSocketClient {
           WSNotConnectedException(originalException: error),
           stackTrace,
         );
+      }
+      try {
+        // Send first messages after connection is established:
+        await _options.afterConnect?.call(_client);
+      } on Object {
+        _client.disconnect(1006, 'AFTER_CONNECT_ERROR');
       }
     });
   }

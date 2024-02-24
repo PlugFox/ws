@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:meta/meta.dart';
+import 'package:ws/src/client/ws_client_interface.dart';
+import 'package:ws/src/client/ws_interceptor.dart';
 import 'package:ws/src/client/ws_options.dart';
 
-/// {@nodoc}
+/// Platform related callback to create a WebSocket options.
 @internal
 WebSocketOptions $vmOptions({
   ConnectionRetryInterval? connectionRetryInterval,
@@ -13,6 +16,8 @@ WebSocketOptions $vmOptions({
   Object? /*HttpClient*/ customClient,
   String? userAgent,
   Duration? timeout,
+  FutureOr<void> Function(IWebSocketClient)? afterConnect,
+  Iterable<WSInterceptor>? interceptors,
 }) =>
     $WebSocketOptions$VM(
       connectionRetryInterval: connectionRetryInterval,
@@ -28,29 +33,35 @@ WebSocketOptions $vmOptions({
       },
       userAgent: userAgent,
       timeout: timeout,
+      afterConnect: afterConnect,
+      interceptors: interceptors,
     );
 
 // coverage:ignore-start
 
-/// {@nodoc}
+/// Platform related callback to create a WebSocket options.
 @internal
 WebSocketOptions $jsOptions({
   ConnectionRetryInterval? connectionRetryInterval,
   Iterable<String>? protocols,
   Duration? timeout,
   bool? useBlobForBinary,
+  FutureOr<void> Function(IWebSocketClient)? afterConnect,
+  Iterable<WSInterceptor>? interceptors,
 }) {
   assert(false, 'This method should not be called at the VM platform.');
   return $WebSocketOptions$VM(
     connectionRetryInterval: connectionRetryInterval,
     protocols: protocols,
     timeout: timeout,
+    afterConnect: afterConnect,
+    interceptors: interceptors,
   );
 }
 
 // coverage:ignore-end
 
-/// {@nodoc}
+/// Platform related callback to create a WebSocket options.
 @internal
 WebSocketOptions $selectorOptions({
   required WebSocketOptions Function() vm,
@@ -58,14 +69,15 @@ WebSocketOptions $selectorOptions({
 }) =>
     vm();
 
-/// {@nodoc}
+/// VM implementation of [WebSocketOptions].
 @internal
 final class $WebSocketOptions$VM extends WebSocketOptions {
-  /// {@nodoc}
   $WebSocketOptions$VM({
     super.connectionRetryInterval,
     super.protocols,
     super.timeout,
+    super.afterConnect,
+    super.interceptors,
     this.headers,
     this.compression,
     this.customClient,

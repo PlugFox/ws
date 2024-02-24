@@ -14,52 +14,55 @@ import 'package:ws/src/client/ws_options.dart';
 import 'package:ws/src/client/ws_options_js.dart';
 import 'package:ws/src/util/logger.dart';
 
-/// {@nodoc}
+/// Platform related callback to create a WebSocket client.
 @internal
 IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
     switch (options) {
       $WebSocketOptions$JS options => WebSocketClient$JS(
+          interceptors: options.interceptors,
           protocols: options.protocols,
           options: options,
         ),
       _ => WebSocketClient$JS(
+          interceptors: options?.interceptors,
           protocols: options?.protocols,
+          options: $WebSocketOptions$JS(
+            protocols: options?.protocols,
+            connectionRetryInterval: options?.connectionRetryInterval,
+            timeout: options?.timeout,
+            afterConnect: options?.afterConnect,
+            interceptors: options?.interceptors,
+          ),
         ),
     };
 
-/// {@nodoc}
 @internal
 final class WebSocketClient$JS extends WebSocketClientBase {
-  /// {@nodoc}
-  WebSocketClient$JS({super.protocols, $WebSocketOptions$JS? options})
-      : _options = options;
+  WebSocketClient$JS({
+    super.interceptors,
+    super.protocols,
+    $WebSocketOptions$JS? options,
+  }) : _options = options;
 
-  /// {@nodoc}
   final $WebSocketOptions$JS? _options;
 
   /// Native WebSocket client.
-  /// {@nodoc}
   html.WebSocket? _client;
 
   /// Blob codec for `Blob <-> List<int>` conversion.
-  /// {@nodoc}
   late final _BlobCodec _blobCodec = _BlobCodec();
 
   /// Binding to data from native WebSocket client.
   /// The subscription of [_communication] to [_controller].
-  /// {@nodoc}
   StreamSubscription<Object?>? _dataBindSubscription;
 
   /// Binding to error from native WebSocket client.
-  /// {@nodoc}
   StreamSubscription<html.Event>? _errorBindSubscription;
 
   /// Binding to close event from native WebSocket client.
-  /// {@nodoc}
   StreamSubscription<html.CloseEvent>? _closeBindSubscription;
 
   /// Ready state of the WebSocket client.
-  /// {@nodoc}
   @override
   WebSocketReadyState get readyState {
     final code = _client?.readyState;
@@ -70,10 +73,9 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   }
 
   @override
-  FutureOr<void> add(Object data) {
-    super.add(data);
+  void push(Object data) {
     final client = _client;
-    if (client == null) {
+    if (client == null || client.readyState != html.WebSocket.OPEN) {
       throw const WSClientClosedException(
           message: 'WebSocket client is not connected.');
     }
@@ -144,7 +146,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
                 _ => data,
               })
           .listen(
-            onReceivedData,
+            super.onReceivedData,
             onError: onError,
             onDone: disconnect,
             cancelOnError: false,
@@ -200,12 +202,9 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   }
 }
 
-/// {@nodoc}
 final class _BlobCodec {
-  /// {@nodoc}
   _BlobCodec();
 
-  /// {@nodoc}
   @internal
   html.Blob write(Object data) {
     switch (data) {
@@ -228,7 +227,6 @@ final class _BlobCodec {
     }
   }
 
-  /// {@nodoc}
   @internal
   FutureOr<Object> read(html.Blob blob) async {
     final completer = Completer<Object>();

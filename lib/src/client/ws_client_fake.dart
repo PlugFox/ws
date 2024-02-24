@@ -7,8 +7,8 @@ import 'package:ws/src/client/state_stream.dart';
 import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/client/ws_options.dart';
 
+/// Platform related callback to create a WebSocket client.
 // coverage:ignore-start
-/// {@nodoc}
 @internal
 IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
     WebSocketClientFake(protocols: options?.protocols);
@@ -29,7 +29,7 @@ final class WebSocketClientFake implements IWebSocketClient {
         _isClosed = false,
         _state = WebSocketClientState.initial();
 
-  /// {@nodoc}
+  /// List of protocols to be used in the WebSocket connection.
   @visibleForTesting
   final List<String>? protocols;
 
