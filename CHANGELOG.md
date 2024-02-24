@@ -1,3 +1,9 @@
+## 1.0.0
+
+- Stable release
+- Add interceptors for incoming and outgoing messages
+- Add possibility to send messages right after connection
+
 ## 1.0.0-pre.6
 
 - **BREAKING CHANGE**: Change options to separate, platform-specific object
