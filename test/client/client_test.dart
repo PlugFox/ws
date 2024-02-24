@@ -5,7 +5,6 @@ import 'dart:typed_data';
 
 import 'package:test/test.dart';
 import 'package:ws/interface.dart';
-import 'package:ws/src/client/ws_interceptor.dart';
 import 'package:ws/ws.dart';
 
 void main() {
