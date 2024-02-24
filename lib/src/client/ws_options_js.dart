@@ -7,6 +7,7 @@ import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/client/ws_interceptor.dart';
 import 'package:ws/src/client/ws_options.dart';
 
+/// Platform related callback to create a WebSocket options.
 @internal
 WebSocketOptions $vmOptions({
   ConnectionRetryInterval? connectionRetryInterval,
@@ -29,6 +30,7 @@ WebSocketOptions $vmOptions({
   );
 }
 
+/// Platform related callback to create a WebSocket options.
 @internal
 WebSocketOptions $jsOptions({
   ConnectionRetryInterval? connectionRetryInterval,
@@ -47,6 +49,7 @@ WebSocketOptions $jsOptions({
       interceptors: interceptors,
     );
 
+/// Platform related callback to create a WebSocket options.
 @internal
 WebSocketOptions $selectorOptions({
   required WebSocketOptions Function() vm,
@@ -54,6 +57,7 @@ WebSocketOptions $selectorOptions({
 }) =>
     js();
 
+/// JS implementation of [WebSocketOptions].
 final class $WebSocketOptions$JS extends WebSocketOptions {
   /// {@macro ws_options_js}
   $WebSocketOptions$JS({
@@ -65,5 +69,6 @@ final class $WebSocketOptions$JS extends WebSocketOptions {
     bool? useBlobForBinary,
   }) : useBlobForBinary = useBlobForBinary ?? false;
 
+  /// Whether to use Blob for binary data.
   final bool useBlobForBinary;
 }

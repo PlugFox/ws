@@ -12,6 +12,7 @@ import 'package:ws/src/client/ws_options.dart';
 import 'package:ws/src/client/ws_options_vm.dart';
 import 'package:ws/src/util/logger.dart';
 
+/// Platform related callback to create a WebSocket client.
 @internal
 IWebSocketClient $platformWebSocketClient(WebSocketOptions? options) =>
     switch (options) {
