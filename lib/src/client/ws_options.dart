@@ -17,8 +17,6 @@ import 'package:ws/src/client/ws_options_vm.dart'
 typedef ConnectionRetryInterval = ({Duration min, Duration max});
 
 /// {@template ws_options}
-/// Web socket platform dependent options.
-///
 /// Common options for VM and JS platforms:
 ///
 /// The [connectionRetryInterval] argument is specifying the
@@ -31,6 +29,15 @@ typedef ConnectionRetryInterval = ({Duration min, Duration max});
 ///
 /// The [timeout] argument is specifying the maximum time to wait for the
 /// connection to be established.
+///
+/// The [afterConnect] argument is specifying the callback function
+/// to be called after the connection is established,
+/// but before the client allow to send user messages.
+/// Good place to send authentication data, subscribe to channels,
+/// or send any other initial data.
+///
+/// The [interceptors] argument is specifying the interceptors
+/// for WebSocket messages.
 ///
 /// Other arguments are platform dependent.
 ///
@@ -101,6 +108,16 @@ abstract base class WebSocketOptions {
   ///
   /// The [timeout] argument is specifying the maximum time to wait for the
   /// connection to be established.
+  ///
+  /// The [afterConnect] argument is specifying the callback function
+  /// to be called after the connection is established,
+  /// but before the client allow to send user messages.
+  /// Good place to send authentication data, subscribe to channels,
+  /// or send any other initial data.
+  ///
+  /// The [interceptors] argument is specifying the interceptors
+  /// for WebSocket messages.
+  ///
   /// {@endtemplate}
   factory WebSocketOptions.vm({
     ConnectionRetryInterval? connectionRetryInterval,
@@ -143,9 +160,19 @@ abstract base class WebSocketOptions {
   /// The [timeout] argument is specifying the maximum time to wait for the
   /// connection to be established.
   ///
+  /// The [afterConnect] argument is specifying the callback function
+  /// to be called after the connection is established,
+  /// but before the client allow to send user messages.
+  /// Good place to send authentication data, subscribe to channels,
+  /// or send any other initial data.
+  ///
+  /// The [interceptors] argument is specifying the interceptors
+  /// for WebSocket messages.
+  ///
   /// The [useBlobForBinary] argument is specifying the Uint8List
   /// should be send as Blob or as Typed data.
   /// By default, the data send as Typed data.
+  ///
   /// {@endtemplate}
   factory WebSocketOptions.js({
     ConnectionRetryInterval? connectionRetryInterval,

@@ -35,6 +35,41 @@ dependencies:
 - `add(Object data)`: Sends data on the WebSocket connection. The data can be either a String or a List of integers holding bytes.
 - `close([int? code = 1000, String? reason = 'NORMAL_CLOSURE'])`: Permanently stops the WebSocket connection and frees all resources. After calling this method, the WebSocket client is no longer usable.
 
+## Options
+
+The `WebSocketOptions` class provides a configurable set of options for setting up a WebSocket connection on both VM (Virtual Machine) and JS (JavaScript) platforms. This class supports a variety of settings including connection retry strategies, subprotocols, timeouts, message interceptors, and platform-specific configurations.
+
+To use `WebSocketOptions`, instantiate it directly with the desired configuration for your platform. Use the `.vm()` factory for VM platform settings and `.js()` factory for JS platform settings. The `.selector()` factory can be used to construct options depending on the current platform, allowing for flexible configuration across different environments.
+
+### Common Options
+
+Common configuration options applicable across VM and JS platforms:
+
+| Option                    | Description                                                                                                                                                                                                                                                     |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `connectionRetryInterval` | Specifies the [Backoff full jitter strategy](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) for reconnecting. Allows tweaks for the reconnect backoff algorithm (min delay, max delay). If not specified, reconnecting is disabled. |
+| `protocols`               | Specifies the subprotocols the client is willing to speak.                                                                                                                                                                                                      |
+| `timeout`                 | Specifies the maximum time to wait for the connection to be established. Defaults to 30 seconds if not specified.                                                                                                                                               |
+| `afterConnect`            | Specifies the callback function to be called after the connection is established, but before the client is allowed to send user messages.                                                                                                                       |
+| `interceptors`            | Specifies the interceptors for WebSocket messages.                                                                                                                                                                                                              |
+
+### VM Platform Options
+
+Specific to VM (Mobile, Desktop, Server, Console) platform. Not to be used on the web platform.
+
+- Includes all common options.
+- `headers`: Specifies additional HTTP headers for setting up the connection. Certain headers are controlled by the WebSocket connection process and will be ignored if passed.
+- `compression`: If provided, configures the WebSocket to negotiate with the specified `CompressionOptions`.
+- `customClient`: Allows specifying a custom `HttpClient`.
+- `userAgent`: Allows specifying a custom `UserAgent`.
+
+### JS Platform Options
+
+Specific to JS (Browser) platform. Not to be used on the VM platform.
+
+- Includes all common options.
+- `useBlobForBinary`: Specifies if `Uint8List` should be sent as `Blob` or as typed data. Defaults to sending as typed data.
+
 ## Example
 
 ![](example.png)
@@ -114,3 +149,7 @@ We appreciate any form of support, whether it's a financial donation or just a s
 ## Tags
 
 web, socket, ws, wss, WebSocket, cross, platform
+
+```
+
+```
