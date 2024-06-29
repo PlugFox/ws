@@ -2,10 +2,20 @@
 // coverage:ignore-file
 import 'dart:async';
 import 'dart:convert';
-import 'dart:html' as html show WebSocket, Blob, Event, CloseEvent, FileReader;
+import 'dart:js_interop';
 import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
+import 'package:web/web.dart' as web
+    show
+        Blob,
+        CloseEvent,
+        Event,
+        FileReader,
+        FileReaderEventGEtters,
+        WebSocket,
+        WebSocketEvents,
+        EventStreamProviders;
 import 'package:ws/src/client/web_socket_ready_state.dart';
 import 'package:ws/src/client/websocket_exception.dart';
 import 'package:ws/src/client/ws_client_base.dart';
@@ -13,6 +23,11 @@ import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/client/ws_options.dart';
 import 'package:ws/src/client/ws_options_js.dart';
 import 'package:ws/src/util/logger.dart';
+
+extension _FileReaderEventOnError on web.FileReader {
+  Stream<web.Event> get onError =>
+      web.EventStreamProviders.errorFileReaderEvent.forTarget(this);
+}
 
 /// Platform related callback to create a WebSocket client.
 @internal
@@ -47,7 +62,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   final $WebSocketOptions$JS? _options;
 
   /// Native WebSocket client.
-  html.WebSocket? _client;
+  web.WebSocket? _client;
 
   /// Blob codec for `Blob <-> List<int>` conversion.
   late final _BlobCodec _blobCodec = _BlobCodec();
@@ -57,10 +72,10 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   StreamSubscription<Object?>? _dataBindSubscription;
 
   /// Binding to error from native WebSocket client.
-  StreamSubscription<html.Event>? _errorBindSubscription;
+  StreamSubscription<web.Event>? _errorBindSubscription;
 
   /// Binding to close event from native WebSocket client.
-  StreamSubscription<html.CloseEvent>? _closeBindSubscription;
+  StreamSubscription<web.CloseEvent>? _closeBindSubscription;
 
   /// Ready state of the WebSocket client.
   @override
@@ -75,27 +90,31 @@ final class WebSocketClient$JS extends WebSocketClientBase {
   @override
   void push(Object data) {
     final client = _client;
-    if (client == null || client.readyState != html.WebSocket.OPEN) {
+    if (client == null || client.readyState != web.WebSocket.OPEN) {
       throw const WSClientClosedException(
           message: 'WebSocket client is not connected.');
     }
     try {
       switch (data) {
         case String text:
-          client.sendString(text);
-        case html.Blob blob:
-          client.sendBlob(blob);
+          client.send(text.toJS);
+        case web.Blob blob:
+          client.send(blob);
         default:
           if (_options?.useBlobForBinary == true) {
-            client.sendBlob(_blobCodec.write(data));
+            client.send(_blobCodec.write(data));
           } else {
             switch (data) {
               case TypedData td:
-                client.sendTypedData(td);
+                client.send(Uint8List.view(
+                  td.buffer,
+                  td.offsetInBytes,
+                  td.lengthInBytes,
+                ).toJS);
               case ByteBuffer bb:
-                client.sendByteBuffer(bb);
+                client.send(bb.toJS);
               case List<int> bytes:
-                client.sendTypedData(Uint8List.fromList(bytes));
+                client.send(Uint8List.fromList(bytes).toJS);
               default:
                 throw ArgumentError.value(data, 'data', 'Invalid data type.');
             }
@@ -113,7 +132,8 @@ final class WebSocketClient$JS extends WebSocketClientBase {
     try {
       if (_client != null) await disconnect(1001, 'RECONNECTING');
       super.connect(url);
-      final client = _client = html.WebSocket(url, protocols);
+      final client = _client = web.WebSocket(
+          url, protocols?.map((e) => e.toJS).toList().toJS ?? JSArray());
       final completer = Completer<void>();
       client.onOpen.first.whenComplete(() {
         if (completer.isCompleted) return;
@@ -135,7 +155,7 @@ final class WebSocketClient$JS extends WebSocketClientBase {
           .map<Object?>((event) => event.data)
           .asyncMap<Object?>((data) => switch (data) {
                 String text => text,
-                html.Blob blob => _blobCodec.read(blob),
+                web.Blob blob => _blobCodec.read(blob),
                 TypedData td => Uint8List.view(
                     td.buffer,
                     td.offsetInBytes,
@@ -187,7 +207,11 @@ final class WebSocketClient$JS extends WebSocketClientBase {
     _dataBindSubscription = null;
     if (client != null) {
       try {
-        client.close(code, reason);
+        if (code != null && reason != null) {
+          client.close(code, reason);
+        } else {
+          client.close();
+        }
       } on Object {/* ignore */} // coverage:ignore-line
       _client = null;
     }
@@ -206,29 +230,29 @@ final class _BlobCodec {
   _BlobCodec();
 
   @internal
-  html.Blob write(Object data) {
+  web.Blob write(Object data) {
     switch (data) {
       case String text:
-        return html.Blob([Uint8List.fromList(utf8.encode(text))]);
+        return web.Blob([Uint8List.fromList(utf8.encode(text)).toJS].toJS);
       case TypedData td:
-        return html.Blob([
+        return web.Blob([
           Uint8List.view(
             td.buffer,
             td.offsetInBytes,
             td.lengthInBytes,
-          )
-        ]);
+          ).toJS
+        ].toJS);
       case ByteBuffer bb:
-        return html.Blob([bb.asUint8List()]);
+        return web.Blob([bb.asUint8List().toJS].toJS);
       case List<int> bytes:
-        return html.Blob([Uint8List.fromList(bytes)]);
+        return web.Blob([Uint8List.fromList(bytes).toJS].toJS);
       default:
         throw ArgumentError.value(data, 'data', 'Invalid data type.');
     }
   }
 
   @internal
-  FutureOr<Object> read(html.Blob blob) async {
+  FutureOr<Object> read(web.Blob blob) async {
     final completer = Completer<Object>();
 
     void complete(Object data) {
@@ -241,8 +265,8 @@ final class _BlobCodec {
       completer.completeError(error, stackTrace);
     }
 
-    late final html.FileReader reader;
-    reader = html.FileReader()
+    late final web.FileReader reader;
+    reader = web.FileReader()
       ..onLoadEnd.listen((_) {
         final result = reader.result;
         switch (result) {
