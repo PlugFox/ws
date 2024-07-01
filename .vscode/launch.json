@@ -47,8 +47,8 @@
         "--file-reporter=json:.coverage/tests.json",
         "--timeout=30s",
         "--concurrency=12",
-        "--chain-stack-traces",
-        "--name=can send List<int> data"
+        "--chain-stack-traces"
+        /* "--name=can send List<int> data" */
       ],
       "args": []
     },

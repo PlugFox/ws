@@ -82,30 +82,28 @@ final class WebSocketClient$JS extends WebSocketClientBase {
           message: 'WebSocket client is not connected.');
     }
     try {
-      switch (data) {
-        case String text:
-          client.send(text.toJS);
-        case web.Blob blob:
-          client.send(blob);
-        default:
-          if (_options?.useBlobForBinary == true) {
-            client.send(_blobCodec.write(data));
-          } else {
-            switch (data) {
-              case TypedData td:
-                client.send(Uint8List.view(
-                  td.buffer,
-                  td.offsetInBytes,
-                  td.lengthInBytes,
-                ).toJS);
-              case ByteBuffer bb:
-                client.send(bb.toJS);
-              case List<int> bytes:
-                client.send(Uint8List.fromList(bytes).toJS);
-              default:
-                throw ArgumentError.value(data, 'data', 'Invalid data type.');
-            }
-          }
+      if (data is String) {
+        client.send(data.toJS);
+        return;
+      } else if (_options?.useBlobForBinary == true) {
+        client.send(_blobCodec.write(data));
+      } else {
+        switch (data) {
+          case TypedData td:
+            client.send(Uint8List.view(
+              td.buffer,
+              td.offsetInBytes,
+              td.lengthInBytes,
+            ).toJS);
+          case ByteBuffer bb:
+            client.send(bb.toJS);
+          case List<int> bytes:
+            client.send(Uint8List.fromList(bytes).toJS);
+          case web.Blob blob:
+            client.send(web.Blob([blob].toJS));
+          default:
+            throw ArgumentError.value(data, 'data', 'Invalid data type.');
+        }
       }
     } on Object catch (error, stackTrace) {
       warning(error, stackTrace, 'WebSocketClient\$JS.add: $error');
@@ -235,6 +233,8 @@ final class _BlobCodec {
         return web.Blob([bb.asUint8List().toJS].toJS);
       case List<int> bytes:
         return web.Blob([Uint8List.fromList(bytes).toJS].toJS);
+      case web.Blob blob:
+        return web.Blob([blob].toJS);
       default:
         throw ArgumentError.value(data, 'data', 'Invalid data type.');
     }
