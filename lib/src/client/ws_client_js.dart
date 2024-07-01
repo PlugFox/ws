@@ -2,20 +2,12 @@
 // coverage:ignore-file
 import 'dart:async';
 import 'dart:convert';
-import 'dart:js_interop';
+import 'dart:js_interop' as js;
 import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
 import 'package:web/web.dart' as web
-    show
-        Blob,
-        CloseEvent,
-        Event,
-        FileReader,
-        FileReaderEventGEtters,
-        WebSocket,
-        WebSocketEvents,
-        EventStreamProviders;
+    show Blob, CloseEvent, Event, WebSocket, WebSocketEvents;
 import 'package:ws/src/client/web_socket_ready_state.dart';
 import 'package:ws/src/client/websocket_exception.dart';
 import 'package:ws/src/client/ws_client_base.dart';
@@ -23,11 +15,6 @@ import 'package:ws/src/client/ws_client_interface.dart';
 import 'package:ws/src/client/ws_options.dart';
 import 'package:ws/src/client/ws_options_js.dart';
 import 'package:ws/src/util/logger.dart';
-
-extension _FileReaderEventOnError on web.FileReader {
-  Stream<web.Event> get onError =>
-      web.EventStreamProviders.errorFileReaderEvent.forTarget(this);
-}
 
 /// Platform related callback to create a WebSocket client.
 @internal
@@ -133,7 +120,9 @@ final class WebSocketClient$JS extends WebSocketClientBase {
       if (_client != null) await disconnect(1001, 'RECONNECTING');
       super.connect(url);
       final client = _client = web.WebSocket(
-          url, protocols?.map((e) => e.toJS).toList().toJS ?? JSArray());
+        url,
+        protocols?.map((e) => e.toJS).toList().toJS ?? <js.JSString>[].toJS,
+      );
       final completer = Completer<void>();
       client.onOpen.first.whenComplete(() {
         if (completer.isCompleted) return;
@@ -252,39 +241,9 @@ final class _BlobCodec {
   }
 
   @internal
-  FutureOr<Object> read(web.Blob blob) async {
-    final completer = Completer<Object>();
-
-    void complete(Object data) {
-      if (completer.isCompleted) return;
-      completer.complete(data);
-    }
-
-    void completeError(Object error, [StackTrace? stackTrace]) {
-      if (completer.isCompleted) return;
-      completer.completeError(error, stackTrace);
-    }
-
-    late final web.FileReader reader;
-    reader = web.FileReader()
-      ..onLoadEnd.listen((_) {
-        final result = reader.result;
-        switch (result) {
-          case String text:
-            complete(text);
-            break;
-          case Uint8List bytes:
-            complete(bytes);
-            break;
-          case ByteBuffer bb:
-            complete(bb.asUint8List());
-            break;
-          default:
-            completeError('Unexpected result type: ${result.runtimeType}');
-        }
-      })
-      ..onError.listen(completeError)
-      ..readAsArrayBuffer(blob);
-    return completer.future;
+  Future<Object> read(web.Blob blob) async {
+    final arrayBuffer = await blob.arrayBuffer().toDart;
+    final bytes = arrayBuffer.toDart.asUint8List();
+    return bytes;
   }
 }

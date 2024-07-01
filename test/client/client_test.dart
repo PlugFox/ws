@@ -336,6 +336,8 @@ void main() {
       client.add(binaryData);
       final received =
           await client.stream.first.timeout(const Duration(seconds: 5));
+      print(received.runtimeType);
+      if (received is String) throw Exception('Received is String');
       expect(
           received,
           isA<List<int>>()
@@ -443,6 +445,7 @@ void main() {
         client.add(binaryData);
         final received =
             await client.stream.first.timeout(const Duration(seconds: 5));
+        if (received is String) throw Exception('Received is String');
         expect(
             received,
             isA<List<int>>()
