@@ -86,7 +86,6 @@ Future<void> runServer<Config>({
           (message) => ports.forEach((port) => port.send(message)),
           cancelOnError: false,
         ); */
-        // TODO(plugfox): Health checks
         l.s(
           'Started ${parsedArguments.isolates} server(s) '
           'at http://${parsedArguments.address.address}:${parsedArguments.port} '

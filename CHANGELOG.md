@@ -1,3 +1,7 @@
+## 1.1.0-dev.1
+
+- Migration from 'dart:html' to 'package:web'
+
 ## 1.0.0
 
 - Stable release
