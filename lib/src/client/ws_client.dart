@@ -7,7 +7,7 @@ import 'package:ws/src/client/state_stream.dart';
 import 'package:ws/src/client/websocket_exception.dart';
 import 'package:ws/src/client/ws_client_fake.dart'
     // ignore: uri_does_not_exist
-    if (dart.library.html) 'package:ws/src/client/ws_client_js.dart'
+    if (dart.library.js_interop) 'package:ws/src/client/ws_client_js.dart'
     // ignore: uri_does_not_exist
     if (dart.library.io) 'package:ws/src/client/ws_client_vm.dart';
 import 'package:ws/src/client/ws_client_interface.dart';

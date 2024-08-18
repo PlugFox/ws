@@ -6,7 +6,7 @@ import 'package:ws/src/client/ws_interceptor.dart';
 import 'package:ws/src/client/ws_options_common.dart';
 import 'package:ws/src/client/ws_options_vm.dart'
     // ignore: uri_does_not_exist
-    if (dart.library.html) 'package:ws/src/client/ws_options_js.dart';
+    if (dart.library.js_interop) 'package:ws/src/client/ws_options_js.dart';
 
 /// [Backoff full jitter strategy](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) for reconnecting.
 /// Tweaks for reconnect backoff algorithm (min delay, max delay)
