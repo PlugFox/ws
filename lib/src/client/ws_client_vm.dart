@@ -123,7 +123,10 @@ final class WebSocketClient$VM extends WebSocketClientBase {
           .listen(
             super.onReceivedData,
             onError: onError,
-            onDone: () => disconnect(1000, 'SUBSCRIPTION_CLOSED'),
+            onDone: () => disconnect(
+              _client?.closeCode ?? 1000,
+              _client?.closeReason ?? 'SUBSCRIPTION_CLOSED',
+            ),
             cancelOnError: false,
           );
       // coverage:ignore-end
