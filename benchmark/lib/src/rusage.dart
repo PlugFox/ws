@@ -5,7 +5,7 @@ import 'dart:typed_data';
 @Native<Int Function(Int, Pointer<Uint8>)>(symbol: 'getrusage', isLeaf: true)
 external int _getrusage(int who, Pointer<Uint8> usage);
 
-/// Process resource usage via `getrusage(RUSAGE_SELF)` (macOS / Linux).
+/// Process resource usage via `getrusage(RUSAGE_SELF)` (macOS, iOS, Linux, Android).
 final class ResourceUsage {
   const ResourceUsage(this.cpuMicros, this.maxRssBytes);
 
@@ -23,7 +23,7 @@ final class ResourceUsage {
     final rss = data.getInt64(32, Endian.host);
     return ResourceUsage(
       timeval(0) + timeval(16),
-      Platform.isMacOS ? rss : rss * 1024,
+      Platform.isMacOS || Platform.isIOS ? rss : rss * 1024,
     );
   }
 }

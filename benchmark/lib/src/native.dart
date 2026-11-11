@@ -11,6 +11,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'clients.dart';
+import 'runner.dart';
 import 'tape.dart';
 
 @Native<Bool Function(Pointer<Void>, Uint32)>(symbol: 'ws_native_init')
@@ -30,6 +31,20 @@ external bool _send(int id, Pointer<Uint8> data, int length, bool binary);
 
 @Native<Bool Function(Uint64, Uint16)>(symbol: 'ws_native_close', isLeaf: true)
 external bool _close(int id, int code);
+
+@Native<Bool Function(Uint16, Uint16, Uint32)>(symbol: 'ws_native_server_start')
+external bool _serverStart(int port, int tlsPort, int threads);
+
+@Native<Uint64 Function()>(symbol: 'ws_native_server_cpu_micros', isLeaf: true)
+external int _serverCpuMicros();
+
+/// Starts the benchmark server inside this process on 127.0.0.1 (mobile
+/// devices) and makes [runBenchCase] exclude its CPU time.
+bool startEmbeddedServer({int port = 9090, int tlsPort = 9443, int threads = 2}) {
+  final ok = _serverStart(port, tlsPort, threads);
+  if (ok) serverCpuMicros = _serverCpuMicros;
+  return ok;
+}
 
 /// How the Rust side delivers JSON text messages.
 enum NativeMode {

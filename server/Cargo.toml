@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 bytes = "1.12.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+libc = "0.2.191"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
 tokio = { version = "1.54.1", features = ["full"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }

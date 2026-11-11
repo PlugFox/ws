@@ -6,3 +6,5 @@ export 'src/stats.dart';
 export 'src/model.dart';
 export 'src/tape.dart';
 export 'src/native.dart';
+export 'src/runner.dart';
+export 'src/cases.dart';

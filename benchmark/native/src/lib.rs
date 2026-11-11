@@ -80,6 +80,25 @@ pub extern "C" fn ws_native_init(post: PostCObjectFn, threads: u32) -> bool {
     true
 }
 
+/// Starts the benchmark server inside this process on 127.0.0.1 (for mobile
+/// devices, where no separate server process can run). Blocks until bound.
+#[unsafe(no_mangle)]
+pub extern "C" fn ws_native_server_start(port: u16, tls_port: u16, threads: u32) -> bool {
+    match ws_bench_server::start_embedded("127.0.0.1", port, tls_port, threads as usize) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("embedded server: {e}");
+            false
+        }
+    }
+}
+
+/// CPU time used by the embedded server's threads, in microseconds.
+#[unsafe(no_mangle)]
+pub extern "C" fn ws_native_server_cpu_micros() -> u64 {
+    ws_bench_server::embedded_cpu_micros()
+}
+
 /// Starts connecting to `url` (NUL-terminated). Returns a connection id.
 /// Non-blocking: safe for `@Native(isLeaf: true)`.
 ///

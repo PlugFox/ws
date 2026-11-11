@@ -177,3 +177,201 @@ Variants:
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | json 1KB @1k/s | 314.8 | 380.0 | 251.3 | 315.3 | 290.9 | 244.3 | 318.5 | 323.8 | 290.0 | 270.7 | 341.0 |
 | binary 60KB @200/s | 496.3 | 590.2 | 401.9 | 613.0 | 533.9 | 507.5 | 569.7 | 575.5 | 518.0 | 500.5 | 499.9 |
+
+## Mobile devices (wss, embedded server)
+
+Date: 2026-11-12. Flutter 3.47.9 (Dart 3.13.7), release builds. The server
+runs inside the app process on 127.0.0.1 with 2 threads, and its CPU time is
+excluded. Every variant runs 2 times; the tables show the median, which with
+2 runs is the higher one. Raw runs are in `results/`.
+
+- **Android:** Samsung Galaxy S25 Ultra (SM-S938B, Snapdragon 8 Elite, SM8750).
+- **iOS:** iPad Pro 11" 4th gen (iPad14,3, Apple M2).
+
+Caveats:
+
+- The **main isolate µs** metric has a noise floor of about ±1% busy time.
+  At 100 msg/s that is about ±100 µs/msg, so negative or near-zero values
+  mean "below resolution". They show up for the worker and `d-tape` variants.
+- **Peak RSS** is not meaningful, because all cases share one process.
+- **Android anomaly:** `d-tape` ping-pong at 14 KB is slow (846–924 msg/s)
+  in both runs, and so is the embedded server's CPU time. This is probably
+  DVFS or core placement when main is almost idle. Not investigated.
+
+### Android — Galaxy S25 Ultra
+
+#### Stream — main isolate µs per message (lower is better)
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB @2k/s → model | 31.83 | 33.70 | 12.07 | 11.65 | 8.88 | 7.60 |
+| wss json 14KB @500/s → model | 251.32 | 243.15 | 50.64 | 41.32 | 96.28 | 33.72 |
+| wss json 60KB @100/s → model | 949.78 | 895.58 | -103.43 | 75.51 | 323.44 | 98.76 |
+| wss binary 60KB @200/s | 562.40 | 560.03 | 140.34 | 122.19 | 8.71 | 11.02 |
+
+#### Stream — longest main isolate stall, µs
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB @2k/s → model | 465 | 316 | 412 | 443 | 288 | 260 |
+| wss json 14KB @500/s → model | 627 | 440 | 465 | 426 | 476 | 323 |
+| wss json 60KB @100/s → model | 1311 | 1257 | 971 | 1124 | 1365 | 997 |
+| wss binary 60KB @200/s | 324 | 367 | 329 | 498 | 1410 | 82 |
+
+#### Stream — delivery latency p50 / p99, µs
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB @2k/s → model | 559 / 880 | 554 / 797 | 491 / 978 | 484 / 899 | 171 / 359 | 205 / 375 |
+| wss json 14KB @500/s → model | 1143 / 2131 | 1138 / 2306 | 1099 / 1616 | 1058 / 2287 | 289 / 610 | 344 / 552 |
+| wss json 60KB @100/s → model | 4146 / 4567 | 4079 / 4542 | 4493 / 6827 | 4152 / 5259 | 778 / 1218 | 964 / 1408 |
+| wss binary 60KB @200/s | 3615 / 3952 | 3622 / 4060 | 1951 / 2641 | 1982 / 2846 | 350 / 689 | 349 / 645 |
+
+#### Stream — process CPU µs per message (all threads, probe excluded)
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB @2k/s → model | 94.7 | 95.3 | 182.4 | 186.6 | 36.9 | 52.4 |
+| wss json 14KB @500/s → model | 632.6 | 612.7 | 1281.4 | 1168.5 | 246.8 | 308.4 |
+| wss json 60KB @100/s → model | 2360.4 | 2325.8 | 5511.5 | 4887.7 | 1048.5 | 1067.4 |
+| wss binary 60KB @200/s | 1641.5 | 1661.0 | 2601.7 | 2587.9 | 379.6 | 373.1 |
+
+#### Flood — throughput MB/s (higher is better)
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| ws json 14KB → model | 113.3 | 117.7 | 29.6 | 59.3 | 140.3 | 255.4 |
+| wss json 14KB → model | 31.0 | 33.1 | 39.7 | 40.8 | 139.3 | 268.1 |
+| wss json 60KB → model | 31.1 | 33.4 | 37.7 | 41.1 | 169.1 | 330.4 |
+| wss binary 60KB | 51.4 | 51.0 | 79.0 | 78.6 | 1608.1 | 1674.9 |
+
+#### Flood — process CPU µs per message
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| ws json 14KB → model | 146.0 | 155.9 | 999.1 | 419.6 | 114.5 | 105.0 |
+| wss json 14KB → model | 461.5 | 437.2 | 447.0 | 403.1 | 119.1 | 104.3 |
+| wss json 60KB → model | 1967.0 | 1856.1 | 1974.8 | 1703.2 | 418.6 | 401.6 |
+| wss binary 60KB | 1235.0 | 1250.9 | 995.9 | 1002.6 | 66.1 | 57.0 |
+
+#### Flood — peak RSS, MB
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| ws json 14KB → model | 239.9 | 239.9 | 510.4 | 510.4 | 510.4 | 510.4 |
+| wss json 14KB → model | 510.4 | 510.4 | 510.4 | 510.4 | 510.4 | 510.4 |
+| wss json 60KB → model | 510.4 | 510.4 | 510.4 | 510.4 | 510.4 | 510.4 |
+| wss binary 60KB | 510.4 | 510.4 | 510.4 | 510.4 | 510.4 | 510.4 |
+
+#### Ping-pong — msg/s (MB/s), higher is better
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB → model | 3192 (3.4) | 3311 (3.5) | 2895 (3.1) | 2712 (2.9) | 3636 (3.9) | 2775 (3.0) |
+| wss json 14KB → model | 1058 (15.2) | 1304 (18.7) | 1256 (18.0) | 1369 (19.6) | 2363 (33.9) | 924 (13.2) |
+| wss json 60KB → model | 275 (16.9) | 327 (20.1) | 327 (20.1) | 335 (20.6) | 627 (38.5) | 595 (36.6) |
+
+#### Ping-pong — RTT p50 / p99, µs
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB → model | 305 / 449 | 296 / 413 | 326 / 616 | 351 / 686 | 214 / 603 | 365 / 629 |
+| wss json 14KB → model | 895 / 1592 | 750 / 1053 | 755 / 1734 | 711 / 1022 | 398 / 995 | 1078 / 2446 |
+| wss json 60KB → model | 3514 / 4586 | 3022 / 3539 | 3010 / 3653 | 2927 / 3641 | 1558 / 1998 | 1614 / 2518 |
+
+#### Ping-pong — process CPU µs per message
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB → model | 305.3 | 300.2 | 439.2 | 461.5 | 244.0 | 322.6 |
+| wss json 14KB → model | 871.6 | 691.3 | 861.5 | 794.6 | 390.9 | 996.2 |
+| wss json 60KB → model | 3365.6 | 2773.5 | 3265.9 | 3190.3 | 1499.6 | 1568.7 |
+
+### iOS — iPad Pro 11" (M2)
+
+#### Stream — main isolate µs per message (lower is better)
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB @2k/s → model | 18.03 | 14.28 | -3.21 | -3.51 | 6.41 | -0.56 |
+| wss json 14KB @500/s → model | 134.22 | 125.93 | 19.99 | -21.93 | 62.13 | 2.82 |
+| wss json 60KB @100/s → model | 544.69 | 531.82 | -18.90 | -72.50 | 200.28 | -6.81 |
+| wss binary 60KB @200/s | 201.97 | 179.38 | -40.21 | -63.58 | -53.74 | -58.77 |
+
+#### Stream — longest main isolate stall, µs
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB @2k/s → model | 260 | 149 | 53 | 107 | 135 | 132 |
+| wss json 14KB @500/s → model | 373 | 366 | 270 | 312 | 463 | 347 |
+| wss json 60KB @100/s → model | 1262 | 1200 | 903 | 941 | 1282 | 1137 |
+| wss binary 60KB @200/s | 243 | 545 | 266 | 79 | 134 | 74 |
+
+#### Stream — delivery latency p50 / p99, µs
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB @2k/s → model | 479 / 551 | 473 / 532 | 155 / 237 | 153 / 258 | 107 / 171 | 105 / 172 |
+| wss json 14KB @500/s → model | 918 / 1678 | 887 / 1758 | 281 / 558 | 268 / 480 | 183 / 255 | 176 / 292 |
+| wss json 60KB @100/s → model | 3391 / 3672 | 3343 / 3571 | 949 / 1125 | 897 / 1154 | 509 / 782 | 404 / 561 |
+| wss binary 60KB @200/s | 2972 / 3093 | 2968 / 3130 | 441 / 573 | 446 / 610 | 148 / 222 | 143 / 209 |
+
+#### Stream — process CPU µs per message (all threads, probe excluded)
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB @2k/s → model | 69.9 | 66.4 | 69.7 | 66.3 | 47.3 | 46.5 |
+| wss json 14KB @500/s → model | 360.5 | 340.8 | 365.5 | 365.1 | 243.6 | 222.9 |
+| wss json 60KB @100/s → model | 1541.8 | 1506.7 | 1655.0 | 1619.7 | 1100.2 | 1011.5 |
+| wss binary 60KB @200/s | 776.4 | 769.7 | 785.3 | 786.3 | 410.4 | 401.1 |
+
+#### Flood — throughput MB/s (higher is better)
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| ws json 14KB → model | 135.5 | 155.7 | 54.9 | 103.0 | 167.5 | 378.8 |
+| wss json 14KB → model | 53.5 | 58.3 | 81.8 | 82.7 | 166.4 | 382.5 |
+| wss json 60KB → model | 37.9 | 40.0 | 81.1 | 82.7 | 175.7 | 416.8 |
+| wss binary 60KB | 92.9 | 93.5 | 167.7 | 167.0 | 1715.7 | 1723.8 |
+
+#### Flood — process CPU µs per message
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| ws json 14KB → model | 113.1 | 100.1 | 441.7 | 194.9 | 97.5 | 78.0 |
+| wss json 14KB → model | 297.0 | 278.0 | 236.5 | 214.3 | 103.4 | 83.5 |
+| wss json 60KB → model | 1245.1 | 1163.4 | 953.6 | 854.4 | 393.8 | 324.3 |
+| wss binary 60KB | 803.8 | 801.3 | 485.2 | 481.7 | 41.6 | 41.4 |
+
+#### Flood — peak RSS, MB
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| ws json 14KB → model | 172.4 | 172.4 | 396.4 | 396.4 | 396.4 | 602.1 |
+| wss json 14KB → model | 396.4 | 396.4 | 602.1 | 396.4 | 602.1 | 396.4 |
+| wss json 60KB → model | 396.4 | 602.1 | 396.4 | 602.1 | 396.4 | 396.4 |
+| wss binary 60KB | 396.4 | 396.4 | 396.4 | 396.4 | 396.4 | 602.1 |
+
+#### Ping-pong — msg/s (MB/s), higher is better
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB → model | 4934 (5.3) | 5151 (5.5) | 7555 (8.1) | 7625 (8.2) | 12869 (13.8) | 12964 (13.9) |
+| wss json 14KB → model | 1278 (18.3) | 1451 (20.8) | 2303 (33.0) | 2400 (34.4) | 2460 (35.2) | 3819 (54.7) |
+| wss json 60KB → model | 333 (20.5) | 387 (23.8) | 548 (33.7) | 580 (35.6) | 933 (57.3) | 1059 (65.1) |
+
+#### Ping-pong — RTT p50 / p99, µs
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB → model | 198 / 359 | 190 / 384 | 128 / 285 | 127 / 306 | 73 / 215 | 72 / 210 |
+| wss json 14KB → model | 754 / 1150 | 655 / 1135 | 422 / 763 | 403 / 816 | 389 / 700 | 244 / 628 |
+| wss json 60KB → model | 2966 / 3687 | 2523 / 3905 | 1785 / 2368 | 1702 / 2093 | 1052 / 1612 | 929 / 1690 |
+
+#### Ping-pong — process CPU µs per message
+
+| case | a | c | c-worker | c-worker-model | d-bytes | d-tape |
+|---|---:|---:|---:|---:|---:|---:|
+| wss json 1KB → model | 242.7 | 235.0 | 154.1 | 154.2 | 71.1 | 68.7 |
+| wss json 14KB → model | 662.7 | 574.7 | 473.0 | 456.3 | 283.5 | 234.5 |
+| wss json 60KB → model | 2569.6 | 2167.1 | 1881.5 | 1751.3 | 930.1 | 791.6 |

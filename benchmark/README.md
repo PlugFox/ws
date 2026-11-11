@@ -57,3 +57,36 @@ Payload sizes follow typical limits: Centrifugo rejects messages over 64 KB.
 The 1 MB cases are stress tests.
 
 Results: [RESULTS.md](RESULTS.md).
+
+## Mobile devices
+
+`app/` is a Flutter runner for phones and tablets. A separate server process
+cannot run there, so the app starts the Rust server inside its own process
+(`ws_bench_server::start_embedded`, 2 threads, 127.0.0.1). That also avoids
+Wi-Fi noise and the iOS local network prompt. The CPU time of the server's
+threads is excluded from `cpuUsPerMsg`: each server thread reports its
+`CLOCK_THREAD_CPUTIME_ID` when it parks. The case list is `mobileCases()` in
+`lib/src/cases.dart`.
+
+```sh
+cd app
+flutter build apk --release --target-platform android-arm64 --dart-define=REPEAT=2
+adb install -r build/app/outputs/flutter-apk/app-release.apk
+adb shell am start -n dev.wsbench.ws_bench_app/.MainActivity
+adb logcat -s flutter | grep 'BENCH '        # one JSON line per run
+
+flutter build ios --release --dart-define=REPEAT=2
+xcrun devicectl device install app --device <udid> build/ios/iphoneos/Runner.app
+xcrun devicectl device process launch --device <udid> dev.wsbench.wsBenchApp
+xcrun devicectl device copy from --device <udid> --domain-type appDataContainer \
+  --domain-identifier dev.wsbench.wsBenchApp --source tmp/results.jsonl --destination ios.jsonl
+
+dart run bin/matrix.dart --from=ios.jsonl --mobile   # markdown tables
+```
+
+Other options are `--dart-define=FILTER=<substring>` and `VARIANTS=a,c,...`.
+Peak RSS is not meaningful here, because every case runs in one process.
+
+The build hook builds the Rust crate for Android with the NDK clang that
+Flutter passes to it. Release `print` output on iOS goes to os_log, not to
+the console, so read the results file from the app container.

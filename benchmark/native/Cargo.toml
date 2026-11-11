@@ -13,6 +13,7 @@ simd-json = "0.19.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-tungstenite = "0.30"
+ws_bench_server = { version = "0.1.0", path = "../../server" }
 
 [profile.release]
 opt-level = 3
