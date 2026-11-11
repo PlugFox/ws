@@ -23,12 +23,12 @@ server:
 # Full benchmark matrix (AOT, 3 repeats). Starts and stops the server itself.
 bench:
 	@cd server && cargo build --release
-	@cd benchmark && dart pub get && mkdir -p build && dart compile exe bin/bench.dart -o build/bench
+	@cd benchmark && dart pub get && mkdir -p build && dart build cli -t bin/bench.dart -o build/cli
 	@cd benchmark && dart run bin/matrix.dart --repeat=3 --server=../server/target/release/ws_bench_server | tee build/matrix.md
 
 bench-quick:
 	@cd server && cargo build --release
-	@cd benchmark && dart pub get && mkdir -p build && dart compile exe bin/bench.dart -o build/bench
+	@cd benchmark && dart pub get && mkdir -p build && dart build cli -t bin/bench.dart -o build/cli
 	@cd benchmark && dart run bin/matrix.dart --quick --server=../server/target/release/ws_bench_server
 
 # dart run coverage:test_with_coverage -fb -o coverage -- --concurrency=6 --platform chrome,vm --coverage=./coverage --reporter=expanded test/ws_test.dart

@@ -5,6 +5,7 @@
 ///         --scenario=stream|flood|echo
 ///         [--format=json|binary] [--size=1024] [--rate=1000]
 ///         [--duration=5000] [--count=N] [--tls] [--unicode]
+///         [--consume=header|full]
 ///         [--host=127.0.0.1] [--port=9090] [--tls-port=9443]
 ///
 /// Scenarios:
@@ -42,6 +43,7 @@ Future<void> main(List<String> arguments) async {
   final host = args['host'] ?? '127.0.0.1';
   final port = int.parse(tls ? args['tls-port'] ?? '9443' : args['port'] ?? '9090');
   final scheme = tls ? 'wss' : 'ws';
+  _consumeFull = args['consume'] == 'full';
 
   final result = <String, Object?>{
     'variant': variant.id,
@@ -49,6 +51,7 @@ Future<void> main(List<String> arguments) async {
     'format': format,
     'tls': tls,
     'size': size,
+    'consume': _consumeFull ? 'full' : 'header',
   };
 
   switch (scenario) {
@@ -70,8 +73,27 @@ Future<void> main(List<String> arguments) async {
     default:
       throw ArgumentError.value(scenario, 'scenario');
   }
+  result['checksum'] = _checksum;
   stdout.writeln(jsonEncode(result));
   exit(0);
+}
+
+/// `--consume=full` maps every JSON message to [Order] (all fields), as an
+/// app would; `header` (default) reads only `seq` and `ts`.
+bool _consumeFull = false;
+int _checksum = 0;
+
+(int, int) _consume(Object message) {
+  if (message is Order) {
+    _checksum += message.items.length;
+    return (message.seq, message.ts);
+  }
+  if (_consumeFull && message is Map<String, Object?>) {
+    final order = Order.fromJson(message);
+    _checksum += order.items.length;
+    return (order.seq, order.ts);
+  }
+  return _header(message);
 }
 
 int _nowMicros() => DateTime.now().microsecondsSinceEpoch;
@@ -88,6 +110,7 @@ int _nowMicros() => DateTime.now().microsecondsSinceEpoch;
 
 int _messageBytes(Object message) => switch (message) {
       Uint8List b => b.length,
+      Order o => utf8.encode(jsonEncode(o.toJson())).length,
       _ => utf8.encode(jsonEncode(message)).length,
     };
 
@@ -112,7 +135,7 @@ Future<Map<String, Object?>> _stream(
     variant,
     uri,
     onMessage: (message) {
-      final (seq, ts) = _header(message);
+      final (seq, ts) = _consume(message);
       latencies.add(_nowMicros() - ts);
       if (received == 0) {
         sw.start();
@@ -199,7 +222,7 @@ Future<Map<String, Object?>> _echo(
     variant,
     uri,
     onMessage: (message) {
-      final (_, ts) = _header(message);
+      final (_, ts) = _consume(message);
       rtts.add(_nowMicros() - ts);
       if (rtts.length == count && !allReceived.isCompleted) allReceived.complete();
     },
@@ -277,7 +300,7 @@ Future<Map<String, Object?>> _pingPong(
     variant,
     uri,
     onMessage: (message) {
-      final (seq, ts) = _header(message);
+      final (seq, ts) = _consume(message);
       rtts.add(_nowMicros() - ts);
       if (rtts.length < count) {
         sendNext(seq + 1);

@@ -2,7 +2,7 @@
 /// AOT process, and prints markdown tables.
 ///
 /// Usage:
-///   dart run bin/matrix.dart [--bench=build/bench] [--server=../server/target/release/ws_bench_server]
+///   dart run bin/matrix.dart [--bench=build/cli/bundle/bin/bench] [--server=../server/target/release/ws_bench_server]
 ///       [--variants=a,b,c,c-worker,c-worker-raw] [--filter=substring]
 ///       [--repeat=3] [--out=build/results.jsonl] [--quick]
 ///
@@ -28,34 +28,40 @@ final class Case {
 const kb1 = 1024, kb14 = 14336, kb30 = 30720, kb60 = 61440, mb1 = 1048576;
 
 List<Case> cases({required bool quick}) {
-  final d = quick ? 2000 : 5000;
+  final d = quick ? 1500 : 3000;
   final f = quick ? 4 : 1;
+  const full = '--consume=full';
   return [
     // Fixed-rate stream: main isolate cost per message, stalls, latency.
+    // "→ model" cases map every message to typed models (Order.fromJson).
     Case('json ~50B @20k/s', 'stream', ['--size=0', '--rate=20000', '--duration=$d']),
     Case('json 1KB @5k/s', 'stream', ['--size=$kb1', '--rate=5000', '--duration=$d']),
+    Case('json 1KB @5k/s → model', 'stream', ['--size=$kb1', '--rate=5000', '--duration=$d', full]),
     Case('json 14KB @1k/s', 'stream', ['--size=$kb14', '--rate=1000', '--duration=$d']),
+    Case('json 14KB @1k/s → model', 'stream', ['--size=$kb14', '--rate=1000', '--duration=$d', full]),
     Case('json 60KB @500/s', 'stream', ['--size=$kb60', '--rate=500', '--duration=$d']),
-    Case('json 60KB unicode @500/s', 'stream', ['--size=$kb60', '--rate=500', '--duration=$d', '--unicode']),
+    Case('json 60KB @500/s → model', 'stream', ['--size=$kb60', '--rate=500', '--duration=$d', full]),
+    Case('json 60KB unicode @500/s → model', 'stream', ['--size=$kb60', '--rate=500', '--duration=$d', '--unicode', full]),
     Case('binary 60KB @500/s', 'stream', ['--format=binary', '--size=$kb60', '--rate=500', '--duration=$d']),
-    Case('wss json 1KB @5k/s', 'stream', ['--tls', '--size=$kb1', '--rate=5000', '--duration=$d']),
-    Case('wss json 14KB @1k/s', 'stream', ['--tls', '--size=$kb14', '--rate=1000', '--duration=$d']),
-    Case('json 1MB @20/s (stress)', 'stream', ['--size=$mb1', '--rate=20', '--duration=$d']),
+    Case('wss json 14KB @1k/s → model', 'stream', ['--tls', '--size=$kb14', '--rate=1000', '--duration=$d', full]),
+    Case('json 1MB @20/s → model (stress)', 'stream', ['--size=$mb1', '--rate=20', '--duration=$d', full]),
     // Flood: max throughput and process CPU per message.
     Case('json 1KB', 'flood', ['--size=$kb1', '--count=${200000 ~/ f}']),
-    Case('json 14KB', 'flood', ['--size=$kb14', '--count=${30000 ~/ f}']),
+    Case('json 14KB → model', 'flood', ['--size=$kb14', '--count=${30000 ~/ f}', full]),
     Case('json 60KB', 'flood', ['--size=$kb60', '--count=${8000 ~/ f}']),
+    Case('json 60KB → model', 'flood', ['--size=$kb60', '--count=${8000 ~/ f}', full]),
     Case('binary 60KB', 'flood', ['--format=binary', '--size=$kb60', '--count=${30000 ~/ f}']),
-    Case('wss json 14KB', 'flood', ['--tls', '--size=$kb14', '--count=${30000 ~/ f}']),
+    Case('wss json 14KB → model', 'flood', ['--tls', '--size=$kb14', '--count=${30000 ~/ f}', full]),
     Case('wss binary 60KB', 'flood', ['--tls', '--format=binary', '--size=$kb60', '--count=${30000 ~/ f}']),
-    Case('json 1MB (stress)', 'flood', ['--size=$mb1', '--count=${300 ~/ f}']),
     // Sequential request/response, as in spinify's benchmark.
     Case('json 1KB', 'pingpong', ['--size=$kb1', '--count=${10000 ~/ f}']),
     Case('json 14KB', 'pingpong', ['--size=$kb14', '--count=${10000 ~/ f}']),
+    Case('json 14KB → model', 'pingpong', ['--size=$kb14', '--count=${10000 ~/ f}', full]),
     Case('json 30KB', 'pingpong', ['--size=$kb30', '--count=${10000 ~/ f}']),
     Case('json 60KB', 'pingpong', ['--size=$kb60', '--count=${10000 ~/ f}']),
+    Case('json 60KB → model', 'pingpong', ['--size=$kb60', '--count=${10000 ~/ f}', full]),
     Case('binary 60KB', 'pingpong', ['--format=binary', '--size=$kb60', '--count=${10000 ~/ f}']),
-    Case('wss json 14KB', 'pingpong', ['--tls', '--size=$kb14', '--count=${10000 ~/ f}']),
+    Case('wss json 14KB → model', 'pingpong', ['--tls', '--size=$kb14', '--count=${10000 ~/ f}', full]),
     // Steady-rate echo: round trip under load incl. the send path.
     Case('json 1KB @1k/s', 'echo', ['--size=$kb1', '--rate=1000', '--duration=$d']),
     Case('binary 60KB @200/s', 'echo', ['--format=binary', '--size=$kb60', '--rate=200', '--duration=$d']),
@@ -77,8 +83,10 @@ Future<void> main(List<String> arguments) async {
         a.substring(2).split('=').first:
             a.contains('=') ? a.substring(a.indexOf('=') + 1) : 'true',
   };
-  final bench = args['bench'] ?? 'build/bench';
-  final variants = (args['variants'] ?? 'a,b,c,c-worker,c-worker-raw').split(',');
+  final bench = args['bench'] ?? 'build/cli/bundle/bin/bench';
+  final variants = (args['variants'] ??
+          'a,b,c,c-worker,c-worker-raw,c-tape,c-worker-tape,c-worker-model,d-bytes,d-tape,d-cobject')
+      .split(',');
   final filter = args['filter'];
   final repeat = int.parse(args['repeat'] ?? '1');
   final out = File(args['out'] ?? 'build/results.jsonl');

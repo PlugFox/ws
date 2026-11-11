@@ -5,6 +5,9 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'codec.dart';
+import 'model.dart';
+import 'native.dart';
+import 'tape.dart';
 
 /// Benchmarked client implementations.
 enum Variant {
@@ -25,7 +28,30 @@ enum Variant {
   /// Own codec in a worker isolate, raw bytes posted to main as
   /// `TransferableTypedData`, decoded on main. Models a native (Rust)
   /// transport that delivers bytes and leaves decoding to Dart.
-  cWorkerRaw('c-worker-raw', 'own codec, worker isolate, decode on main');
+  cWorkerRaw('c-worker-raw', 'own codec, worker isolate, decode on main'),
+
+  /// Own codec on main, JSON parsed into a tape and read through lazy
+  /// `TapeMap` / `TapeList` views.
+  cTape('c-tape', 'own codec, main isolate, tape + lazy views'),
+
+  /// Own codec in a worker isolate that parses JSON into a tape; the tape is
+  /// moved to main in O(1) and read through lazy views.
+  cWorkerTape('c-worker-tape', 'own codec, worker isolate builds tape, lazy views on main'),
+
+  /// Own codec in a worker isolate that decodes JSON *and* maps it to typed
+  /// models (`Order.fromJson`); models are posted to main. Models a
+  /// user-supplied decoder running off the main isolate.
+  cWorkerModel('c-worker-model', 'own codec, worker isolate decodes to models'),
+
+  /// Rust (tokio) transport, payload bytes as external typed data,
+  /// JSON decoded on main.
+  dBytes('d-bytes', 'Rust transport, bytes to Dart, decode on main'),
+
+  /// Rust transport, simd-json → tape, lazy views on main.
+  dTape('d-tape', 'Rust transport + simd-json tape, lazy views on main'),
+
+  /// Rust transport, simd-json → Dart_CObject tree rebuilt by the VM on main.
+  dCobject('d-cobject', 'Rust transport + simd-json, Dart_CObject tree');
 
   const Variant(this.id, this.description);
 
@@ -58,7 +84,15 @@ abstract interface class BenchClient {
       switch (variant) {
         Variant.a => _IoClient.connect(uri, onMessage),
         Variant.c => _CodecClient.connect(uri, onMessage),
-        Variant.b || Variant.cWorker || Variant.cWorkerRaw =>
+        Variant.cTape => _CodecClient.connect(uri, onMessage, tape: true),
+        Variant.dBytes => NativeClient.connect(uri, NativeMode.bytes, onMessage),
+        Variant.dTape => NativeClient.connect(uri, NativeMode.tape, onMessage),
+        Variant.dCobject => NativeClient.connect(uri, NativeMode.cobject, onMessage),
+        Variant.b ||
+        Variant.cWorker ||
+        Variant.cWorkerRaw ||
+        Variant.cWorkerTape ||
+        Variant.cWorkerModel =>
           _WorkerClient.connect(variant, uri, onMessage),
       };
 
@@ -126,13 +160,19 @@ final class _IoClient implements BenchClient {
 final class _CodecClient implements BenchClient {
   _CodecClient._();
 
-  static Future<BenchClient> connect(Uri uri, void Function(Object) onMessage) async {
+  static Future<BenchClient> connect(
+    Uri uri,
+    void Function(Object) onMessage, {
+    bool tape = false,
+  }) async {
     final client = _CodecClient._();
     client._ws = await WsCodecClient.connect(
       uri,
       allowBadCertificates: true,
       onMessage: (opcode, payload) => opcode == opText
-          ? onMessage(decodeJsonBytes(payload)!)
+          ? onMessage(tape
+              ? TapeDocument(buildTape(payload)).root!
+              : decodeJsonBytes(payload)!)
           : onMessage(payload),
     );
     return client;
@@ -178,6 +218,9 @@ final class _WorkerClient implements BenchClient {
         case List<Object?> batch:
           for (final item in batch) {
             switch (item) {
+              // JSON tape built by the worker: lazy views on main.
+              case (tape: TransferableTypedData tape):
+                onMessage(TapeDocument(tape.materialize().asUint8List()).root!);
               // Raw UTF-8 text: decode on main.
               case (TransferableTypedData text,):
                 onMessage(decodeJsonBytes(text.materialize().asUint8List())!);
@@ -281,6 +324,8 @@ Future<void> _workerMain((SendPort, String, String) args) async {
       closeCode = () => ws.closeCode;
     } else {
       final raw = variant == Variant.cWorkerRaw;
+      final tape = variant == Variant.cWorkerTape;
+      final model = variant == Variant.cWorkerModel;
       final ws = await WsCodecClient.connect(
         uri,
         allowBadCertificates: true,
@@ -289,6 +334,10 @@ Future<void> _workerMain((SendPort, String, String) args) async {
             deliver(TransferableTypedData.fromList([payload]));
           } else if (raw) {
             deliver((TransferableTypedData.fromList([payload]),));
+          } else if (model) {
+            deliver(Order.fromJson(decodeJsonBytes(payload)! as Map<String, Object?>));
+          } else if (tape) {
+            deliver((tape: TransferableTypedData.fromList([buildTape(payload)])));
           } else {
             deliver(decodeJsonBytes(payload)!);
           }

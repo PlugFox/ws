@@ -6,7 +6,10 @@ environment:
   sdk: ^3.10.0
 
 dependencies:
+  code_assets: ^2.1.0
   crypto: ^3.0.6
+  hooks: ^2.2.0
 
 dev_dependencies:
   lints: ^6.0.0
+  test: ^1.33.0

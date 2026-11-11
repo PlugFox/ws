@@ -8,12 +8,36 @@ make bench        # from the repo root: full matrix, 3 repeats (~25 min)
 make bench-quick  # shorter runs, 1 repeat
 ```
 
-Single case:
+Single case. `dart build cli` runs the build hook, which compiles the Rust
+crate in `native/` and bundles it next to the executable. `dart compile exe`
+does not run hooks, so the `d-*` variants would fail with it.
 
 ```bash
-dart compile exe bin/bench.dart -o build/bench
-build/bench --variant=c --scenario=pingpong --size=14336 --count=10000 [--tls]
+dart build cli -t bin/bench.dart -o build/cli
+build/cli/bundle/bin/bench --variant=d-tape --scenario=pingpong --size=14336 --count=10000 [--tls] [--consume=full]
 ```
+
+## Variants
+
+| id | transport | where JSON is parsed | what main receives |
+|---|---|---|---|
+| `a` | `dart:io` WebSocket, main | main, `jsonDecode(String)` | `Map` |
+| `b` | `dart:io` WebSocket, worker | worker | `Map` (copied by `SendPort`) |
+| `c` | own codec (`lib/src/codec.dart`), main | main, fused UTF-8 + JSON | `Map` |
+| `c-worker` | own codec, worker | worker | `Map` |
+| `c-worker-raw` | own codec, worker | main | bytes (`TransferableTypedData`) |
+| `c-tape` | own codec, main | main, into a tape | lazy `TapeMap` views |
+| `c-worker-tape` | own codec, worker | worker, into a tape | tape bytes → lazy views |
+| `c-worker-model` | own codec, worker | worker, plus `Order.fromJson` | typed models |
+| `d-bytes` | Rust (tokio + tungstenite) | main | external typed data |
+| `d-tape` | Rust | Rust, simd-json into a tape | external tape → lazy views |
+| `d-cobject` | Rust | Rust, simd-json into a `Dart_CObject` tree | VM-rebuilt `List` tree → views |
+
+`--consume=full` maps every message to typed models (`Order.fromJson`, all
+fields), as an app would. The default reads only `seq` and `ts`.
+
+The tape format is described in `lib/src/tape.dart`. The Dart builder and
+the Rust builder (`native/src/tape.rs`) produce the same layout.
 
 ## Scenarios
 
