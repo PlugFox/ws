@@ -1,63 +1,50 @@
-# Web Socket Echo Server
+# ws_bench_server
 
-# How to run the server
+Rust WebSocket server (tokio + tungstenite + rustls) used by the `ws`
+package for benchmarks, tests and examples.
 
 ```bash
-$ dart run server/bin/server.dart --port=8080 --isolates=2
+cargo run --release -- [--host 127.0.0.1] [--port 9090] [--tls-port 9443]
+# or from the repository root
+make server
 ```
 
-or using Docker
+The TLS port uses a self-signed certificate for `localhost` / `127.0.0.1`
+that is generated at startup, so clients must skip certificate verification.
+
+## Endpoints
+
+The same endpoints are available on both ports (`ws://` and `wss://`).
+
+### `/echo`
+
+Sends every text and binary message back unchanged.
+
+### `/stream`
+
+Pushes messages from the server to the client, then closes the connection
+with code `1000` and reason `done`.
+
+| query      | default | meaning                                                         |
+|------------|---------|-----------------------------------------------------------------|
+| `format`   | `json`  | `json`: text frames; `binary`: binary frames                     |
+| `size`     | `1024`  | approximate message size in bytes                               |
+| `rate`     | `1000`  | messages per second; `0` sends as fast as possible              |
+| `duration` | `5000`  | stream length in ms; the message count is `rate * duration / 1000` |
+| `count`    | —       | explicit message count; overrides `duration`                    |
+| `unicode`  | `0`     | `1` puts non-ASCII strings into JSON payloads                   |
+
+Every message carries a sequence number and the send time, in microseconds
+since the Unix epoch:
+
+- `json` messages look like `{"seq":N,"ts":T,"items":[{...}, ...]}`, where
+  `items` holds realistic objects with strings, numbers, booleans, arrays
+  and nested maps.
+- `binary` messages start with `u64 LE seq` and `u64 LE ts`, followed by
+  filler bytes.
+
+Example:
 
 ```bash
-$ docker build -t ws_echo_server server
-$ docker run -it --rm -p 8080:8080 ws_echo_server /app/bin/server -p 8080 -i 2
-```
-
-## How to connect using Node.js
-
-```bash
-$ dart run server/bin/server.dart
-$ npm install -g wscat
-$ wscat -c ws://127.0.0.1:8080/connect
-Connected (press CTRL+C to quit)
-> hello
-< hello
-```
-
-## How to connect using Python
-
-```bash
-$ dart run server/bin/server.dart
-$ python -m pip install websockets
-$ python -m websockets ws://127.0.0.1:8080/connect
-Connected to ws://127.0.0.1:8080/connect.
-> hello
-< hello
-```
-
-## How to connect using Dart
-
-```bash
-$ dart run server/bin/server.dart
-$ dart run --observe --define=URL=ws://127.0.0.1:8080/connect example/ws_example.dart
-* WebSocketClientState.connecting(ws://127.0.0.1:8080/connect)
-* WebSocketClientState.open(ws://127.0.0.1:8080/connect)
-< Hello,
-< world!
-* WebSocketClientState.disconnecting(NORMAL_CLOSURE)
-* WebSocketClientState.closed(NORMAL_CLOSURE)
-Metrics:
-- readyState: CLOSED
-- reconnectTimeout: 5 seconds
-- transferredSize: 13
-- receivedSize: 13
-- transferredCount: 2
-- receivedCount: 2
-- reconnects: 1 / 1
-- lastSuccessfulConnectionTime: 1 seconds ago
-- disconnects: 1
-- lastDisconnectTime: 1 seconds ago
-- expectedReconnectTime: never
-- lastDisconnect: 1000 (NORMAL_CLOSURE)
-- lastUrl: ws://127.0.0.1:8080/connect
+websocat 'ws://127.0.0.1:9090/stream?size=200&rate=2&duration=3000'
 ```

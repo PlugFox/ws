@@ -75,3 +75,8 @@ log.pana.json
 .coverage/
 /test/**/*.json
 /test/.test_coverage.dart
+# Rust
+target/
+
+# Benchmarks
+/benchmark/build/
