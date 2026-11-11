@@ -80,3 +80,7 @@ target/
 
 # Benchmarks
 /benchmark/build/
+
+# Example: local asset packs and planning notes (not distributed)
+/example/assets/
+/example/docs/
