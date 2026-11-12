@@ -19,7 +19,8 @@ doc
 
 # Include when developing application packages.
 pubspec.lock
-coverage*
+/coverage/
+/coverage*.info
 
 # Codegen
 *.g.dart

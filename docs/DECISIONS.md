@@ -775,3 +775,194 @@ a port probe on `init`.
   the hashes. `prebuilt.yml` has not run on GitHub yet. Windows arm64
   (`ring` needs clang) and `ubuntu-22.04-arm` are unverified.
 - Status: **adopted**.
+
+## Networking
+
+### D34. Happy Eyeballs in the Rust transport
+
+- Before: `TcpStream::connect((host, port))` tried the resolved addresses
+  one after another. A black-holed first address (an IPv6 route that does
+  not exist, a dead A record) stalled the connection for the OS connect
+  timeout (~75 s) before the next address was tried.
+- `dart:io` already staggers attempts: `socket_patch.dart` has a 250 ms
+  `_retryDuration` and `connectNext` (checked in the 3.13.7 SDK sources).
+  The two transports must behave the same (§3 of the roadmap).
+- Now (`native/rust/src/net.rs`): addresses from `getaddrinfo`
+  (`tokio::net::lookup_host`, so iOS synthesizes NAT64 addresses for
+  IPv4-only names) are interleaved by family, starting with the family
+  of the first answer (RFC 8305 §4). A new attempt starts when the
+  previous one fails or after 250 ms, whichever is first. The first
+  success wins and the other sockets are dropped.
+- Tests: `net::tests` with paused tokio time: a quick first address
+  starts no second attempt; a hanging first address loses to the second
+  at exactly 250 ms; failures start the next attempt immediately; an
+  earlier attempt can still win; the last error is reported.
+- Not covered, same as `dart:io`: an IPv4 *literal* in the URL on an
+  IPv6-only (NAT64) network. Both parse the literal and never call
+  `getaddrinfo`, so no synthesized address exists. Use host names.
+- Status: **adopted**.
+
+### D35. TLS: the operating system's trust store
+
+- Before: only the bundled Mozilla roots (`webpki-roots`). Corporate,
+  MDM-installed and user-trusted CAs worked with `dart:io` but failed on
+  the native transport.
+- Options: `rustls-platform-verifier` everywhere; `rustls-native-certs`
+  everywhere; a mix.
+  - `rustls-platform-verifier` 0.7.1 on Android needs a JavaVM and an app
+    `Context` passed through JNI, plus its Kotlin component. A Dart FFI
+    library gets neither.
+  - `rustls-native-certs` has no iOS support and cannot see Apple trust
+    settings.
+- Decision (`native/rust/src/tls.rs`):
+  - Apple and Windows: `rustls-platform-verifier` (Security.framework,
+    CryptoAPI), including user trust settings. Verification may block
+    (revocation, intermediate fetch), so it runs inside
+    `tokio::task::block_in_place` on the multi-thread runtime.
+  - Linux: `rustls-native-certs` (honours `SSL_CERT_FILE`/`SSL_CERT_DIR`).
+  - Android: PEM files from `/apex/com.android.conscrypt/cacerts`
+    (Android 14+, updatable) or `/system/etc/security/cacerts`.
+    User-installed CAs are not trusted, which matches the Android 7+
+    default for apps.
+  - If no system root loads (a minimal container), fall back to
+    `webpki-roots`. `trustedRootsPem` adds roots on top.
+- The default `ClientConfig` is built once per process and shared, so
+  rustls' in-memory session cache resumes TLS sessions across reconnects
+  (before, every connection had a new config and a cold cache).
+- Size: the macOS dylib went from 2,192,992 to 2,144,848 bytes (`webpki-
+  roots` is no longer linked there). Android arm64: 2,331,304 bytes.
+  `prebuilt.yml` built all 12 targets on GitHub with the previous code;
+  the new dependencies have been built locally for macOS, iOS and
+  Android only.
+- Status: **adopted**. A latency comparison of the platform verifier vs
+  webpki on a real handshake is still to do.
+
+### D36. HTTP CONNECT proxy and a hard send-queue limit
+
+- Proxy: `WebSocketVmOptions.proxy` (`WebSocketProxy(host, port,
+  username, password)`, or `.parse('http://user:pass@host:port')`). Both
+  native transports open the tunnel themselves, then run TLS end to end
+  through it.
+  - Dart: `lib/src/transport/dart/proxy_tunnel.dart` writes `CONNECT`,
+    reads the head and hands the paused subscription to
+    `RawSecureSocket.secure`, or re-attaches its handlers for `ws://`.
+    Bytes after the proxy's head are a protocol error: the server cannot
+    speak before our request.
+  - Rust: `net::tunnel` reads the head byte by byte, so nothing that
+    belongs to the tunnel is consumed.
+  - Credentials are sent as `Proxy-Authorization: Basic`. System proxy
+    settings (iOS `CFNetwork`, Android `ProxySelector`, PAC) are not read;
+    see ROADMAP §4.6.
+- Send limit: `WebSocketOptions.sendBufferLimit` (default 16 MiB). While
+  more than that is queued, `push()` fails with
+  `WebSocketBufferFullException` and the connection stays open. Checked
+  in the client before encoding, so all transports share it, and the
+  queue may exceed the limit by one message. This closes the D29 item
+  "the native send queue is not bounded in bytes".
+- Status: **adopted**. End-to-end proxy tests wait for the test server
+  (`server/`, TEST_PLAN §3).
+
+### D37. Behaviour fixed by the new tests
+
+Ported scenarios (TEST_PLAN) found three real defects:
+
+- **Messages after `disconnect()`** were still delivered while the
+  closing handshake ran. Browsers drop them (HTML: a message received
+  when the state is not OPEN is ignored), and so does
+  `web_socket_conformance_tests`. The client now drops them
+  (`_Session._delivering`).
+- **Non-Latin-1 user info** in the URL (`ws://юзер:пароль@h/`) threw from
+  `latin1.encode` while building the request. It is now UTF-8, as
+  RFC 7617 recommends.
+- **The Dart tape builder accepted invalid numbers** (`01`, `1.`, `1e`).
+  It now follows the RFC 8259 grammar, like simd-json on the Rust side. A
+  conformance test feeds a raw JSON corpus (escapes, surrogates, number
+  edges, duplicate keys) through every transport's decoder and compares
+  the result with `jsonDecode`.
+- Status: **adopted**.
+
+### D38. Client transitions: mutate first, notify last
+
+- An independent review (`docs/review/client.md`) reproduced four
+  critical client bugs, all from user callbacks running in the middle of
+  a transition: `reconnect()` from `onError` leaked a live connection;
+  `disconnect()` from `onError` left the state on `reconnecting`;
+  `disconnect()` during `onOpen` was undone; a listener's `connect()` got
+  the previous attempt's result. Also `close()` hung with a paused
+  subscription, and `close(1001)` left a half-closed client.
+- Rule now: every field (session, timers, failure counters, waiters) is
+  final before any user code runs: state events, `onError`,
+  `shouldReconnect`, waiter completions. Waiters are detached before the
+  state event and completed after it. The reconnect timer is armed before
+  `onError`, and `reconnecting` is emitted only if the callback did not
+  change course.
+- Related fixes: `close()` validates first and returns the first call's
+  future; stream controllers are closed without awaiting; a dropped
+  session always completes its `disconnect()` future; connections dropped
+  without a handshake are aborted by `close()`; one connect budget covers
+  the request provider, the handshake and `onOpen`; the heartbeat counts
+  inbound frames instead of comparing elapsed time (a timeout ≥ interval
+  killed healthy connections); only `stableAfter` resets the backoff (a
+  greet-then-close server was hammered 408 times in 5 minutes); a zero
+  `minDelay` still backs off (100 ms base); 1013 waits `maxDelay` plus
+  jitter; `Retry-After` on 429/503 is honoured (≤ 10 min); invalid
+  request headers, subprotocols or user info are terminal; RPC ids are
+  unique, unknown ids are delivered as messages (only replies to
+  abandoned calls are dropped), calls fail at `disconnect()` with
+  `disconnected` and at `close()` with `closed`, a refused send fails
+  with its own error; user-code errors go to the zone when `onError` is
+  absent; `bytesSent` is the encoded size on every transport.
+- Each finding has a regression test in
+  `test/client/client_review_test.dart`; without the fixes those tests
+  fail or hang.
+- Status: **adopted**.
+
+### D39. Native transport: own client handshake, ABI 3
+
+- tungstenite's client handshake rejects a server that selects none of
+  the offered subprotocols (browsers and the Dart transport accept it),
+  ignores repeated `Sec-WebSocket-Accept`/`-Protocol` and unoffered
+  extensions, and sent `GET ?q` for a URL without a path. The handshake
+  is now done in `native/rust/src/handshake.rs` with the same rules as
+  `handshake.dart`; tungstenite takes over after the 101
+  (`from_partially_read`).
+- Receive credits charge 64 bytes per message on top of the payload, and
+  pongs are charged too (a flood of empty messages reached 585 MB RSS
+  with the 8 MiB window). The JSON tape's extra size is charged when it
+  is built.
+- The config JSON rejects unknown fields, so an older library cannot
+  silently ignore a setting such as `proxy`. Together with the pong event
+  carrying credits this is ABI 3.
+- Status: **adopted**.
+
+### D40. Portable binaries and a checked release chain
+
+From `docs/review/distribution.md`:
+
+- Linux libraries are linked with `cargo zigbuild` against glibc 2.17
+  (they needed 2.34 and failed on Debian 11, RHEL 8, Amazon Linux 2) and
+  with `-static-libgcc` (they needed `libgcc_s.so.1`, missing in
+  `FROM scratch` images). Windows DLLs link the C runtime statically
+  (`native/rust/.cargo/config.toml`).
+- `tool/verify_native.sh` runs after every CI build: exactly 13
+  `ws_native_*` exports, 16 KB LOAD alignment on Android, glibc ≤ 2.17
+  and an allow-list of `NEEDED` libraries on Linux, the Apple install
+  name, no VC++ runtime import on Windows.
+- `package:ws_native/ws_native.dart` exports a stub on the web
+  (`install()` returns `false`), so a Flutter app that targets the web
+  can import it unconditionally. `WsNative.unavailableReason` says why
+  the library is not used (missing asset or ABI mismatch).
+- `ws_native` pins `ws` to the exact same version. `tool/native_release.dart`
+  fails without `checksums.json` or with fewer than 12 hashes. The hook
+  rejects an unknown `source:` and accepts a per-OS map.
+  `dart run ws:install` accepts `--key value` (the README form) and
+  validates its arguments.
+- The old tag-triggered `deploy.yml` no longer runs on tags: it would
+  publish `ws` alone, without native hashes.
+- CI builds the test server and the native library for the VM tests on
+  Linux, macOS and Windows, fails (instead of skipping) when the server is
+  missing, and lints and tests `server/`.
+- Open: the release workflow itself, third-party licence notices for the
+  Rust crates, pinned action SHAs and Dependabot for cargo.
+- Status: **adopted**; zigbuild and the Windows static CRT are verified
+  only by CI.

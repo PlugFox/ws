@@ -144,8 +144,8 @@ Key properties:
   socket when credits run out, and TCP backpressure slows the server.
 - [ ] Credits are granted back automatically after the listener has handled a
   batch. Applies to `Stream` pause/resume too.
-- [ ] Optional bound on the send queue too: report it, or fail `send` when
-  it is exceeded (`bufferedAmount` as in the browser).
+- [x] Bound on the send queue: `sendBufferLimit` fails `push()` with
+  `WebSocketBufferFullException` (DECISIONS.md D36).
 - [ ] Same semantics in the pure-Dart transport: pause the
   `RawSocket` read events.
 - [ ] Re-run the flood benchmarks: throughput must stay about the same and RSS
@@ -169,11 +169,9 @@ Key properties:
 
 ### 4.5 TLS
 
-- [ ] Certificate verification against the **platform trust store** on
-  Android and iOS, so enterprise/MDM and user-installed CAs work. Candidate:
-  `rustls-platform-verifier`, which needs JNI initialization on Android.
-  The alternative, `webpki-roots`, ignores the system store. Decide and
-  document.
+- [x] Certificate verification against the **platform trust store**
+  (DECISIONS.md D35): OS verifier on Apple/Windows, system CA files on
+  Linux and Android, `webpki-roots` only as a fallback.
 - [ ] Certificate pinning (SPKI hash) and custom CAs.
 - [ ] An option to allow bad certificates, for development only. Never the
   default. The benchmarks use an accept-any verifier, and it must not leak
@@ -186,12 +184,14 @@ Key properties:
 
 ### 4.6 Networking on mobile
 
-- [ ] **System proxy / VPN apps**: raw sockets do not honour the system
+- [~] **System proxy / VPN apps** (explicit HTTP CONNECT proxy done, D36;
+  reading system settings open): raw sockets do not honour the system
   HTTP proxy (iOS `CFNetwork`, Android `ProxySelector`). At least support an
   explicit HTTP CONNECT proxy option. Decide whether to read the system
   proxy settings.
-- [ ] IPv6 and NAT64 (iOS review requirement): resolve with `getaddrinfo`
-  and use Happy Eyeballs (RFC 8305) when connecting.
+- [x] IPv6 and NAT64 (iOS review requirement): `getaddrinfo` + Happy
+  Eyeballs (RFC 8305) in Rust, as `dart:io` does (DECISIONS.md D34). IPv4
+  literals on NAT64 remain unsupported on both transports.
 - [ ] Network changes (Wi-Fi ↔ cellular): detect dead connections quickly
   with heartbeats and TCP keepalive, then reconnect.
 - [ ] App lifecycle: iOS suspends sockets in the background. Reconnect on
@@ -410,8 +410,8 @@ here, including the ones that fail.
 | M0 | Benchmarks and the transport decision | Rust server, transport variants, tape, model mapping, mobile runs | [x] |
 | M1a | Exploration | §5 experiments as benchmark variants; adopt or reject each with recorded numbers. Runs alongside M1–M4, because the internals are swappable | [ ] |
 | M1 | API design | §4.1 API sketch, transport interface, decoder and flow-control contracts, state/error types; review before coding | [x] expert-reviewed, DECISIONS.md D11–D18, ARCHITECTURE.md |
-| M2 | Core and pure-Dart transport | State machine, reconnect, heartbeat, metrics; RFC 6455 codec from `benchmark/lib/src/codec.dart` hardened; Autobahn green | [~] core, protocol layer, pure-Dart transport and fake done with tests; Autobahn pending |
-| M3 | Native transport | Rust crate as a library (`native/` at the repo root): connections, credits, errors, TLS with the platform verifier, proxy; Autobahn green | [~] package `ws_native` (`native/`): Rust crate with credits, drain on request, liveness probe, `catch_unwind`, hook with prebuilt/cargo/none; passes the shared conformance suite. TLS uses webpki-roots for now (platform verifier open, §4.5); proxy and Autobahn pending |
+| M2 | Core and pure-Dart transport | State machine, reconnect, heartbeat, metrics; RFC 6455 codec from `benchmark/lib/src/codec.dart` hardened; Autobahn green | [~] core, protocol layer, pure-Dart transport and fake done with tests; Autobahn 0 failed (D28) |
+| M3 | Native transport | Rust crate as a library (`native/` at the repo root): connections, credits, errors, TLS with the platform verifier, proxy; Autobahn green | [~] package `ws_native` (`native/`): Rust crate with credits, drain on request, liveness probe, `catch_unwind`, hook with prebuilt/cargo/none; passes the shared conformance suite; Autobahn 0 failed (D28); OS trust store (D35), Happy Eyeballs (D34), CONNECT proxy (D36). System proxy settings open |
 | M4 | Decoders | Tape (Rust and Dart builders), worker decoder, custom binary decoders; tape speedups (§5.3) | [ ] |
 | M5 | Web transport | `package:web` implementation, shared conformance suite in the browser | [~] implemented, tested on dart2js and dart2wasm |
 | M6 | Robustness | §6.3 soak, faults, lifecycle, hot restart | [ ] |

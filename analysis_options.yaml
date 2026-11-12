@@ -16,6 +16,8 @@ analyzer:
     # Separate packages
     - "benchmark/**"
     - "example/**"
+    - "native/**"
+    - "server/**"
 
   # Enable the following options to enable strong mode.
   language:

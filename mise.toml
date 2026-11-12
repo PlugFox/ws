@@ -47,6 +47,7 @@ description = "Format Dart and Rust code"
 run = [
   "dart format bin lib test tool native/lib native/test native/hook",
   "cd native/rust && cargo fmt",
+  "cd server && cargo fmt",
 ]
 
 [tasks."fmt:check"]
@@ -54,6 +55,7 @@ description = "Fail if anything is not formatted"
 run = [
   "dart format --set-exit-if-changed -o none bin lib test tool native/lib native/test native/hook",
   "cd native/rust && cargo fmt --check",
+  "cd server && cargo fmt --check",
 ]
 
 [tasks.analyze]
@@ -63,7 +65,8 @@ run = [
   "dart analyze --fatal-infos --fatal-warnings",
   "cd native && dart analyze --fatal-infos --fatal-warnings",
   "cd benchmark && dart analyze --fatal-warnings",
-  "cd native/rust && cargo clippy --release -- -D warnings",
+  "cd native/rust && cargo clippy --release --all-targets -- -D warnings",
+  "cd server && cargo clippy --release --all-targets -- -D warnings",
   "actionlint",
   "shellcheck tool/*.sh",
 ]
@@ -88,7 +91,7 @@ depends = ["test:vm", "test:web", "test:native", "test:rust"]
 
 [tasks."test:vm"]
 description = "Dart VM tests of ws"
-depends = ["deps"]
+depends = ["deps", "server:build"]
 run = "dart test --platform vm"
 
 [tasks."test:web"]
@@ -101,7 +104,7 @@ run = [
 
 [tasks."test:native"]
 description = "Conformance suite on the Rust transport: bundled by the hook, and loaded by path"
-depends = ["deps", "native:build"]
+depends = ["deps", "native:build", "server:build"]
 run = [
   "cd native && dart test",
   """
@@ -113,13 +116,24 @@ run = [
 ]
 
 [tasks."test:rust"]
-description = "Rust unit tests of the native library"
-run = "cd native/rust && cargo test --release"
+description = "Rust tests of the native library and of the test server"
+run = [
+  "cd native/rust && cargo test --release",
+  "cd server && cargo test --release",
+]
 
 [tasks.coverage]
-description = "VM test coverage of ws as lcov (coverage/lcov.info)"
-depends = ["deps"]
-run = "dart test --platform vm --coverage-path=coverage/lcov.info"
+description = "VM test coverage of ws, native transport included (coverage/lcov.info + summary)"
+depends = ["deps", "native:build", "server:build"]
+run = [
+  """
+  case "$(uname -s)" in Darwin) ext=dylib ;; Linux) ext=so ;; *) ext=dll ;; esac
+  file=native/rust/target/release/libws_native.$ext
+  [ "$ext" = dll ] && file=native/rust/target/release/ws_native.dll
+  WS_NATIVE_LIBRARY="$PWD/$file" dart test --platform vm --coverage-path=coverage/lcov.info
+  """,
+  "dart run tool/coverage_summary.dart coverage/lcov.info",
+]
 
 # --- native library ----------------------------------------------------------
 
@@ -157,6 +171,10 @@ description = "Follow a running workflow"
 run = "gh run watch"
 
 # --- benchmarks and conformance ----------------------------------------------
+
+[tasks."server:build"]
+description = "Build the Rust test/benchmark server (server/target/release)"
+run = "cd server && cargo build --release"
 
 [tasks.server]
 description = "Rust WebSocket server for tests, benchmarks and examples"

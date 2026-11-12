@@ -20,7 +20,8 @@ doc
 *.js.deps
 *.js.map
 pubspec.lock
-coverage*
+/coverage/
+/coverage*.info
 *.g.dart
 l/
 *.class

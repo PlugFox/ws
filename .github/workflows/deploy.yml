@@ -1,10 +1,10 @@
 name: Deploy
 
+# Disabled for 2.x: a version tag must publish ws and ws_native together,
+# with the native hashes and GitHub release assets (DECISIONS.md D31, D32;
+# docs/review/distribution.md F6). The release workflow will replace this.
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "[0-9]+.[0-9]+.[0-9]+*"
 
 jobs:
   deploy:

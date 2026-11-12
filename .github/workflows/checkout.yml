@@ -21,6 +21,9 @@ concurrency:
   group: checkout-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   package:
     name: "Package (format, analyze, publish layout)"
@@ -33,19 +36,24 @@ jobs:
       - name: 🎯 Set up Dart
         uses: dart-lang/setup-dart@v1
         with:
-          sdk: stable
+          # Same as mise.toml, so format and lints match local runs.
+          sdk: 3.13.7
 
       - name: 👷 Install dependencies
-        run: dart pub get
+        run: |
+          dart pub get
+          dart pub get --directory=native
 
       - name: 🙈 .pubignore covers .gitignore
         run: dart run tool/check_pubignore.dart
 
       - name: 🔎 Check format
-        run: dart format --set-exit-if-changed -o none bin/ lib/ test/ tool/
+        run: dart format --set-exit-if-changed -o none bin/ lib/ test/ tool/ native/lib native/test native/hook
 
       - name: 📈 Check analyzer
-        run: dart analyze --fatal-infos --fatal-warnings
+        run: |
+          dart analyze --fatal-infos --fatal-warnings
+          (cd native && dart analyze --fatal-infos --fatal-warnings)
 
       - name: 📦 Publish dry run
         run: dart pub publish --dry-run
@@ -53,18 +61,39 @@ jobs:
   test-vm:
     name: "Tests (VM)"
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    timeout-minutes: 30
+    env:
+      # test/support/test_server.dart fails instead of skipping on CI.
+      CI: "true"
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            server
+            native/rust
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
       - run: dart pub get
-      - name: 🧪 Run tests
+      - name: 🦀 Build the test server and the native library
+        shell: bash
+        run: |
+          (cd server && cargo build --release --locked)
+          (cd native/rust && cargo build --release --locked)
+          case "$RUNNER_OS" in
+            Windows) lib=ws_native.dll; exe=.exe ;;
+            macOS) lib=libws_native.dylib; exe= ;;
+            *) lib=libws_native.so; exe= ;;
+          esac
+          echo "WS_TEST_SERVER=$PWD/server/target/release/ws_bench_server$exe" >> "$GITHUB_ENV"
+          echo "WS_NATIVE_LIBRARY=$PWD/native/rust/target/release/$lib" >> "$GITHUB_ENV"
+      - name: 🧪 Run tests (pure Dart, native by path, against the Rust server)
         run: dart test --platform vm --reporter expanded
 
   test-web:
@@ -82,3 +111,22 @@ jobs:
         run: dart test --platform chrome --reporter expanded
       - name: 🧪 dart2wasm
         run: dart test --platform chrome --compiler dart2wasm --reporter expanded
+
+  server:
+    name: "Test server (fmt, clippy, tests)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - run: cargo fmt --check
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo test --release
