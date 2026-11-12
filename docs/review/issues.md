@@ -23,3 +23,13 @@ each checked against branch `rewrite`. "Test" names the regression test.
 - `open` and a completed `push()` mean the local side accepted the
   message, not that the remote application got it. Delivery guarantees
   need application acks; `rpc()` gives a reply per request.
+
+## Follow-up
+
+- README "Dead connections and delivery": the browser needs an
+  application-level heartbeat; an own ping/pong through `rpc()` is
+  recommended on every platform, and `rpc()` replies are the way to
+  acknowledge delivery.
+- Issues #19, #23, #24, #25, #26 closed on 2026-11-13 with a comment each.
+- dart2wasm JSON decoding with asserts (D55):
+  https://github.com/dart-lang/sdk/issues/64924.

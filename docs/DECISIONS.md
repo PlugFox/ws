@@ -1763,6 +1763,6 @@ distinction (`1.0`). No library change: release builds are not
 affected. Under dart2wasm the test drops the 17 MiB case, which exists
 for the native transport's 16 MiB tape limit (D50). Debug (asserts on)
 Flutter web builds with dart2wasm will be slow on large nested JSON;
-worth reporting to dart-lang/sdk.
+reported as https://github.com/dart-lang/sdk/issues/64924.
 
 - Status: **adopted**.
