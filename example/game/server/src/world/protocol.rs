@@ -1,4 +1,4 @@
-//! Hub wire protocol.
+//! Hub, lobby and stage wire protocol.
 //!
 //! Control messages are JSON text frames tagged by `type`. Snapshots are
 //! binary frames (later WebTransport datagrams) with this little-endian layout:
@@ -71,6 +71,26 @@ pub struct PlayerInfo {
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct LobbyMemberInfo {
+    pub entity_id: u32,
+    pub name: String,
+    pub archetype: String,
+    pub ready: bool,
+    pub leader: bool,
+}
+
+/// Full lobby state, re-sent to every member on each change.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct LobbyInfo {
+    pub lobby_id: u32,
+    /// Join code (`lobby_join`); the only way into a private lobby.
+    pub code: String,
+    pub mission: MissionInfo,
+    pub public: bool,
+    pub members: Vec<LobbyMemberInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct ChannelInfo {
     pub id: u16,
     pub name: String,
@@ -119,6 +139,23 @@ pub enum ServerMsg {
     },
     HubLeft { reason: String },
     HubError { code: String, message: String },
+    /// The recipient joined a stage instance; `map_enter` follows. Sent
+    /// instead of `hub_joined` (the hub membership has ended).
+    StageJoined {
+        stage_id: u32,
+        mission: String,
+        tick_rate: u32,
+        entity_id: u32,
+    },
+    /// The recipient is in a lobby; sent on every change.
+    LobbyState { lobby: LobbyInfo },
+    /// The recipient is no longer in a lobby: `left`, `kicked`, `launched`,
+    /// `disbanded`, `replaced`.
+    LobbyLeft { reason: String },
+    /// Lobby errors: `already_in_lobby`, `not_in_lobby`, `no_such_lobby`,
+    /// `lobby_full`, `not_leader`, `not_ready`, `stage_full`,
+    /// `mission_unavailable`, `not_in_hub`.
+    LobbyError { code: String, message: String },
 }
 
 /// Client → server hub messages.
@@ -139,8 +176,28 @@ pub enum ClientMsg {
     HubInput { seq: u32, dx: f32, dy: f32 },
     /// Talk to an NPC on the current map; must be within its radius.
     NpcInteract { npc: String },
-    /// Pick a mission at a mission board the player is standing at.
-    MissionSelect { mission: String },
+    /// Pick a mission at a mission board the player is standing at: joins
+    /// the oldest public lobby of that mission with room (or opens one), or
+    /// opens a private lobby when `public` is false.
+    MissionSelect {
+        mission: String,
+        #[serde(default = "yes")]
+        public: bool,
+    },
+    /// Join a lobby by its code (public or private), from anywhere in the hub.
+    LobbyJoin { code: String },
+    LobbyReady { ready: bool },
+    /// Leader only; every other member must be ready.
+    LobbyStart,
+    LobbyLeave,
+    /// Leader only: remove a member (by entity id).
+    LobbyKick { entity_id: u32 },
+    /// Abandon the stage and return to the hub.
+    StageLeave,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// Binary client → server frame kinds (first byte). JSON control messages
@@ -277,5 +334,9 @@ mod tests {
         assert_eq!(m, ClientMsg::HubJoin { channel: Some(2) });
         let m: ClientMsg = serde_json::from_str(r#"{"type":"hub_input","seq":3,"dx":1,"dy":0}"#).unwrap();
         assert_eq!(m, ClientMsg::HubInput { seq: 3, dx: 1.0, dy: 0.0 });
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"mission_select","mission":"m"}"#).unwrap();
+        assert_eq!(m, ClientMsg::MissionSelect { mission: "m".into(), public: true }, "public by default");
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"lobby_join","code":"AB2CD"}"#).unwrap();
+        assert_eq!(m, ClientMsg::LobbyJoin { code: "AB2CD".into() });
     }
 }

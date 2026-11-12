@@ -16,7 +16,7 @@ use session::{SessionRegistry, StateFlusher};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
-use world::{HubDirectory, HubWorld};
+use world::{missions, HubDirectory, HubWorld, LobbyDirectory, StageDirectory};
 
 /// Initializes application components and returns the configured Axum router and AppState.
 ///
@@ -28,6 +28,15 @@ pub async fn create_app(config: AppConfig) -> Result<(Router, AppState), Box<dyn
         Some(dir) => match HubWorld::load(dir, &config.hub_maps, &config.hub_entry) {
             Ok(world) => {
                 info!("Loaded hub maps {:?} from {}", config.hub_maps, dir.display());
+                let has_board = (0..world.map_count()).any(|i| {
+                    world.map(i as world::hub::MapIdx).manifest.npcs.iter().any(|n| n.kind == world::hub::MISSION_BOARD)
+                });
+                if !has_board {
+                    warn!(
+                        "No NPC with kind \"{}\" in the hub maps: missions cannot be picked (check the recipe's npcs)",
+                        world::hub::MISSION_BOARD
+                    );
+                }
                 Some(world)
             }
             Err(err) => {
@@ -37,14 +46,41 @@ pub async fn create_app(config: AppConfig) -> Result<(Router, AppState), Box<dyn
         },
         None => None,
     };
-    create_app_with_world(config, world).await
+    // One stage world per distinct mission map; a map that fails to load
+    // only disables the missions played on it.
+    let mut stages = Vec::new();
+    if let (Some(dir), Some(_)) = (&config.assets_dir, &world) {
+        let mut maps: Vec<&str> = missions::MISSIONS.iter().map(|m| m.map).collect();
+        maps.sort_unstable();
+        maps.dedup();
+        for id in maps {
+            match HubWorld::load(dir, &[id.to_string()], id) {
+                Ok(w) => {
+                    info!("Loaded stage map {id}");
+                    stages.push(w);
+                }
+                Err(err) => warn!("Missions on {id} disabled: {err}"),
+            }
+        }
+    }
+    create_app_with_worlds(config, world, stages).await
 }
 
-/// Same as [`create_app`] with an already-built hub world (tests use
-/// synthetic maps so they do not depend on the private asset submodule).
+/// Same as [`create_app`] with an already-built hub world and no stage maps
+/// (tests use synthetic maps so they do not depend on the private asset
+/// submodule).
 pub async fn create_app_with_world(
     config: AppConfig,
     world: Option<HubWorld>,
+) -> Result<(Router, AppState), Box<dyn std::error::Error + Send + Sync>> {
+    create_app_with_worlds(config, world, Vec::new()).await
+}
+
+/// Same as [`create_app`] with already-built hub and stage worlds.
+pub async fn create_app_with_worlds(
+    config: AppConfig,
+    world: Option<HubWorld>,
+    stages: Vec<HubWorld>,
 ) -> Result<(Router, AppState), Box<dyn std::error::Error + Send + Sync>> {
     let pool = init_db(&config.database_url).await?;
 
@@ -64,6 +100,11 @@ pub async fn create_app_with_world(
         let _reaper = dir.spawn_reaper(Duration::from_secs(10));
         dir
     });
+    let lobbies = hub.as_ref().map(|_| {
+        let stages = StageDirectory::new(stages, config.stages.clone());
+        let _reaper = stages.spawn_reaper(Duration::from_secs(5));
+        LobbyDirectory::new(stages)
+    });
 
     let state = AppState::new(
         config,
@@ -72,6 +113,7 @@ pub async fn create_app_with_world(
         geo_service,
         session_registry,
         hub,
+        lobbies,
     );
 
     let router = build_router(state.clone());

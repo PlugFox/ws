@@ -1,7 +1,7 @@
 //! Mission catalogue offered by mission-board NPCs.
 //!
-//! Static for now; Phase 4 turns a selection into a lobby and a stage
-//! instance.
+//! Static for now. A selection forms a lobby (`lobby.rs`); starting it
+//! launches a stage instance of `map` (`stage.rs`).
 
 use serde::Serialize;
 

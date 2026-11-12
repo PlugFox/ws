@@ -1,9 +1,10 @@
 // Headless hub bots on the Dart VM (same package:ws client as the web app):
 // each registers, creates and selects a character, joins the hub and walks
 // in a circle around the spawn. For load tests and for watching remote
-// interpolation from a browser.
+// interpolation from a browser. With `--party CODE` the bots join that
+// mission lobby, mark themselves ready and follow the party into the stage.
 //
-//   dart run tool/bot.dart [--server http://127.0.0.1:8088] [--count 5]
+//   dart run tool/bot.dart [--server http://127.0.0.1:8088] [--count 5] [--party CODE]
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -21,11 +22,12 @@ Future<void> main(List<String> args) async {
 
   final server = Uri.parse(opt('server', 'http://127.0.0.1:8088'));
   final count = int.parse(opt('count', '5'));
+  final party = opt('party', '');
   final run = DateTime.now().millisecondsSinceEpoch % 100000;
   for (var i = 0; i < count; i++) {
     final name = 'bot${run}_$i';
     // Staggered, and one failing bot must not take the others down.
-    unawaited(_bot(server, name, i, count).catchError((Object e) => stderr.writeln('$name: $e')));
+    unawaited(_bot(server, name, i, count, party).catchError((Object e) => stderr.writeln('$name: $e')));
     await Future<void>.delayed(const Duration(milliseconds: 150));
   }
 }
@@ -41,7 +43,7 @@ Future<Map<String, Object?>> _post(HttpClient http, Uri uri, Object body, [Strin
   return text.isEmpty ? {} : jsonDecode(text) as Map<String, Object?>;
 }
 
-Future<void> _bot(Uri server, String name, int index, int count) async {
+Future<void> _bot(Uri server, String name, int index, int count, String party) async {
   final http = HttpClient();
   // Throwaway credentials for a local dev server.
   final reg = await _post(http, server.resolve('/api/auth/register'), {
@@ -55,14 +57,28 @@ Future<void> _bot(Uri server, String name, int index, int count) async {
   final ws = WebSocketClient.binary();
   double? x, y;
   double cx = 0, cy = 0;
+  void send(Map<String, Object?> msg) => ws.push(Uint8List.fromList(utf8.encode(jsonEncode(msg)))).ignore();
+  var ready = false;
   ws.messages.listen((m) {
     if (m.isNotEmpty && m[0] == 0x7B) {
       final msg = jsonDecode(utf8.decode(m)) as Map<String, Object?>;
-      if (msg['type'] == 'map_enter') {
-        x = (msg['x']! as num).toDouble();
-        y = (msg['y']! as num).toDouble();
-        cx = x!;
-        cy = y! - 4;
+      switch (msg['type']) {
+        case 'map_enter':
+          x = (msg['x']! as num).toDouble();
+          y = (msg['y']! as num).toDouble();
+          cx = x!;
+          cy = y! - 4;
+          // Join the party once, from the hub.
+          if (party.isNotEmpty && msg['map'] is Map && (msg['map']! as Map)['kind'] == 'hub' && !ready) {
+            send({'type': 'lobby_join', 'code': party});
+          }
+        case 'lobby_state' when !ready:
+          ready = true;
+          send({'type': 'lobby_ready', 'ready': true});
+        case 'stage_joined':
+          stdout.writeln('$name entered Stage-${msg['stage_id']}');
+        case 'lobby_error':
+          stderr.writeln('$name: ${msg['message']}');
       }
     }
   });

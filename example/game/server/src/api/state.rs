@@ -2,7 +2,7 @@ use crate::auth::JwtManager;
 use crate::config::AppConfig;
 use crate::geo::GeolocationService;
 use crate::session::SessionRegistry;
-use crate::world::HubDirectory;
+use crate::world::{HubDirectory, LobbyDirectory};
 use sqlx::{Pool, Sqlite};
 
 /// Shared application state injected into Axum route handlers.
@@ -15,6 +15,8 @@ pub struct AppState {
     pub session_registry: SessionRegistry,
     /// `None` when the asset pack is missing or invalid.
     pub hub: Option<HubDirectory>,
+    /// Mission lobbies and stage instances; `None` without a hub.
+    pub lobbies: Option<LobbyDirectory>,
 }
 
 impl AppState {
@@ -25,6 +27,7 @@ impl AppState {
         geo_service: GeolocationService,
         session_registry: SessionRegistry,
         hub: Option<HubDirectory>,
+        lobbies: Option<LobbyDirectory>,
     ) -> Self {
         Self {
             config,
@@ -33,6 +36,7 @@ impl AppState {
             geo_service,
             session_registry,
             hub,
+            lobbies,
         }
     }
 }

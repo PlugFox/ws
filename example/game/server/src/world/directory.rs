@@ -6,7 +6,7 @@
 //! tick, so a plain mutex is enough. Per-tick traffic (inputs, snapshots)
 //! goes straight between the socket task and the channel actor over mpsc.
 
-use super::hub::{HubEvent, HubInstance, HubSimConfig, HubWorld, Outgoing, PlayerProfile};
+use super::hub::{Arrival, HubEvent, HubInstance, HubSimConfig, HubWorld, Outgoing, PlayerProfile};
 use super::protocol::ChannelInfo;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -48,11 +48,17 @@ impl Default for HubConfig {
 
 #[derive(Debug)]
 pub enum HubCommand {
-    Join { profile: PlayerProfile, session_id: Uuid, outbox: mpsc::Sender<HubEvent> },
+    Join {
+        profile: PlayerProfile,
+        session_id: Uuid,
+        outbox: mpsc::Sender<HubEvent>,
+        arrival: Option<Arrival>,
+        epoch: u16,
+    },
     Leave { user_id: u32, session_id: Uuid },
     Input { user_id: u32, seq: u32, dx: f32, dy: f32 },
     Interact { user_id: u32, npc: String },
-    SelectMission { user_id: u32, mission: String },
+    SelectMission { user_id: u32, mission: String, public: bool },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -137,7 +143,7 @@ impl HubDirectory {
     fn spawn_channel(&self, id: u16) -> Channel {
         let (tx, rx) = mpsc::channel(COMMAND_CAPACITY);
         let hub = HubInstance::new(id, Arc::clone(&self.world), self.config.sim.clone());
-        tokio::spawn(run_channel(hub, rx));
+        tokio::spawn(run_instance(hub, rx));
         info!("Hub channel Hub-{id} started");
         Channel { commands: tx, population: 0, empty_since: None }
     }
@@ -150,6 +156,20 @@ impl HubDirectory {
         session_id: Uuid,
         preferred: Option<u16>,
         outbox: mpsc::Sender<HubEvent>,
+    ) -> Result<HubTicket, JoinError> {
+        self.join_at(profile, session_id, preferred, outbox, None, 0)
+    }
+
+    /// [`Self::join`] with an arrival spot and the player's next map epoch
+    /// (used when coming back from a stage).
+    pub fn join_at(
+        &self,
+        profile: PlayerProfile,
+        session_id: Uuid,
+        preferred: Option<u16>,
+        outbox: mpsc::Sender<HubEvent>,
+        arrival: Option<Arrival>,
+        epoch: u16,
     ) -> Result<HubTicket, JoinError> {
         let mut st = self.state.lock().unwrap();
         let user_id = profile.user_id;
@@ -187,16 +207,24 @@ impl HubDirectory {
             },
         };
 
-        if let Some(old) = st.members.remove(&user_id) {
+        // Rejoining the same channel: leave first (the Leave must not land
+        // after the new Join). Switching: join first, so a failed join keeps
+        // the old membership.
+        if current == Some(target)
+            && let Some(old) = st.members.remove(&user_id)
+        {
             self.detach(&mut st, user_id, old);
         }
         let ch = st.channels.get_mut(&target).expect("target exists");
         ch.commands
-            .try_send(HubCommand::Join { profile, session_id, outbox })
+            .try_send(HubCommand::Join { profile, session_id, outbox, arrival, epoch })
             .map_err(|_| JoinError::Unavailable)?;
         ch.population += 1;
         ch.empty_since = None;
         let commands = ch.commands.clone();
+        if let Some(old) = st.members.remove(&user_id) {
+            self.detach(&mut st, user_id, old);
+        }
         st.members.insert(user_id, Member { channel: target, session_id });
         debug!("User {user_id} joined Hub-{target}");
         Ok(HubTicket { channel: target, commands })
@@ -288,8 +316,9 @@ fn reap(state: &Mutex<DirState>, base: u16, grace: Duration, now: Instant) -> Ve
     doomed
 }
 
-/// Channel actor: applies commands as they arrive and ticks at a fixed rate.
-async fn run_channel(mut hub: HubInstance, mut commands: mpsc::Receiver<HubCommand>) {
+/// Instance actor (hub channel or stage): applies commands as they arrive and
+/// ticks at a fixed rate. Ends when every command sender is dropped.
+pub(crate) async fn run_instance(mut hub: HubInstance, mut commands: mpsc::Receiver<HubCommand>) {
     let period = Duration::from_secs_f64(1.0 / hub.tick_hz() as f64);
     let mut interval = tokio::time::interval(period);
     // Under load, skip missed ticks instead of bursting to catch up.
@@ -304,9 +333,9 @@ async fn run_channel(mut hub: HubInstance, mut commands: mpsc::Receiver<HubComma
             cmd = commands.recv() => {
                 let Some(cmd) = cmd else { break };
                 match cmd {
-                    HubCommand::Join { profile, session_id, outbox } => {
+                    HubCommand::Join { profile, session_id, outbox, arrival, epoch } => {
                         outboxes.insert(profile.user_id, outbox);
-                        hub.join(profile, session_id, &mut out);
+                        hub.join(profile, session_id, arrival, epoch, &mut out);
                     }
                     HubCommand::Leave { user_id, session_id } => {
                         if hub.leave(user_id, session_id, &mut out) {
@@ -315,8 +344,8 @@ async fn run_channel(mut hub: HubInstance, mut commands: mpsc::Receiver<HubComma
                     }
                     HubCommand::Input { user_id, seq, dx, dy } => hub.input(user_id, seq, dx, dy),
                     HubCommand::Interact { user_id, npc } => hub.interact(user_id, &npc, &mut out),
-                    HubCommand::SelectMission { user_id, mission } => {
-                        hub.select_mission(user_id, &mission, &mut out)
+                    HubCommand::SelectMission { user_id, mission, public } => {
+                        hub.select_mission(user_id, &mission, public, &mut out)
                     }
                 }
             }
@@ -333,14 +362,20 @@ fn dispatch(hub: &mut HubInstance, outboxes: &mut HashMap<u32, mpsc::Sender<HubE
         let mut evict = Vec::new();
         for (user_id, event) in out.drain(..) {
             let Some(tx) = outboxes.get(&user_id) else { continue };
+            // A transfer is the player's last event here: the instance has
+            // already removed them.
+            let last = matches!(event, HubEvent::Transfer { .. });
             match tx.try_send(event) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(HubEvent::Snapshot(_))) => {}
-                Err(mpsc::error::TrySendError::Full(HubEvent::Control(_))) => {
+                Err(mpsc::error::TrySendError::Full(_)) => {
                     warn!("Evicting user {user_id} from {}: outbox full", hub.name());
                     evict.push(user_id);
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => evict.push(user_id),
+            }
+            if last {
+                outboxes.remove(&user_id);
             }
         }
         for user_id in evict {
@@ -378,7 +413,7 @@ mod tests {
         loop {
             match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.expect("timed out").expect("closed") {
                 HubEvent::Control(m) => return m,
-                HubEvent::Snapshot(_) => continue,
+                _ => continue,
             }
         }
     }
@@ -463,14 +498,11 @@ mod tests {
 
         t1.commands.try_send(HubCommand::Input { user_id: 1, seq: 1, dx: 1.0, dy: 0.0 }).unwrap();
         let snap = loop {
-            match tokio::time::timeout(Duration::from_secs(2), rx1.recv()).await.unwrap().unwrap() {
-                HubEvent::Snapshot(b) => {
-                    let s = crate::world::protocol::Snapshot::decode(&b).unwrap();
-                    if s.ack_seq == 1 {
-                        break s;
-                    }
+            if let HubEvent::Snapshot(b) = tokio::time::timeout(Duration::from_secs(2), rx1.recv()).await.unwrap().unwrap() {
+                let s = crate::world::protocol::Snapshot::decode(&b).unwrap();
+                if s.ack_seq == 1 {
+                    break s;
                 }
-                HubEvent::Control(_) => {}
             }
         };
         assert_eq!(snap.entities.len(), 2);

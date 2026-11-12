@@ -37,6 +37,9 @@ extension type GameView._(JSObject _) implements JSObject {
   external void showDialog(String specJson);
   external void showSettings(String specJson);
 
+  /// Non-modal side panel (`PanelSpec` JSON); an empty string hides it.
+  external void showPanel(String specJson);
+
   /// Applies a partial settings JSON; returns the effective settings JSON.
   external String configure(String settingsJson);
   external void closeDialog();

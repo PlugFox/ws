@@ -1,4 +1,4 @@
-use crate::world::HubConfig;
+use crate::world::{HubConfig, StageConfig};
 use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -21,6 +21,8 @@ pub struct AppConfig {
     /// Where players appear when they join the hub.
     pub hub_entry: String,
     pub hub: HubConfig,
+    /// Stage instances (missions). Stage maps are the missions' maps.
+    pub stages: StageConfig,
     /// Built web client (`dart compile` output) served at `/`. Optional.
     pub client_dir: Option<PathBuf>,
 }
@@ -81,6 +83,10 @@ impl AppConfig {
         if let Some(max) = env::var("HUB_MAX_CHANNELS").ok().and_then(|v| v.parse().ok()) {
             hub.max_channels = max;
         }
+        let mut stages = StageConfig::default();
+        if let Some(max) = env::var("MAX_STAGES").ok().and_then(|v| v.parse().ok()) {
+            stages.max_stages = max;
+        }
 
         Self {
             host,
@@ -95,6 +101,7 @@ impl AppConfig {
             hub_maps: vec!["izlude".into(), "izlude_in".into()],
             hub_entry: "izlude".into(),
             hub,
+            stages,
             client_dir,
         }
     }
@@ -114,6 +121,7 @@ impl AppConfig {
             hub_maps: vec!["izlude".into(), "izlude_in".into()],
             hub_entry: "izlude".into(),
             hub: HubConfig::default(),
+            stages: StageConfig::default(),
             client_dir: None,
         }
     }

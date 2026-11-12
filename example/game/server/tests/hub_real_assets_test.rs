@@ -58,13 +58,14 @@ fn bfs(map: &MapData, from: (f32, f32), goal: impl Fn(u32, u32) -> bool) -> Opti
 }
 
 /// Steers player `user` along `path` with intents only, the way a client
-/// would. Stops early when the player changes map. Returns the events.
+/// would. Stops early when the player changes map or leaves the instance.
+/// Returns the events.
 fn follow(hub: &mut HubInstance, user: u32, seq: &mut u32, path: &[(f32, f32)]) -> Vec<(u32, HubEvent)> {
     let mut out = Vec::new();
     let start_map = hub.position_of(user).unwrap().0.to_string();
     for &(tx, ty) in path {
         for _ in 0..40 {
-            let (map, x, y) = hub.position_of(user).unwrap();
+            let Some((map, x, y)) = hub.position_of(user) else { return out };
             if map != start_map {
                 return out;
             }
@@ -127,6 +128,8 @@ fn walk_through_every_house_door_and_back() {
     hub.join(
         PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into() },
         Uuid::nil(),
+        None,
+        0,
         &mut out,
     );
     let mut seq = 0;
@@ -209,6 +212,8 @@ fn field_portal_is_denied_in_the_hub() {
     hub.join(
         PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into() },
         Uuid::nil(),
+        None,
+        0,
         &mut out,
     );
     let city = world.map(city_idx);
@@ -218,4 +223,36 @@ fn field_portal_is_denied_in_the_hub() {
     let events = follow(&mut hub, 1, &mut seq, &path);
     assert!(events.iter().any(|(_, e)| matches!(e, HubEvent::Control(ServerMsg::PortalDenied { target_map, .. }) if target_map == "prt_fild08")));
     assert_eq!(hub.position_of(1).unwrap().0, "izlude");
+}
+
+#[test]
+fn stage_on_prt_fild08_exits_to_izlude_arrival() {
+    let Some(dir) = dist() else { return };
+    let hub = load_world().unwrap();
+    let stage_world = Arc::new(HubWorld::load(&dir, &["prt_fild08".into()], "prt_fild08").expect("stage map loads"));
+    let field = stage_world.map(stage_world.entry());
+    let exit = field.manifest.portals.iter().find(|p| p.target_map == "izlude").expect("field has an exit to izlude");
+    assert!(
+        matches!(stage_world.link(stage_world.entry(), 0), PortalLink::External { .. }),
+        "the hub map is outside the stage world"
+    );
+    // The hub side of the exit must be a walkable spot in izlude.
+    let izlude = hub.map(hub.map_index("izlude").unwrap());
+    let [ax, ay] = exit.target_pos;
+    assert!(izlude.walk.is_walkable_cell(ax as i32, ay as i32), "arrival ({ax},{ay}) is walkable in izlude");
+
+    let mut stage = HubInstance::stage(1, "poring_island_survival", Arc::clone(&stage_world), HubSimConfig::default());
+    let mut out = Vec::new();
+    let walker = PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into() };
+    stage.join(walker, Uuid::nil(), None, 0, &mut out);
+    let path = bfs(field, field.spawn, |cx, cy| exit.contains(cx as f32 + 0.5, cy as f32 + 0.5))
+        .expect("the exit is reachable from the stage spawn");
+    let mut seq = 0;
+    let events = follow(&mut stage, 1, &mut seq, &path);
+    assert!(
+        events.iter().any(|(_, e)| matches!(e, HubEvent::Transfer { target_map, arrival }
+            if target_map == "izlude" && *arrival == (ax as f32 + 0.5, ay as f32 + 0.5))),
+        "walking into the exit transfers to izlude"
+    );
+    assert_eq!(stage.population(), 0);
 }

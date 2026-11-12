@@ -23,5 +23,5 @@ Open http://127.0.0.1:8080, register, create a character and select it.
 WASD/arrows move, Q/E or right-drag rotate the camera (free maps only), the
 wheel zooms, F talks to the NPC in range, F10 opens the settings.
 
-Bots: `dart run tool/bot.dart --server http://127.0.0.1:8080 --count 10`.
+Bots: `dart run tool/bot.dart --server http://127.0.0.1:8080 --count 10`. Add `--party CODE` to have them join a mission lobby (the code is shown in the party panel), mark ready and follow the party into the stage.
 Tests: `dart test`.

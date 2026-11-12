@@ -66,6 +66,13 @@ final class HubSession {
   String _myName;
   String _myArchetype = 'novice';
   String _channel = '-';
+
+  /// In a stage instance (not the hub).
+  bool _inStage = false;
+
+  /// Current lobby (`lobby_state.lobby`), or null.
+  Map<String, Object?>? _lobby;
+  String _missionName = '';
   int _tickHz = 20;
   String _mapId = '';
   String _mapName = '';
@@ -166,6 +173,34 @@ final class HubSession {
         _channel = msg['channel_name']! as String;
         _tickHz = (msg['tick_rate']! as num).toInt();
         _clock = ServerClock(tickHz: _tickHz);
+        if (_inStage) {
+          _inStage = false;
+          view.showPanel('');
+        }
+      case 'stage_joined':
+        _me = (msg['entity_id']! as num).toInt();
+        _channel = 'Stage-${msg['stage_id']}';
+        _tickHz = (msg['tick_rate']! as num).toInt();
+        _clock = ServerClock(tickHz: _tickHz);
+        _inStage = true;
+        _renderStagePanel();
+      case 'lobby_state':
+        _lobby = msg['lobby']! as Map<String, Object?>;
+        _missionName = (_lobby!['mission']! as Map<String, Object?>)['name']! as String;
+        _renderLobby();
+      case 'lobby_left':
+        _lobby = null;
+        if (!_inStage) view.showPanel('');
+        switch (msg['reason']) {
+          case 'kicked':
+            view.toast('You were removed from the party.');
+          case 'replaced':
+            view.toast('Your party moved to another tab.');
+          case 'launched':
+            view.toast('$_missionName is starting!');
+        }
+      case 'lobby_error':
+        view.toast('${msg['message']}');
       case 'map_enter':
         _onMapEnter(msg).catchError((Object e, StackTrace st) {
           web.console.error('map_enter failed: $e\n$st'.toJS);
@@ -173,8 +208,10 @@ final class HubSession {
         });
       case 'player_appeared':
         _addPeer(msg['player']! as Map<String, Object?>);
+        if (_inStage) _renderStagePanel();
       case 'player_vanished':
         _removePeer((msg['entity_id']! as num).toInt());
+        if (_inStage) _renderStagePanel();
       case 'portal_denied':
         view.toast('${msg['target_map']} is reached through the mission board.');
       case 'npc_dialog':
@@ -278,7 +315,12 @@ final class HubSession {
     final bgm = map['bgm'] as String?;
     view.playBgm(bgm == null ? null : '$assetsBase/client/$bgm');
     _loading = false;
-    if (msg['via_portal'] == null) view.toast('Welcome to $_mapName ($_channel). WASD to move, F to talk.');
+    if (_inStage) {
+      _renderStagePanel();
+      view.toast('$_mapName: the mission has begun. Walk to the exit or use the panel to return.');
+    } else if (msg['via_portal'] == null) {
+      view.toast('Welcome to $_mapName ($_channel). WASD to move, F to talk.');
+    }
   }
 
   void _addPeer(Map<String, Object?> p) {
@@ -347,25 +389,124 @@ final class HubSession {
     final missions = (msg['missions']! as List).cast<Map<String, Object?>>();
     final isBoard = msg['kind'] == 'mission_board';
     _settingsOpen = false;
+    final inLobby = _lobby != null;
     view.showDialog(
       jsonEncode({
         'id': 'npc:${msg['npc']}',
         'title': msg['name'],
-        'text': isBoard ? 'Pick a mission. Parties of up to four.' : 'Hello there.',
+        'text': !isBoard
+            ? 'Hello there.'
+            : inLobby
+            ? 'You are already in a party. Leave it to pick another mission.'
+            : 'Pick a mission. Parties of up to four.',
         'options': [
-          for (final m in missions)
-            {'id': m['id'], 'label': m['name'], 'detail': '${m['description']} (up to ${m['max_players']} players)'},
+          if (isBoard && !inLobby)
+            for (final m in missions) ...[
+              {
+                'id': 'public:${m['id']}',
+                'label': '${m['name']}: find a party',
+                'detail': '${m['description']} Joins an open public party or starts one (up to ${m['max_players']}).',
+              },
+              {
+                'id': 'private:${m['id']}',
+                'label': '${m['name']}: private party',
+                'detail': 'Only players with your party code can join.',
+              },
+            ],
+        ],
+        if (isBoard && !inLobby)
+          'input': {'id': 'code', 'label': 'Join', 'placeholder': 'Party code', 'maxLength': 8},
+      }),
+    );
+  }
+
+  /// Party lobby panel: members with ready state, ready/start/leave.
+  void _renderLobby() {
+    final lobby = _lobby;
+    if (lobby == null) return;
+    final members = (lobby['members']! as List).cast<Map<String, Object?>>();
+    final mission = lobby['mission']! as Map<String, Object?>;
+    final me = members.where((m) => m['entity_id'] == _me).firstOrNull;
+    final leader = me?['leader'] == true;
+    final othersReady = members.where((m) => m['leader'] != true).every((m) => m['ready'] == true);
+    final max = mission['max_players'];
+    view.showPanel(
+      jsonEncode({
+        'id': 'lobby',
+        'title': mission['name'],
+        'subtitle': '${lobby['public'] == true ? 'Public' : 'Private'} party · code ${lobby['code']} · ${members.length}/$max',
+        'rows': [
+          for (final m in members)
+            {
+              'id': '${m['entity_id']}',
+              'text': m['name'],
+              'detail': m['entity_id'] == _me ? '(you)' : null,
+              'tag': m['leader'] == true ? 'leader' : (m['ready'] == true ? 'ready' : 'not ready'),
+              'tagKind': m['leader'] == true ? 'lead' : (m['ready'] == true ? 'ok' : 'wait'),
+              if (leader && m['entity_id'] != _me) 'action': {'id': 'kick', 'label': 'Kick'},
+            },
+        ],
+        'actions': [
+          if (leader)
+            {'id': 'start', 'label': othersReady ? 'Start' : 'Waiting…', 'primary': true, 'disabled': !othersReady}
+          else
+            {'id': me?['ready'] == true ? 'unready' : 'ready', 'label': me?['ready'] == true ? 'Not ready' : 'Ready', 'primary': me?['ready'] != true},
+          {'id': 'leave', 'label': 'Leave'},
         ],
       }),
     );
+  }
+
+  /// In-stage panel: who is here and the way back.
+  void _renderStagePanel() {
+    view.showPanel(
+      jsonEncode({
+        'id': 'stage',
+        'title': _missionName.isEmpty ? _mapName : _missionName,
+        'subtitle': '$_channel · $_mapName',
+        'rows': [
+          {'text': _myName, 'detail': '(you)'},
+          for (final p in _peers.values) {'text': p.name},
+        ],
+        'actions': [
+          {'id': 'return', 'label': 'Return to town'},
+        ],
+      }),
+    );
+  }
+
+  void _onPanelAction(String panel, String action, String? row) {
+    switch ((panel, action)) {
+      case ('lobby', 'ready'):
+        _send({'type': 'lobby_ready', 'ready': true});
+      case ('lobby', 'unready'):
+        _send({'type': 'lobby_ready', 'ready': false});
+      case ('lobby', 'start'):
+        _send({'type': 'lobby_start'});
+      case ('lobby', 'leave'):
+        _send({'type': 'lobby_leave'});
+      case ('lobby', 'kick'):
+        final id = int.tryParse(row ?? '');
+        if (id != null) _send({'type': 'lobby_kick', 'entity_id': id});
+      case ('stage', 'return'):
+        _send({'type': 'stage_leave'});
+    }
   }
 
   void _onUiEvent(String json) {
     final e = jsonDecode(json) as Map<String, Object?>;
     switch (e['type']) {
       case 'dialog_choice':
-        _send({'type': 'mission_select', 'mission': e['option']});
+        final option = e['option']! as String;
+        if (option == 'code') {
+          _send({'type': 'lobby_join', 'code': e['value']});
+        } else if (option.startsWith('public:') || option.startsWith('private:')) {
+          final i = option.indexOf(':');
+          _send({'type': 'mission_select', 'mission': option.substring(i + 1), 'public': option.startsWith('public:')});
+        }
         view.closeDialog();
+      case 'panel_action':
+        _onPanelAction(e['panel']! as String, e['action']! as String, e['row'] as String?);
       case 'setting':
         _applySetting(e['id']! as String, e['value']);
       case 'dialog_close':

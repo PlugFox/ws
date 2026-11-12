@@ -6,7 +6,7 @@ use game_server::world::map::{
     WalkGrid,
 };
 use game_server::world::{HubWorld, Snapshot};
-use game_server::{config::AppConfig, create_app_with_world, api::AppState};
+use game_server::{config::AppConfig, create_app_with_worlds, api::AppState};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -61,8 +61,32 @@ fn synthetic_world() -> HubWorld {
     HubWorld::new(vec![town, house], "town").unwrap()
 }
 
+/// Stage world for `poring_island_survival` (map id `prt_fild08`): a small
+/// field whose west exit leads to the town at (3,3).
+fn synthetic_stage() -> HubWorld {
+    let walk = WalkGrid::from_ascii(&["##########", "#........#", "#........#", "#........#", "##########"]);
+    let (w, h) = (walk.width(), walk.height());
+    let manifest = LocationManifest {
+        id: "prt_fild08".into(),
+        name: "Field".into(),
+        kind: LocationKind::Field,
+        dimensions: Dimensions { width: w, height: h, cell_size: 0.5 },
+        height_bounds: HeightBounds { min: 0.0, max: 0.0 },
+        camera: CameraConstraint::Free { pitch: -45.0, min_zoom: 10.0, max_zoom: 50.0, default_zoom: 28.0 },
+        portals: vec![PortalDef { name: "to_town".into(), trigger: [1, 2, 1], target_map: "town".into(), target_pos: [3, 3] }],
+        bgm: None,
+        npcs: Vec::new(),
+    };
+    HubWorld::new(vec![MapData::new(manifest, walk, Heightmap::flat(w, h)).unwrap()], "prt_fild08").unwrap()
+}
+
 async fn start() -> (SocketAddr, AppState) {
-    let (app, state) = create_app_with_world(AppConfig::test_config(), Some(synthetic_world())).await.unwrap();
+    start_with(Vec::new()).await
+}
+
+async fn start_with(stages: Vec<HubWorld>) -> (SocketAddr, AppState) {
+    let (app, state) =
+        create_app_with_worlds(AppConfig::test_config(), Some(synthetic_world()), stages).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await.unwrap() });
@@ -129,8 +153,12 @@ async fn next_json(ws: &mut Ws) -> Value {
     }
 }
 
+/// Next text frame of type `ty`; fails after 5 s overall (snapshots keep
+/// arriving, so a per-frame timeout alone would never fire).
 async fn next_json_of(ws: &mut Ws, ty: &str) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
+        assert!(tokio::time::Instant::now() < deadline, "no {ty} within 5 s");
         let v = next_json(ws).await;
         if v["type"] == ty {
             return v;
@@ -314,6 +342,154 @@ async fn binary_frames_and_mission_board() {
     assert_eq!(dialog["kind"], "mission_board");
     assert_eq!(dialog["missions"][0]["id"], "poring_island_survival");
 
+    // This server has no stage maps loaded.
     send(&mut ws, json!({ "type": "mission_select", "mission": "poring_island_survival" })).await;
-    assert_eq!(next_json_of(&mut ws, "hub_error").await["code"], "mission_unavailable");
+    assert_eq!(next_json_of(&mut ws, "lobby_error").await["code"], "mission_unavailable");
+}
+
+#[tokio::test]
+async fn lobby_ready_check_stage_launch_and_return() {
+    let (addr, state) = start_with(vec![synthetic_stage()]).await;
+    let (ta, a_id) = player(addr, "erin", true).await;
+    let (tb, b_id) = player(addr, "finn", true).await;
+    let mut a = connect(addr, &ta).await;
+    let mut b = connect(addr, &tb).await;
+    for ws in [&mut a, &mut b] {
+        send(ws, json!({ "type": "hub_join" })).await;
+        next_json_of(ws, "map_enter").await;
+    }
+
+    // Lobby messages only from the hub, and missions only at a board.
+    send(&mut a, json!({ "type": "lobby_ready", "ready": true })).await;
+    assert_eq!(next_json_of(&mut a, "lobby_error").await["code"], "not_in_lobby");
+
+    // Both pick the public mission: they land in one lobby, erin leads.
+    send(&mut a, json!({ "type": "mission_select", "mission": "poring_island_survival" })).await;
+    let lobby = next_json_of(&mut a, "lobby_state").await["lobby"].clone();
+    assert_eq!(lobby["members"].as_array().unwrap().len(), 1);
+    send(&mut b, json!({ "type": "mission_select", "mission": "poring_island_survival", "public": true })).await;
+    let lobby = next_json_of(&mut b, "lobby_state").await["lobby"].clone();
+    let members = lobby["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0]["entity_id"], a_id);
+    assert_eq!(members[0]["leader"], true);
+
+    // Ready check: finn is not ready yet.
+    send(&mut a, json!({ "type": "lobby_start" })).await;
+    assert_eq!(next_json_of(&mut a, "lobby_error").await["code"], "not_ready");
+    send(&mut b, json!({ "type": "lobby_ready", "ready": true })).await;
+    loop {
+        let l = next_json_of(&mut a, "lobby_state").await;
+        if l["lobby"]["members"][1]["ready"] == true {
+            break;
+        }
+    }
+    send(&mut a, json!({ "type": "lobby_start" })).await;
+
+    // Both move to the same stage; epochs keep rising across instances.
+    let mut stage_ids = Vec::new();
+    for ws in [&mut a, &mut b] {
+        assert_eq!(next_json_of(ws, "lobby_left").await["reason"], "launched");
+        let joined = next_json_of(ws, "stage_joined").await;
+        assert_eq!(joined["mission"], "poring_island_survival");
+        stage_ids.push(joined["stage_id"].as_u64().unwrap());
+        let enter = next_json_of(ws, "map_enter").await;
+        assert_eq!(enter["map"]["id"], "prt_fild08");
+        assert_eq!(enter["map"]["kind"], "field");
+        assert!(enter["map_epoch"].as_u64().unwrap() >= 1, "epoch continues after the hub's 0");
+    }
+    assert_eq!(stage_ids[0], stage_ids[1]);
+    let lobbies = state.lobbies.as_ref().unwrap();
+    assert_eq!(lobbies.stages().active(), 1);
+    assert_eq!(state.hub.as_ref().unwrap().channels()[0].population, 0, "the party left the hub");
+    let snap = next_snapshot(&mut a, |s| s.entities.len() == 2).await;
+    assert!(snap.entities.iter().any(|e| e.0 == b_id as u32));
+
+    // finn walks west into the exit and returns to the town at (3,3).
+    // Paced like a client (one input per tick), so the held direction never
+    // times out on the way.
+    let mut seq = 0u32;
+    let joined = loop {
+        seq += 1;
+        assert!(seq < 100, "never reached the exit");
+        send(&mut b, json!({ "type": "hub_input", "seq": seq, "dx": -1, "dy": 0 })).await;
+        if let Ok(Some(Ok(Message::Text(t)))) = tokio::time::timeout(Duration::from_millis(50), b.next()).await {
+            let v: Value = serde_json::from_str(&t).unwrap();
+            if v["type"] == "hub_joined" {
+                break v;
+            }
+        }
+    };
+    assert_eq!(joined["channel"], 1, "back to the channel they came from");
+    let enter = next_json_of(&mut b, "map_enter").await;
+    assert_eq!(enter["map"]["id"], "town");
+    assert_eq!((enter["x"].as_f64().unwrap(), enter["y"].as_f64().unwrap()), (3.5, 3.5));
+    assert_eq!(next_json_of(&mut a, "player_vanished").await["entity_id"], b_id);
+
+    // erin abandons the stage from the panel: the stage ends.
+    send(&mut a, json!({ "type": "stage_leave" })).await;
+    next_json_of(&mut a, "hub_joined").await;
+    assert_eq!(next_json_of(&mut a, "map_enter").await["map"]["id"], "town");
+    assert_eq!(lobbies.stages().active(), 0, "the stage ended with its last player");
+    assert_eq!(state.hub.as_ref().unwrap().channels()[0].population, 2);
+}
+
+#[tokio::test]
+async fn private_lobby_by_code_and_disconnect_promotes() {
+    let (addr, state) = start_with(vec![synthetic_stage()]).await;
+    let (ta, _) = player(addr, "gwen", true).await;
+    let (tb, b_id) = player(addr, "hugo", true).await;
+    let mut a = connect(addr, &ta).await;
+    let mut b = connect(addr, &tb).await;
+    for ws in [&mut a, &mut b] {
+        send(ws, json!({ "type": "hub_join" })).await;
+        next_json_of(ws, "map_enter").await;
+    }
+    send(&mut a, json!({ "type": "mission_select", "mission": "poring_island_survival", "public": false })).await;
+    let lobby = next_json_of(&mut a, "lobby_state").await["lobby"].clone();
+    assert_eq!(lobby["public"], false);
+    let code = lobby["code"].as_str().unwrap().to_string();
+
+    // Public matchmaking does not find it; the code does.
+    send(&mut b, json!({ "type": "lobby_join", "code": "NOPE1" })).await;
+    assert_eq!(next_json_of(&mut b, "lobby_error").await["code"], "no_such_lobby");
+    send(&mut b, json!({ "type": "lobby_join", "code": code.to_lowercase() })).await;
+    let lobby = next_json_of(&mut b, "lobby_state").await["lobby"].clone();
+    assert_eq!(lobby["members"].as_array().unwrap().len(), 2);
+
+    // The leader's socket drops: hugo leads the lobby now.
+    a.close(None).await.unwrap();
+    let lobby = next_json_of(&mut b, "lobby_state").await["lobby"].clone();
+    let members = lobby["members"].as_array().unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!((members[0]["entity_id"].as_u64().unwrap(), members[0]["leader"].as_bool().unwrap()), (b_id, true));
+    send(&mut b, json!({ "type": "lobby_leave" })).await;
+    assert_eq!(next_json_of(&mut b, "lobby_left").await["reason"], "left");
+    assert_eq!(state.lobbies.as_ref().unwrap().open_lobbies(), 0);
+}
+
+/// Two sockets with the same access token (a reconnect over a half-dead
+/// connection): the stale socket's cleanup must not remove the new one from
+/// the hub or its lobby.
+#[tokio::test]
+async fn stale_socket_with_same_token_does_not_evict_successor() {
+    let (addr, state) = start_with(vec![synthetic_stage()]).await;
+    let (token, _) = player(addr, "ivy", true).await;
+    let mut old = connect(addr, &token).await;
+    send(&mut old, json!({ "type": "hub_join" })).await;
+    next_json_of(&mut old, "map_enter").await;
+
+    let mut new = connect(addr, &token).await;
+    send(&mut new, json!({ "type": "hub_join" })).await;
+    next_json_of(&mut new, "map_enter").await;
+    send(&mut new, json!({ "type": "mission_select", "mission": "poring_island_survival", "public": false })).await;
+    next_json_of(&mut new, "lobby_state").await;
+
+    old.close(None).await.unwrap();
+    drop(old);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(state.hub.as_ref().unwrap().channels()[0].population, 1, "successor still in the hub");
+    assert_eq!(state.lobbies.as_ref().unwrap().open_lobbies(), 1, "successor's lobby survives");
+    // And the new socket still gets snapshots.
+    next_snapshot(&mut new, |_| true).await;
 }

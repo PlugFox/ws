@@ -1,4 +1,5 @@
-//! Hub simulation: one channel of the social town (city + interiors).
+//! Walkable-world simulation: one hub channel of the social town (city +
+//! interiors), or one stage instance of a mission.
 //!
 //! [`HubInstance`] is a pure, deterministic state machine: commands go in,
 //! [`Outgoing`] events come out, and [`HubInstance::tick`] advances time by one
@@ -184,6 +185,31 @@ impl HubPlayer {
 pub enum HubEvent {
     Control(ServerMsg),
     Snapshot(Bytes),
+    /// Internal (not sent to the client): the player picked a mission at a
+    /// board; the socket task hands it to the lobby directory.
+    MissionChosen { mission: String, public: bool },
+    /// Internal: the player left this instance through a portal into a map
+    /// owned by someone else (stage → hub). The instance has already removed
+    /// the player; the socket task joins the target.
+    Transfer { target_map: String, arrival: (f32, f32) },
+}
+
+/// What an instance simulates.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InstanceKind {
+    /// Hub channel `Hub-<id>`: external portals are denied (stages are
+    /// entered through the mission board).
+    Hub { channel: u16 },
+    /// Stage instance of a mission: external portals lead back to the hub.
+    Stage { stage_id: u32, mission: String },
+}
+
+/// Where a joining player appears instead of the entry spawn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Arrival {
+    pub map: String,
+    pub x: f32,
+    pub y: f32,
 }
 
 pub type Outgoing = Vec<(u32, HubEvent)>;
@@ -196,7 +222,7 @@ pub enum JoinOutcome {
 }
 
 pub struct HubInstance {
-    channel: u16,
+    kind: InstanceKind,
     name: String,
     world: Arc<HubWorld>,
     config: HubSimConfig,
@@ -218,12 +244,26 @@ pub fn facing_of(dx: f32, dy: f32) -> u8 {
 }
 
 impl HubInstance {
+    /// A hub channel.
     pub fn new(channel: u16, world: Arc<HubWorld>, config: HubSimConfig) -> Self {
-        Self { channel, name: format!("Hub-{channel}"), world, config, players: Vec::new(), tick: 0 }
+        Self::with_kind(InstanceKind::Hub { channel }, world, config)
     }
 
-    pub fn channel(&self) -> u16 {
-        self.channel
+    /// A stage instance of `mission`.
+    pub fn stage(stage_id: u32, mission: &str, world: Arc<HubWorld>, config: HubSimConfig) -> Self {
+        Self::with_kind(InstanceKind::Stage { stage_id, mission: mission.into() }, world, config)
+    }
+
+    fn with_kind(kind: InstanceKind, world: Arc<HubWorld>, config: HubSimConfig) -> Self {
+        let name = match &kind {
+            InstanceKind::Hub { channel } => format!("Hub-{channel}"),
+            InstanceKind::Stage { stage_id, .. } => format!("Stage-{stage_id}"),
+        };
+        Self { kind, name, world, config, players: Vec::new(), tick: 0 }
+    }
+
+    pub fn kind(&self) -> &InstanceKind {
+        &self.kind
     }
 
     pub fn name(&self) -> &str {
@@ -254,7 +294,18 @@ impl HubInstance {
         })
     }
 
-    pub fn join(&mut self, profile: PlayerProfile, session_id: Uuid, out: &mut Outgoing) -> JoinOutcome {
+    /// Adds a player. `arrival` places them on a given walkable spot (e.g.
+    /// the hub side of the stage exit) instead of the entry spawn; an unknown
+    /// map or blocked cell falls back to the spawn. `epoch` seeds the
+    /// player's map epoch so it keeps increasing across instances.
+    pub fn join(
+        &mut self,
+        profile: PlayerProfile,
+        session_id: Uuid,
+        arrival: Option<Arrival>,
+        epoch: u16,
+        out: &mut Outgoing,
+    ) -> JoinOutcome {
         let user_id = profile.user_id;
         let outcome = if self.find(user_id).is_some() {
             self.remove(user_id, out);
@@ -262,13 +313,20 @@ impl HubInstance {
         } else {
             JoinOutcome::Joined
         };
-        let entry = self.world.entry();
-        let (x, y) = self.world.map(entry).spawn;
+        let placed = arrival.and_then(|a| {
+            let idx = self.world.map_index(&a.map)?;
+            self.world.map(idx).walk.is_walkable(a.x, a.y).then_some((idx, a.x, a.y))
+        });
+        let (map, x, y) = placed.unwrap_or_else(|| {
+            let entry = self.world.entry();
+            let (x, y) = self.world.map(entry).spawn;
+            (entry, x, y)
+        });
         let player = HubPlayer {
             profile,
             session_id,
-            map: entry,
-            map_epoch: 0,
+            map,
+            map_epoch: epoch,
             x,
             y,
             dir: (0.0, 0.0),
@@ -278,15 +336,21 @@ impl HubInstance {
             last_input_tick: self.tick,
             portal_guard: true,
         };
-        out.push((
-            user_id,
-            HubEvent::Control(ServerMsg::HubJoined {
-                channel: self.channel,
+        let joined = match &self.kind {
+            InstanceKind::Hub { channel } => ServerMsg::HubJoined {
+                channel: *channel,
                 channel_name: self.name.clone(),
                 tick_rate: self.config.tick_hz,
                 entity_id: player.profile.character_id,
-            }),
-        ));
+            },
+            InstanceKind::Stage { stage_id, mission } => ServerMsg::StageJoined {
+                stage_id: *stage_id,
+                mission: mission.clone(),
+                tick_rate: self.config.tick_hz,
+                entity_id: player.profile.character_id,
+            },
+        };
+        out.push((user_id, HubEvent::Control(joined)));
         self.players.push(player);
         let idx = self.players.len() - 1;
         self.announce_arrival(idx, None, out);
@@ -363,10 +427,10 @@ impl HubInstance {
         out.push((user_id, HubEvent::Control(reply)));
     }
 
-    /// Validates a mission choice made at a board. Lobbies and stage
-    /// instances are Phase 4, so a valid choice is answered with
-    /// `mission_unavailable` for now.
-    pub fn select_mission(&mut self, user_id: u32, mission: &str, out: &mut Outgoing) {
+    /// Validates a mission choice made at a board (position and mission id);
+    /// a valid choice goes to the socket task as [`HubEvent::MissionChosen`],
+    /// which forms or joins a lobby.
+    pub fn select_mission(&mut self, user_id: u32, mission: &str, public: bool, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
         let p = &self.players[i];
         let at_board = self
@@ -376,18 +440,15 @@ impl HubInstance {
             .npcs
             .iter()
             .any(|n| n.kind == MISSION_BOARD && n.in_reach(p.x, p.y));
-        let reply = if !at_board {
-            hub_error("npc_too_far", "stand at a mission board to pick a mission")
+        let event = if !at_board {
+            HubEvent::Control(hub_error("npc_too_far", "stand at a mission board to pick a mission"))
         } else {
             match missions::find(mission) {
-                None => hub_error("unknown_mission", format!("no mission {mission}")),
-                Some(m) => hub_error(
-                    "mission_unavailable",
-                    format!("{}: co-op lobbies are not open yet", m.name),
-                ),
+                None => HubEvent::Control(hub_error("unknown_mission", format!("no mission {mission}"))),
+                Some(m) => HubEvent::MissionChosen { mission: m.id.into(), public },
             }
         };
-        out.push((user_id, HubEvent::Control(reply)));
+        out.push((user_id, event));
     }
 
     /// Advances the simulation by one fixed step and emits snapshots.
@@ -427,7 +488,9 @@ impl HubInstance {
             }
         }
 
-        for (idx, portal) in transitions {
+        // Descending: a stage exit swap-removes the player, which only moves
+        // an already-processed (higher) index into its slot.
+        for (idx, portal) in transitions.into_iter().rev() {
             self.use_portal(idx, portal, out);
         }
         self.emit_snapshots(out);
@@ -438,6 +501,16 @@ impl HubInstance {
         let from = self.players[idx].map;
         let def = &world.map(from).manifest.portals[portal];
         match world.link(from, portal) {
+            PortalLink::External { target_map } if matches!(self.kind, InstanceKind::Stage { .. }) => {
+                // Leaving the stage: the hub owns the target map.
+                let user_id = self.players[idx].profile.user_id;
+                let [ax, ay] = def.target_pos;
+                self.remove(user_id, out);
+                out.push((
+                    user_id,
+                    HubEvent::Transfer { target_map: target_map.clone(), arrival: (ax as f32 + 0.5, ay as f32 + 0.5) },
+                ));
+            }
             PortalLink::External { target_map } => {
                 let p = &mut self.players[idx];
                 p.portal_guard = true;
@@ -633,7 +706,7 @@ mod tests {
     fn mission_board_requires_standing_next_to_it() {
         let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
         let mut out = Vec::new();
-        hub.join(profile(1), Uuid::nil(), &mut out);
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         out.clear();
         let code = |out: &Outgoing| match controls_for(out, 1).last() {
             Some(ServerMsg::HubError { code, .. }) => code.clone(),
@@ -642,7 +715,7 @@ mod tests {
 
         hub.interact(1, "board", &mut out);
         assert_eq!(code(&out), "npc_too_far");
-        hub.select_mission(1, "poring_island_survival", &mut out);
+        hub.select_mission(1, "poring_island_survival", true, &mut out);
         assert_eq!(code(&out), "npc_too_far");
         hub.interact(1, "nobody", &mut out);
         assert_eq!(code(&out), "no_such_npc");
@@ -662,17 +735,21 @@ mod tests {
             }
             other => panic!("expected npc_dialog, got {other:?}"),
         }
-        hub.select_mission(1, "nope", &mut out);
+        hub.select_mission(1, "nope", true, &mut out);
         assert_eq!(code(&out), "unknown_mission");
-        hub.select_mission(1, "poring_island_survival", &mut out);
-        assert_eq!(code(&out), "mission_unavailable");
+        out.clear();
+        hub.select_mission(1, "poring_island_survival", false, &mut out);
+        assert!(
+            matches!(&out[..], [(1, HubEvent::MissionChosen { mission, public: false })] if mission == "poring_island_survival"),
+            "{out:?}"
+        );
     }
 
     #[test]
     fn join_sends_joined_then_map_enter_with_camera() {
         let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
         let mut out = Vec::new();
-        assert_eq!(hub.join(profile(1), Uuid::nil(), &mut out), JoinOutcome::Joined);
+        assert_eq!(hub.join(profile(1), Uuid::nil(), None, 0, &mut out), JoinOutcome::Joined);
         let msgs = controls_for(&out, 1);
         assert!(matches!(&msgs[0], ServerMsg::HubJoined { channel: 1, channel_name, entity_id: 101, .. } if channel_name == "Hub-1"));
         match &msgs[1] {
@@ -689,7 +766,7 @@ mod tests {
     fn walls_block_and_player_slides_along_them() {
         let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
         let mut out = Vec::new();
-        hub.join(profile(1), Uuid::nil(), &mut out);
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         let mut seq = 0;
         // Walk north-west into the corner for 3 s: must stop at the walls.
         walk_until(&mut hub, 1, &mut seq, (-1.0, 1.0), 60, &mut out, |_| false);
@@ -708,7 +785,7 @@ mod tests {
     fn input_validation_and_timeout() {
         let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
         let mut out = Vec::new();
-        hub.join(profile(1), Uuid::nil(), &mut out);
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         let (_, x0, y0) = hub.position_of(1).unwrap();
 
         hub.input(1, 1, f32::NAN, 0.0);
@@ -738,7 +815,7 @@ mod tests {
     fn portal_moves_player_and_guard_prevents_bounce() {
         let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
         let mut out = Vec::new();
-        hub.join(profile(1), Uuid::nil(), &mut out);
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         let mut seq = 0;
         out.clear();
         let entered = walk_until(&mut hub, 1, &mut seq, (1.0, 0.0), 100, &mut out, |h| {
@@ -780,7 +857,7 @@ mod tests {
     fn external_portal_is_denied_once() {
         let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
         let mut out = Vec::new();
-        hub.join(profile(1), Uuid::nil(), &mut out);
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         let mut seq = 0;
         out.clear();
         walk_until(&mut hub, 1, &mut seq, (-1.0, 0.0), 80, &mut out, |_| false);
@@ -797,9 +874,9 @@ mod tests {
     fn visibility_is_per_map() {
         let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
         let mut out = Vec::new();
-        hub.join(profile(1), Uuid::nil(), &mut out);
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         out.clear();
-        hub.join(profile(2), Uuid::nil(), &mut out);
+        hub.join(profile(2), Uuid::nil(), None, 0, &mut out);
         // 1 sees 2 appear; 2's map_enter lists 1.
         assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::PlayerAppeared { player } if player.entity_id == 102)));
         assert!(controls_for(&out, 2).iter().any(|m| matches!(m, ServerMsg::MapEnter { players, .. } if players.len() == 1)));
@@ -828,12 +905,68 @@ mod tests {
         let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
         let (old, new) = (Uuid::from_u128(1), Uuid::from_u128(2));
         let mut out = Vec::new();
-        hub.join(profile(1), old, &mut out);
-        assert_eq!(hub.join(profile(1), new, &mut out), JoinOutcome::Replaced);
+        hub.join(profile(1), old, None, 0, &mut out);
+        assert_eq!(hub.join(profile(1), new, None, 0, &mut out), JoinOutcome::Replaced);
         assert_eq!(hub.population(), 1);
         assert!(!hub.leave(1, old, &mut out), "old socket's late leave must not kick the new one");
         assert!(hub.leave(1, new, &mut out));
         assert_eq!(hub.population(), 0);
+    }
+
+    /// One-map stage whose west exit leads to the hub's `town` at (3,3).
+    fn stage_world() -> HubWorld {
+        let field = map(
+            "field",
+            LocationKind::Field,
+            CameraConstraint::Free { pitch: -45.0, min_zoom: 10.0, max_zoom: 40.0, default_zoom: 20.0 },
+            &["#########", "#.......#", "#.......#", "#.......#", "#########"],
+            vec![portal("to_town", [1, 2, 1], "town", [3, 3])],
+        );
+        HubWorld::new(vec![field], "field").unwrap()
+    }
+
+    #[test]
+    fn stage_join_announces_stage_and_keeps_epoch_rising() {
+        let mut stage = HubInstance::stage(7, "m1", Arc::new(stage_world()), HubSimConfig::default());
+        let mut out = Vec::new();
+        stage.join(profile(1), Uuid::nil(), None, 5, &mut out);
+        let msgs = controls_for(&out, 1);
+        assert!(matches!(&msgs[0], ServerMsg::StageJoined { stage_id: 7, mission, entity_id: 101, .. } if mission == "m1"));
+        assert!(matches!(&msgs[1], ServerMsg::MapEnter { map, map_epoch: 5, .. } if map.id == "field"));
+        assert_eq!(stage.name(), "Stage-7");
+    }
+
+    #[test]
+    fn stage_exit_portal_transfers_player_out() {
+        let mut stage = HubInstance::stage(1, "m1", Arc::new(stage_world()), HubSimConfig::default());
+        let mut out = Vec::new();
+        stage.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        stage.join(profile(2), Uuid::nil(), None, 0, &mut out);
+        let mut seq = 0;
+        out.clear();
+        assert!(walk_until(&mut stage, 1, &mut seq, (-1.0, 0.0), 80, &mut out, |s| s.position_of(1).is_none()));
+        assert!(
+            out.iter().any(|(u, e)| *u == 1
+                && matches!(e, HubEvent::Transfer { target_map, arrival } if target_map == "town" && *arrival == (3.5, 3.5))),
+            "{out:?}"
+        );
+        assert!(controls_for(&out, 2).iter().any(|m| matches!(m, ServerMsg::PlayerVanished { entity_id: 101 })));
+        assert_eq!(stage.population(), 1);
+    }
+
+    #[test]
+    fn hub_join_with_arrival_places_player() {
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
+        let mut out = Vec::new();
+        let arrival = Arrival { map: "town".into(), x: 3.5, y: 3.5 };
+        hub.join(profile(1), Uuid::nil(), Some(arrival), 2, &mut out);
+        assert_eq!(hub.position_of(1).unwrap(), ("town", 3.5, 3.5));
+        // A blocked or unknown arrival falls back to the entry spawn.
+        let wall = Arrival { map: "town".into(), x: 0.5, y: 0.5 };
+        hub.join(profile(2), Uuid::nil(), Some(wall), 0, &mut out);
+        let spawn = hub.world.map(hub.world.entry()).spawn;
+        let (_, x, y) = hub.position_of(2).unwrap();
+        assert_eq!((x, y), spawn);
     }
 
     #[test]
