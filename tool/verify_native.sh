@@ -4,7 +4,8 @@
 #   - Android: every LOAD segment aligned to 16 KB (Google Play);
 #   - Linux: glibc symbols <= 2.17 and only libc/libm/libdl/libpthread/ld
 #     needed (no libgcc_s, F2/F3);
-#   - Apple: install name @rpath/libws_native.dylib;
+#   - Apple: install name @rpath/libws_native.dylib, minimum OS at most
+#     Flutter's, iOS required-reason APIs as declared in the README;
 #   - Windows: no VC++ runtime import (static CRT, F17), when objdump exists.
 #
 # Usage: tool/verify_native.sh <target> [dir]   (dir: default native/prebuilt)
@@ -32,7 +33,27 @@ case "$target" in
     exports=$(nm -gU "$file" | awk '$2 == "T" {print $3}' | grep -c '^_ws_native_' || true)
     [[ "$exports" == "$expected" ]] || fail "$exports ws_native_* exports, expected $expected"
     otool -D "$file" | grep -q '^@rpath/libws_native.dylib$' || fail "install name is not @rpath/libws_native.dylib"
-    otool -l "$file" | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN' | grep -E 'minos|version' | head -2
+    # The binary's minimum OS must not exceed the app's, or App Store
+    # validation rejects the bundle (Flutter's generated framework says
+    # 13.0 or later). Rust's own floors: macOS arm64 11.0, iOS arm64
+    # simulator 14.0 (distribution.md F28).
+    case "$target" in
+      macos-arm64) floor=11.0 ;;
+      macos-x64) floor=10.15 ;;
+      ios-arm64-sim) floor=14.0 ;;
+      *) floor=13.0 ;;
+    esac
+    minos=$(otool -l "$file" | awk '/LC_BUILD_VERSION/ {b = 1} b && $1 == "minos" {print $2; exit}')
+    echo "minos: $minos (at most $floor)"
+    [[ "$(printf '%s\n%s\n' "$minos" "$floor" | sort -V | tail -1)" == "$floor" ]] \
+      || fail "minos $minos is above $floor"
+    if [[ "$target" == ios-* ]]; then
+      # Apple's "required reason" APIs; the README's privacy manifest
+      # declares the file-timestamp reason for fstat (F23). A new one
+      # needs a README update first.
+      reasons=$(nm -u "$file" | grep -oE '^_(stat|lstat|fstat|fstatat|getattrlist|getattrlistbulk|fgetattrlist|statfs|fstatfs|statvfs|fstatvfs|mach_absolute_time)$' | sort -u | tr '\n' ' ')
+      [[ "$reasons" == "_fstat " ]] || fail "required-reason APIs changed: $reasons(native/README.md)"
+    fi
     ;;
 esac
 

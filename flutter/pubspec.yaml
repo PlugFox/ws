@@ -4,7 +4,8 @@ description: >
   background, check the connection and reconnect at once on resume and when
   the network changes.
 version: 2.0.0-dev.1
-repository: https://github.com/plugfox/ws
+repository: https://github.com/plugfox/ws/tree/master/flutter
+issue_tracker: https://github.com/plugfox/ws/issues
 publish_to: none # until the first release
 
 topics:

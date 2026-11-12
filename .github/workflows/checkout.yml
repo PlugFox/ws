@@ -48,12 +48,22 @@ jobs:
         run: dart run tool/check_pubignore.dart
 
       - name: 🔎 Check format
-        run: dart format --set-exit-if-changed -o none bin/ lib/ test/ tool/ native/lib native/test native/hook
+        run: dart format --set-exit-if-changed -o none bin/ lib/ test/ tool/ native/lib native/test native/hook native/example
 
       - name: 📈 Check analyzer
         run: |
           dart analyze --fatal-infos --fatal-warnings
           (cd native && dart analyze --fatal-infos --fatal-warnings)
+
+      - name: 🐚 Workflows and shell scripts
+        run: |
+          # Pinned release and SHA-256 (from its checksums file).
+          tgz="$RUNNER_TEMP/actionlint.tar.gz"
+          curl -sSfL -o "$tgz" https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $tgz" | sha256sum -c -
+          tar -xzf "$tgz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+          shellcheck tool/*.sh
 
       - name: 📦 Publish dry run
         run: |
@@ -154,7 +164,7 @@ jobs:
       - name: 🔎 Format and analyzer
         if: matrix.flutter == '3.47.9'
         run: |
-          dart format --set-exit-if-changed -o none lib test
+          dart format --set-exit-if-changed -o none lib test example
           flutter analyze --fatal-infos --fatal-warnings
       - name: 🧪 Tests
         run: flutter test --reporter expanded

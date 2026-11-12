@@ -10,8 +10,9 @@
 #           windows-x64 windows-arm64
 #   out-dir: default native/prebuilt
 #
-# Minimum OS versions stay at or below Flutter's (iOS 13.0, macOS 10.15,
-# Android API 21): the binary's minimum must not exceed the app's.
+# Minimum OS versions (iOS 13.0, macOS 10.15, Android API 21) stay at or
+# below Flutter's (3.47 templates: iOS 15.0, macOS 12.0, minSdk 24): the
+# binary's minimum must not exceed the app's (tool/verify_native.sh).
 # Android needs ANDROID_NDK_HOME (or ANDROID_NDK_LATEST_HOME on CI runners).
 # Linux targets link against glibc 2.17 through cargo-zigbuild when it is
 # installed (CI does), so the library loads on old distributions

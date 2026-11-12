@@ -54,5 +54,5 @@ file; finding ids below refer to them.
    after close, T-12, went with D50).
 7. **Remaining medium/low items**: ~~native 5–10, 12–30~~ done, D50;
    ~~protocol F10–F12, F14–F18~~ done, D51; ~~client F23, F27–F29~~
-   done, D52; distribution F21–F30,
-   doc corrections in tests_docs.md.
+   done, D52; ~~distribution F21–F30~~ done, D53; doc corrections in
+   tests_docs.md.

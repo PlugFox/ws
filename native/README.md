@@ -8,7 +8,10 @@ simd-json), and messages reach Dart in batches without copies.
 import 'package:ws_native/ws_native.dart';
 
 void main() {
-  WsNative.install(); // returns false (pure Dart is used) if unavailable
+  if (!WsNative.install()) {
+    // Pure Dart is used; say why (unsupported target, build skipped...).
+    debugPrint('ws_native: ${WsNative.unavailableReason}');
+  }
   runApp(const App());
 }
 ```
@@ -31,6 +34,30 @@ hooks:
       source: none # none | build | prebuilt
       # library: path/to/libws_native.so  # use this file instead
 ```
+
+## App Store privacy manifest
+
+The iOS library imports `fstat` (from the Rust standard library), one of
+Apple's "required reason" APIs (file timestamps). Flutter wraps the library
+in a generated framework that cannot carry its own `PrivacyInfo.xcprivacy`,
+so declare it in the app's manifest:
+
+```xml
+<key>NSPrivacyAccessedAPITypes</key>
+<array>
+  <dict>
+    <key>NSPrivacyAccessedAPIType</key>
+    <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+    <key>NSPrivacyAccessedAPITypeReasons</key>
+    <array>
+      <string>C617.1</string>
+    </array>
+  </dict>
+</array>
+```
+
+`C617.1`: metadata of files inside the app container. The library itself
+reads no files on iOS (certificates come from Security.framework).
 
 ## Licences
 

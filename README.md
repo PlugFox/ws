@@ -9,8 +9,8 @@ A WebSocket client for Dart and Flutter on every platform, built for
 reliability: reconnects with backoff, heartbeats, request/response calls,
 typed states and errors, and a fake server for your tests.
 
-> **2.0 is a rewrite** (branch `rewrite`, `2.0.0-dev`). The design, the
-> measurements behind it and the plan are in [`docs/`](docs/).
+> **2.0 is a rewrite** (`2.0.0-dev`). The design, the measurements behind
+> it and the plan are in [`docs/`](https://github.com/plugfox/ws/tree/master/docs).
 
 ## Install
 
@@ -104,7 +104,10 @@ Rust toolchain or network is needed at build time.
 import 'package:ws_native/ws_native.dart';
 
 void main() {
-  WsNative.install(); // returns false (pure Dart is used) if unavailable
+  if (!WsNative.install()) {
+    // Pure Dart is used; say why (unsupported target, build skipped...).
+    debugPrint('ws_native: ${WsNative.unavailableReason}');
+  }
   runApp(const App());
 }
 ```
@@ -130,13 +133,24 @@ RUN dart compile exe bin/server.dart -o /app/server
 ```
 
 ```dart
+import 'dart:io';
+
 import 'package:ws/native.dart';
 
 void main() {
-  WsNativeLibrary.open('/app/lib/libws_native.so').install();
+  try {
+    WsNativeLibrary.open('/app/lib/libws_native.so').install();
+  } on Object catch (e) {
+    // Missing file, another architecture, musl, or a library from another
+    // ws release (ABI mismatch): the pure-Dart transport keeps working.
+    stderr.writeln('ws: native transport unavailable: $e');
+  }
   // ...
 }
 ```
+
+Run the installer again after every `ws` upgrade: the library must come
+from the same release.
 
 The library contains Rust crates whose licences ask for their notices next
 to binary copies: ship `THIRD_PARTY_LICENSES` from the same GitHub release
@@ -161,7 +175,7 @@ const tls = WebSocketTls(
 ```
 
 Android's `network_security_config` and Apple's ATS do not apply to this
-library: it opens its own sockets. See [docs/SECURITY.md](docs/SECURITY.md).
+library: it opens its own sockets. See [docs/SECURITY.md](https://github.com/plugfox/ws/blob/master/docs/SECURITY.md).
 
 ### Testing your code
 
@@ -180,10 +194,10 @@ server.last.drop();             // simulate a lost connection
 
 ## Documentation
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — layers and the rules per layer
-- [docs/DECISIONS.md](docs/DECISIONS.md) — every compared alternative, with numbers
-- [docs/SECURITY.md](docs/SECURITY.md) — trust stores, pins, platform policies that do not apply
-- [docs/ROADMAP.md](docs/ROADMAP.md) — plan, open checks, milestones
-- [docs/NATIVE_DISTRIBUTION.md](docs/NATIVE_DISTRIBUTION.md) — how Dart packages ship native code
-- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — tools and tasks (`mise run check`), releasing
-- [benchmark/RESULTS.md](benchmark/RESULTS.md) — transport measurements
+- [docs/ARCHITECTURE.md](https://github.com/plugfox/ws/blob/master/docs/ARCHITECTURE.md) — layers and the rules per layer
+- [docs/DECISIONS.md](https://github.com/plugfox/ws/blob/master/docs/DECISIONS.md) — every compared alternative, with numbers
+- [docs/SECURITY.md](https://github.com/plugfox/ws/blob/master/docs/SECURITY.md) — trust stores, pins, platform policies that do not apply
+- [docs/ROADMAP.md](https://github.com/plugfox/ws/blob/master/docs/ROADMAP.md) — plan, open checks, milestones
+- [docs/NATIVE_DISTRIBUTION.md](https://github.com/plugfox/ws/blob/master/docs/NATIVE_DISTRIBUTION.md) — how Dart packages ship native code
+- [docs/DEVELOPMENT.md](https://github.com/plugfox/ws/blob/master/docs/DEVELOPMENT.md) — tools and tasks (`mise run check`), releasing
+- [benchmark/RESULTS.md](https://github.com/plugfox/ws/blob/master/benchmark/RESULTS.md) — transport measurements

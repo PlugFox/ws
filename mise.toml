@@ -50,7 +50,7 @@ run = [
 [tasks.fmt]
 description = "Format Dart and Rust code"
 run = [
-  "dart format bin lib test tool native/lib native/test native/hook flutter/lib flutter/test",
+  "dart format bin lib test tool native/lib native/test native/hook native/example flutter/lib flutter/test flutter/example",
   "cd native/rust && cargo fmt",
   "cd server && cargo fmt",
 ]
@@ -58,7 +58,7 @@ run = [
 [tasks."fmt:check"]
 description = "Fail if anything is not formatted"
 run = [
-  "dart format --set-exit-if-changed -o none bin lib test tool native/lib native/test native/hook flutter/lib flutter/test",
+  "dart format --set-exit-if-changed -o none bin lib test tool native/lib native/test native/hook native/example flutter/lib flutter/test flutter/example",
   "cd native/rust && cargo fmt --check",
   "cd server && cargo fmt --check",
 ]

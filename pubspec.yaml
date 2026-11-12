@@ -31,10 +31,6 @@ platforms:
   web:
   windows:
 
-screenshots:
-  - description: 'Example of using the ws library to connect to a WebSocket server.'
-    path: example.png
-
 environment:
   sdk: ^3.10.0
 

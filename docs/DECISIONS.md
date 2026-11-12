@@ -1651,3 +1651,47 @@ docs/review/client.md F23, F27–F29 (the others were fixed in D38).
   the query (`wss://host:8443/s?…`); before, it printed `user:pass@` from
   the given URL.
 - Status: **adopted**.
+
+### D53. The remaining distribution findings
+
+docs/review/distribution.md F21–F30.
+
+- **F21:** `WsNative.unavailableReason` existed; both READMEs now print it
+  when `install()` returns `false`.
+- **F22:** the `compile exe` examples (README, `package:ws/native.dart`)
+  fall back to pure Dart when the file is missing, built for another
+  architecture or from another release, and say to run the installer
+  again after every `ws` upgrade. The dartdoc also stops claiming that
+  `compile exe` "does not run build hooks" (it refuses such packages;
+  tests_docs D-6).
+- **F23:** the iOS library imports `fstat` (Rust std), a required-reason
+  API (file timestamps); `clock_gettime` is not on Apple's list. The
+  `ws_native` README shows the `PrivacyInfo.xcprivacy` entry (`C617.1`),
+  and `tool/verify_native.sh` fails when the set of such imports changes.
+- **F24:** `repository` points at each package's directory; both packages
+  have `issue_tracker`, `topics` and an `example/`.
+- **F25:** `test/` and the 1.x screenshot are no longer published (archive
+  392 KB → 76 KB); README links into the repository are absolute; the
+  "branch `rewrite`" note is gone. The staged `ws_native` already left
+  out its tests.
+- **F26:** CI formats every Dart directory `mise run fmt:check` does
+  (examples included) and runs actionlint (release pinned by SHA-256)
+  and shellcheck. Clippy with `--all-targets` was already in both Rust
+  jobs.
+- **F27:** `tool/check_publish.sh` prints dry-run warnings and tolerates
+  them outside CI (a dirty tree is the normal state while developing);
+  errors, and warnings on CI, fail. It says when `native/prebuilt` is
+  missing, since the staged archive then is not the release's.
+- **F28:** DEVELOPMENT and `build_native.sh` state the real floors (iOS
+  13.0, macOS 10.15, API 21; Rust: macOS arm64 11.0, iOS simulator arm64
+  14.0) against Flutter 3.47's templates (iOS 15.0, macOS 12.0, minSdk
+  24); `verify_native.sh` fails when `minos` exceeds them (local builds:
+  macOS arm64 11.0, iOS arm64 13.0).
+- **F29:** done in D43 (current majors, pinned by SHA).
+- **F30:** `tool/autobahn.sh` pins the image by digest (the one D28 used)
+  and waits for the port instead of `sleep 3`. Re-run after this
+  session's protocol changes (D50, D51): pure Dart 296 OK, 2 non-strict,
+  3 informational, 0 failed, as in D28; native 289 / 9 / 3 / 0, two
+  better than D28 (4.1.5 and 4.2.5, reserved opcodes after a text frame,
+  are now OK). Not in CI: a run takes minutes and needs Docker.
+- Status: **adopted**.

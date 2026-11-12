@@ -25,8 +25,12 @@ Things the task list does not show:
     default branch, so until `prebuilt.yml` is merged there, the workflow
     runs on pushes that touch `native/rust/**`. Download such a run with
     `mise run ci:prebuilt <run-id>`.
-- Prebuilt libraries target Flutter's minimums: iOS 13.0, macOS 10.15 and
-  Android API 21. Linux libraries are linked against glibc 2.17
+- Prebuilt libraries target iOS 13.0, macOS 10.15 and Android API 21, at
+  or below what Flutter templates use (3.47: iOS 15.0, macOS 12.0, minSdk
+  24). Rust raises two floors: macOS arm64 11.0, iOS arm64 simulator 14.0.
+  A binary's minimum must never exceed the app's, or App Store validation
+  rejects it; `tool/verify_native.sh` checks `minos`. Linux libraries are
+  linked against glibc 2.17
   with cargo-zigbuild (D40). Android libraries are 16 KB page aligned
   (`rust/build.rs`; `llvm-readelf -l` shows `0x4000`).
 - Releasing is one tag (DECISIONS.md D43):

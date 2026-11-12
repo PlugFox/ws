@@ -58,6 +58,10 @@ target/
 /example/docs/
 
 # --- Not published (tracked in git, but not part of the package) ---
+# Tests need the repository (Rust test server, native/); the 1.x
+# screenshot no longer shows the package (distribution.md F25).
+/test/
+/example.png
 /_lib/
 /.github/
 /.vscode/
