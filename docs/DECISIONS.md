@@ -1042,7 +1042,8 @@ failures were one `WebSocketConnectionException` with a string.
   the SDK's `SecBase.h`). The closed event gains a `detail` element
   (index 7); Dart reads it only when present.
 - Pure Dart: `SocketException` → DNS ("Failed host lookup"), refused
-  (`ECONNREFUSED` 111/61/10061), otherwise unreachable. TLS on Apple
+  (`ECONNREFUSED` 111/61, Windows 10061 and 1225, the code `dart:io`
+  reports there), otherwise unreachable. TLS on Apple
   platforms is reported by `dart:io` only as "application verification
   failure", so the transport records the certificate in
   `onBadCertificate` and classifies by its validity dates and its

@@ -39,8 +39,9 @@ WebSocketConnectionException connectFailure(
   );
 }
 
-/// `ECONNREFUSED` on Linux/Android, Apple and Windows.
-const _refused = {111, 61, 10061};
+/// `ECONNREFUSED` on Linux/Android and Apple; on Windows `WSAECONNREFUSED`
+/// and `ERROR_CONNECTION_REFUSED` (what `dart:io` reports there).
+const _refused = {111, 61, 10061, 1225};
 
 /// DNS, refused or unreachable, from a `dart:io` socket error.
 WebSocketConnectionFailure socketFailure(io.SocketException error) {

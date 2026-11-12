@@ -14,7 +14,7 @@ void main() {
       socketFailure(const SocketException("Failed host lookup: 'x.invalid'")),
       WebSocketConnectionFailure.dns,
     );
-    for (final code in [61, 111, 10061]) {
+    for (final code in [61, 111, 10061, 1225]) {
       expect(
         socketFailure(
           SocketException('Connection refused', osError: OSError('', code)),
