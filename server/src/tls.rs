@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose,
+    KeyUsagePurpose, PublicKeyData,
 };
 use tokio_rustls::{
     TlsAcceptor,
@@ -30,6 +30,8 @@ pub struct Pki {
     /// DER of the CA certificate.
     pub ca_der: Vec<u8>,
     pub good: TlsAcceptor,
+    /// SubjectPublicKeyInfo (DER) of the `good` leaf, for pin tests.
+    pub good_spki: Vec<u8>,
     pub badhost: TlsAcceptor,
     pub expired: TlsAcceptor,
 }
@@ -50,23 +52,26 @@ impl Pki {
         let ca_cert = ca_params.self_signed(&ca_key)?;
         let issuer = Issuer::new(ca_params, ca_key);
         let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (good, good_spki) = leaf(&issuer, names(&["localhost", "127.0.0.1", "::1"]), false)?;
         Ok(Pki {
             ca_pem: ca_cert.pem(),
             ca_der: ca_cert.der().to_vec(),
-            good: leaf(&issuer, names(&["localhost", "127.0.0.1", "::1"]), false)?,
-            badhost: leaf(&issuer, names(&["wrong.invalid"]), false)?,
-            expired: leaf(&issuer, names(&["localhost", "127.0.0.1", "::1"]), true)?,
+            good,
+            good_spki,
+            badhost: leaf(&issuer, names(&["wrong.invalid"]), false)?.0,
+            expired: leaf(&issuer, names(&["localhost", "127.0.0.1", "::1"]), true)?.0,
         })
     }
 }
 
-/// Issues a server certificate for `names` and builds an acceptor for it.
+/// Issues a server certificate for `names` and builds an acceptor for it;
+/// also returns the certificate's SubjectPublicKeyInfo.
 /// `expired`: valid from 2020-01-01 to 2021-01-01 only.
 fn leaf(
     issuer: &Issuer<'_, KeyPair>,
     names: Vec<String>,
     expired: bool,
-) -> Result<TlsAcceptor, BoxError> {
+) -> Result<(TlsAcceptor, Vec<u8>), BoxError> {
     let mut params = CertificateParams::new(names.clone())?;
     if expired {
         params.not_before = rcgen::date_time_ymd(2020, 1, 1);
@@ -79,9 +84,25 @@ fn leaf(
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     let key = KeyPair::generate()?;
+    let spki = key.subject_public_key_info();
     let cert = params.signed_by(&key, issuer)?;
     let chain = vec![CertificateDer::from(cert.der().to_vec())];
     let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(key.serialize_der()));
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_no_client_auth()
+    .with_single_cert(chain, key)?;
+    Ok((TlsAcceptor::from(Arc::new(config)), spki))
+}
+
+/// An acceptor for a PEM chain and key from files (`--tls-cert`,
+/// `--tls-key`).
+pub fn from_files(cert: &str, key: &str) -> Result<TlsAcceptor, BoxError> {
+    use rustls::pki_types::pem::PemObject;
+    let chain = CertificateDer::pem_file_iter(cert)?.collect::<Result<Vec<_>, _>>()?;
+    let key = PrivateKeyDer::from_pem_file(key)?;
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))

@@ -63,6 +63,10 @@ Things the task list does not show:
 - Toolchains: `rust-toolchain.toml` (native/rust, server) and `mise.toml`
   pin the same Rust; `tool/rust_toolchain.sh` fails in CI if they differ.
   `mise run check:deny` runs `cargo deny` (licences, advisories, sources).
+- `device_test/` runs integration tests on a connected phone or tablet
+  against the test server on this machine: `mise run test:device
+  <device-id>` (`flutter devices` lists ids). See `device_test/README.md`
+  for the user-CA case and iOS signing.
 - `ws_flutter` (`flutter/`) is a Flutter package: `flutter pub get`,
   `flutter analyze`, `flutter test` there (`mise run test:flutter`). CI
   installs Flutter with `tool/flutter_sdk.sh`, which checks the archive

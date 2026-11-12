@@ -104,6 +104,11 @@ enum WebSocketTlsFailure {
   /// The certificate was revoked.
   revoked,
 
+  /// The certificate is trusted, but its key matches none of
+  /// `WebSocketTls.pins`: a TLS-inspecting proxy, or the server's key
+  /// changed without a backup pin.
+  pinMismatch,
+
   /// The handshake itself failed: no common protocol version or cipher, an
   /// alert from the server, or a server that does not speak TLS.
   handshake,
@@ -114,7 +119,12 @@ enum WebSocketTlsFailure {
   /// Whether the server's certificate was rejected (as opposed to the
   /// handshake failing).
   bool get isCertificate => switch (this) {
-    untrusted || hostname || expired || notYetValid || revoked => true,
+    untrusted ||
+    hostname ||
+    expired ||
+    notYetValid ||
+    revoked ||
+    pinMismatch => true,
     handshake || other => false,
   };
 }

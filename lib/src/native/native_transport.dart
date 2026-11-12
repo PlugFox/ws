@@ -5,6 +5,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:ws/src/client/exceptions.dart';
+import 'package:ws/src/client/tls_pins.dart';
 import 'package:ws/src/native/native_library.dart';
 import 'package:ws/src/native/tape.dart';
 import 'package:ws/src/protocol/handshake.dart';
@@ -93,6 +94,13 @@ final class _NativeConnection implements TransportConnection, Finalizable {
         'window': window,
         'allow_insecure': tls.allowInsecure,
         'roots_pem': tls.trustedRootsPem,
+        // Only when set: an older library rejects unknown fields.
+        if (tls.pins.isNotEmpty)
+          'pins': [
+            for (final pin in pinDigests(tls.pins))
+              [for (final b in pin) b.toRadixString(16).padLeft(2, '0')].join(),
+          ],
+        if (tls.trustUserCertificates) 'user_roots': true,
         if (request.proxy case final proxy?)
           'proxy': <String, Object?>{
             'host': proxy.host,
@@ -207,6 +215,7 @@ final class _NativeConnection implements TransportConnection, Finalizable {
           4 => WebSocketTlsFailure.notYetValid,
           5 => WebSocketTlsFailure.revoked,
           6 => WebSocketTlsFailure.handshake,
+          7 => WebSocketTlsFailure.pinMismatch,
           _ => WebSocketTlsFailure.other,
         },
       ),

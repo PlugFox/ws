@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
+import 'package:ws/src/transport/dart/certificate.dart';
 import 'package:ws/src/transport/dart/errors.dart';
 import 'package:ws/ws.dart';
 

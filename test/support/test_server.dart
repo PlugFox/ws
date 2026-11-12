@@ -4,6 +4,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:ws/src/util/sha256.dart';
 
 /// The running `ws_bench_server` and its ports (server/README.md).
 final class TestServer {
@@ -15,7 +18,8 @@ final class TestServer {
       ws6 = ready['ws6'] as int?,
       proxy = ready['proxy']! as int,
       proxyAuth = ready['proxy_auth']! as int,
-      caPem = ready['ca_pem']! as String;
+      caPem = ready['ca_pem']! as String,
+      wssSpki = _hex(ready['wss_spki']! as String);
 
   final Process _process;
   final int ws;
@@ -26,6 +30,18 @@ final class TestServer {
   final int proxy;
   final int proxyAuth;
   final String caPem;
+
+  /// DER SubjectPublicKeyInfo of the `wss` certificate, as rcgen encoded
+  /// it (independent of the code under test).
+  final Uint8List wssSpki;
+
+  /// The pin of the `wss` certificate: base64 SHA-256 of [wssSpki].
+  String get wssPin => base64.encode(sha256(wssSpki));
+
+  static Uint8List _hex(String hex) => Uint8List.fromList([
+    for (var i = 0; i < hex.length; i += 2)
+      int.parse(hex.substring(i, i + 2), radix: 16),
+  ]);
 
   /// Path of the server binary: `$WS_TEST_SERVER` or the release build.
   static String get binary =>

@@ -42,6 +42,7 @@ async fn ready_line_and_exit_on_stdin_eof() {
         "proxy",
         "proxy_auth",
         "ca_pem",
+        "wss_spki",
     ];
     let obj = ready.as_object().unwrap();
     assert_eq!(obj.len(), keys.len(), "{line}");

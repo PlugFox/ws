@@ -4,7 +4,7 @@
 //! `ws_bench_server [--host 127.0.0.1] [--port 9090] [--tls-port 9443]
 //!  [--badhost-port 0] [--expired-port 0]
 //!  [--proxy-port 0] [--proxy-auth-port 0] [--no-ipv6]
-//!  [--ready-json] [--verbose]`
+//!  [--tls-cert chain.pem --tls-key key.pem] [--ready-json] [--verbose]`
 //!
 //! With `--ready-json` the server prints exactly one JSON line to stdout
 //! once every listener is bound, and exits when stdin reaches EOF (so a
@@ -35,6 +35,11 @@ async fn main() -> Result<(), BoxError> {
         proxy_port: port("proxy-port", 0)?,
         proxy_auth_port: port("proxy-auth-port", 0)?,
         ipv6: !args.contains_key("no-ipv6"),
+        tls_cert: match (args.get("tls-cert"), args.get("tls-key")) {
+            (Some(cert), Some(key)) => Some((cert.clone(), key.clone())),
+            (None, None) => None,
+            _ => return Err("--tls-cert and --tls-key go together".into()),
+        },
     };
     let ready_json = args.contains_key("ready-json");
     QUIET.store(

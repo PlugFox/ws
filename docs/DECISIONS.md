@@ -1238,3 +1238,91 @@ From `docs/review/future_risks.md` 2.1, 2.3, 2.5, 3.2, 3.3 and 5.1
   Background keep-alive is impossible on both platforms (2.3); the README
   says so and points to push messages.
 - Status: **adopted**.
+
+### D45. Trust model: pins, user CAs on Android, disabled system CAs
+
+Review item R2 / future_risks 3.5: on Android the Rust transport read only
+the system CA directory, so user and MDM CAs (corporate TLS inspection)
+failed, user-*disabled* system CAs stayed trusted, and D16's SPKI pins did
+not exist.
+
+- **`WebSocketTls.pins`**: base64 SHA-256 of the leaf certificate's
+  SubjectPublicKeyInfo, optional `sha256/` prefix (OkHttp/HPKP format,
+  `openssl … | openssl dgst -sha256 -binary | base64`).
+  - Checked **after** the chain: an untrusted chain is reported as
+    `untrusted`, a trusted chain with another key as the new
+    `WebSocketTlsFailure.pinMismatch` (a certificate failure, so retried
+    at the maximum delay, D14). `allowInsecure` skips the chain, never the
+    pins: a pinned self-signed development server works.
+  - **Leaf only, on every transport.** `dart:io` exposes only the peer
+    certificate (`RawSecureSocket.peerCertificate`), no chain. Matching
+    intermediates in Rust only would make the native transport and its
+    pure-Dart fallback accept different servers. The docs ask for a
+    backup pin.
+  - Rust: a `ServerCertVerifier` wrapping the platform or webpki
+    verifier, so Apple and Windows keep their OS evaluation. Dart: checks
+    `peerCertificate` after `secure()`, direct and through the proxy
+    tunnel. The DER walk to the SPKI is the same in both
+    (`tls.rs` `spki`, `certificate.dart`), tested against OpenSSL 3.6
+    pins (RSA, EC P-384) and an X.509 v1 layout (no `version`), and in
+    Rust against rcgen's own SPKI encoding.
+  - An invalid pin fails `connect()` once, without retrying
+    (`tls: other`, cause `FormatException`).
+  - SHA-256 reuses the incremental implementation of `ws:install` (D32),
+    moved to `lib/src/util/sha256.dart`; no `package:crypto`.
+- **`WebSocketTls.trustUserCertificates`** (default false, as Android 7+):
+  Android also trusts `/data/misc/user/<uid / 100000>/cacerts-added`,
+  as `<certificates src="user"/>` does for the platform stacks. Elsewhere
+  it has no effect: Apple and Windows verifiers already use the system
+  trust settings, including user and MDM CAs.
+- **Disabled system CAs** (`cacerts-removed`) are always honoured on
+  Android, by both transports, as Conscrypt does.
+- **Verified on a device** (Samsung S22 Ultra, Android 16, API 36):
+  - an app process is in group `everybody` (9997) and can list
+    `/data/misc/user/0` (`drwxr-x--- system everybody`). `run-as` cannot
+    (it lacks the group), so an `adb` check gives the wrong answer;
+  - the user store holds DER files, the system stores PEM after a text
+    dump; both loaders accept either;
+  - `dart:io` already prefers the Conscrypt APEX over the system image
+    (`runtime/bin/security_context_linux.cc`), as Rust did. The two differ
+    a lot: on this device the APEX has 120 roots, `/system` 149, of which
+    37 are not in the APEX (the distrusted Entrust and CommScope roots,
+    15-year-old roots such as DigiCert Global Root CA and GlobalSign R1).
+    Reading `/system` first would trust what Android no longer does;
+  - reading the store takes 17–20 ms, loading it into a
+    `SecurityContext` 10 ms. So the pure-Dart transport builds its own
+    context only when it changes something (disabled CAs present, or
+    user CAs asked for), once per setting; otherwise `dart:io`'s default
+    stays (first connection with echo, one run each: 171 ms before, 105 ms after).
+- **Configurations are cached per distinct setting** (roots, pins, user
+  CAs, insecure), at most 16, in both transports. Before, any
+  `trustedRootsPem` built a new rustls config per connection (cold
+  session cache; native.md "custom roots rebuilding the TLS config"). A
+  session resumes only under the configuration that verified it, so a
+  pinned connection never resumes a session whose certificate was not
+  checked against its pins (TLS 1.3 resumption skips the verifier).
+- Tests:
+  - Rust (30): pins after the chain, insecure plus pins, the cache
+    (shared, order-insensitive, bounded), SPKI against rcgen and OpenSSL,
+    the Android store layout (APEX first, disabled removed, DER and PEM).
+  - Dart: SHA-256 (FIPS 180-4 vectors and padding edges), SPKI, pin
+    parsing, the Android store layout, PEM round trip through
+    `SecurityContext`; 6 real-socket tests per transport (right key with
+    a backup pin, wrong key, chain first, insecure plus pins, through a
+    `CONNECT` tunnel, invalid pin). The test server exposes the SPKI of
+    its certificate (`wss_spki`, rcgen's encoding), so expected pins do
+    not come from the code under test.
+  - Devices (`device_test/`, `tool/device_test.sh`, new): the pin tests
+    on both transports pass on the Samsung (Android 16) and an iPad Pro
+    (iOS 26.6.1), where the pin wraps Security.framework. First
+    connection with echo: Android 105 ms Dart / 61 ms Rust; iPad
+    200–250 ms Dart / 30 ms Rust (LAN).
+- Found on the way: on iOS a fresh install gets `EHOSTUNREACH` ("No route
+  to host", errno 65) for LAN addresses until the local network
+  permission is granted (TN3179); both transports report it as
+  `unreachable`. The device harness waits for the server first.
+- Not done: the user-CA case on the device needs a CA installed by hand
+  (`device_test/README.md`). NSC pin sets and `debug-overrides` are still
+  not read (no JNI, `docs/SECURITY.md`); certificate
+  transparency and revocation as before (3.7).
+- Status: **adopted**.

@@ -1,8 +1,9 @@
 import 'dart:typed_data';
 
-/// Incremental SHA-256 (FIPS 180-4), to verify downloaded libraries in
-/// `dart run ws:install` without a dependency on `package:crypto`
-/// (DECISIONS.md D3, D32). Dart VM only (64-bit integers).
+/// Incremental SHA-256 (FIPS 180-4), without a dependency on
+/// `package:crypto` (DECISIONS.md D3): verifies downloaded libraries in
+/// `dart run ws:install` (D32) and computes certificate pins (D45). Dart VM
+/// only (64-bit integers).
 final class Sha256 {
   /// Starts a new digest.
   Sha256();
@@ -50,6 +51,15 @@ final class Sha256 {
 
   /// Finishes the digest and returns it as lowercase hex.
   String close() {
+    final buffer = StringBuffer();
+    for (final byte in closeBytes()) {
+      buffer.write(byte.toRadixString(16).padLeft(2, '0'));
+    }
+    return buffer.toString();
+  }
+
+  /// Finishes the digest and returns its 32 bytes.
+  Uint8List closeBytes() {
     if (_closed) throw StateError('Sha256 is closed');
     final bits = _length * 8;
     final tail = BytesBuilder(copy: false)
@@ -58,11 +68,11 @@ final class Sha256 {
       ..add(Uint8List(8)..buffer.asByteData().setUint64(0, bits));
     add(tail.takeBytes());
     _closed = true;
-    final buffer = StringBuffer();
-    for (final word in _h) {
-      buffer.write(word.toRadixString(16).padLeft(8, '0'));
+    final out = ByteData(32);
+    for (var i = 0; i < 8; i++) {
+      out.setUint32(i * 4, _h[i]);
     }
-    return buffer.toString();
+    return out.buffer.asUint8List();
   }
 
   static int _rotr(int x, int n) => ((x >>> n) | (x << (32 - n))) & 0xFFFFFFFF;
@@ -107,3 +117,6 @@ final class Sha256 {
     _h[7] += h;
   }
 }
+
+/// SHA-256 of [bytes].
+Uint8List sha256(List<int> bytes) => (Sha256()..add(bytes)).closeBytes();

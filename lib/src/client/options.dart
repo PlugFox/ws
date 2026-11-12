@@ -114,16 +114,53 @@ final class WebSocketHeartbeat<T> {
 }
 
 /// TLS settings for native and pure-Dart transports, as plain data.
+///
+/// The browser decides about certificates on the web; these settings do
+/// not apply there. Android's `network_security_config` and Apple's ATS do
+/// not apply to this library either: it opens its own sockets
+/// (docs/SECURITY.md).
 @immutable
 final class WebSocketTls {
   /// Creates TLS settings.
-  const WebSocketTls({this.trustedRootsPem, this.allowInsecure = false});
+  const WebSocketTls({
+    this.trustedRootsPem,
+    this.pins = const <String>[],
+    this.trustUserCertificates = false,
+    this.allowInsecure = false,
+  });
 
   /// Extra trusted root certificates (PEM). The platform trust store is
   /// still used.
   final String? trustedRootsPem;
 
+  /// Public key pins: the server certificate's key must match one of them,
+  /// on top of the normal checks. Each pin is the base64 SHA-256 of the
+  /// leaf certificate's SubjectPublicKeyInfo, optionally prefixed with
+  /// `sha256/` (the format of OkHttp and HPKP):
+  ///
+  /// ```sh
+  /// openssl s_client -connect example.com:443 </dev/null 2>/dev/null \
+  ///   | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
+  ///   | openssl dgst -sha256 -binary | base64
+  /// ```
+  ///
+  /// Only the leaf (the server's own certificate) is matched, on every
+  /// transport. Include a backup pin for the next key, or a renewal that
+  /// changes the key locks every installed app out. A mismatch fails with
+  /// [WebSocketTlsFailure.pinMismatch]; an invalid pin fails `connect()`
+  /// without retrying. Also checked with [allowInsecure].
+  final List<String> pins;
+
+  /// Android: also trust CAs the user or a device policy (MDM) installed,
+  /// as `<certificates src="user"/>` in `network_security_config` does for
+  /// the platform's own HTTP stacks. Needed behind a TLS-inspecting
+  /// corporate proxy. Off by default, like Android since 7.0. Other
+  /// platforms already use the system's trust settings, including user
+  /// and MDM CAs; there it has no effect.
+  final bool trustUserCertificates;
+
   /// Accept any certificate. **Development only**; never the default.
+  /// [pins] are still checked.
   final bool allowInsecure;
 }
 

@@ -41,7 +41,9 @@ file; finding ids below refer to them.
    2.3, 2.5, 3.2, 3.3, 5.1; Top 20 #2). Field test on devices open.
 4. ~~**Error hierarchy before the API freeze**~~ done, DECISIONS.md D42
    (typed DNS/TCP/TLS/proxy reasons, frozen sealed set, names kept).
-5. **Android trust model** (R2, Top 20 #5): user CAs option, SPKI pins.
+5. ~~**Android trust model**~~ done, DECISIONS.md D45 (R2, 3.5, 3.7 pins;
+   Top 20 #5; native "custom roots rebuilding the TLS config"). User-CA
+   case on a device open (needs a CA installed by hand).
 6. **Tests** (tests_docs §4): the browser on the shared suites (T-3),
    transport contract checker, reconnect policy on real sockets,
    randomized re-entrancy sequences, exact content checks.

@@ -3,7 +3,7 @@ import 'dart:ffi' show Abi;
 import 'dart:io';
 
 import 'package:ws/src/native/native_release.dart';
-import 'package:ws/src/native/sha256.dart';
+import 'package:ws/src/util/sha256.dart';
 
 /// Where release libraries are downloaded from; `{tag}` and `{asset}` are
 /// replaced. A mirror can use `http(s)://` or `file://`.

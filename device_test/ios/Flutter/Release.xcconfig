@@ -1,0 +1,3 @@
+#include "Generated.xcconfig"
+// Signing for real devices, not committed: DEVELOPMENT_TEAM = <team id>
+#include? "Local.xcconfig"

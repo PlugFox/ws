@@ -7,7 +7,7 @@ import 'dart:io';
 import 'package:test/test.dart';
 import 'package:ws/src/native/install.dart';
 import 'package:ws/src/native/native_release.dart';
-import 'package:ws/src/native/sha256.dart';
+import 'package:ws/src/util/sha256.dart';
 
 String _sha(List<int> bytes) => (Sha256()..add(bytes)).close();
 

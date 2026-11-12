@@ -158,6 +158,119 @@ void serverConformance(WebSocketTransport Function() create) {
         await c.close();
       });
 
+      group('pins (D45)', () {
+        const wrong = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+        WebSocketVmOptions pinned(
+          List<String> pins, {
+          bool roots = true,
+          bool insecure = false,
+          WebSocketProxy? proxy,
+        }) => WebSocketVmOptions(
+          tls: WebSocketTls(
+            trustedRootsPem: roots ? server.caPem : null,
+            pins: pins,
+            allowInsecure: insecure,
+          ),
+          proxy: proxy,
+        );
+
+        test('the right key (with a backup pin) connects', () async {
+          final c = client(vm: pinned([wrong, 'sha256/${server.wssPin}']));
+          await c.connect(server.tls('/echo'));
+          await roundTrip(c);
+          await c.close();
+        });
+
+        test('another key fails as pinMismatch', () async {
+          expect(
+            await connectError(server.tls('/echo'), vm: pinned([wrong])),
+            failed(
+              WebSocketConnectionFailure.tls,
+              tls: WebSocketTlsFailure.pinMismatch,
+            ),
+          );
+        });
+
+        test('the chain is checked first', () async {
+          expect(
+            await connectError(
+              server.tls('/echo'),
+              vm: pinned([server.wssPin], roots: false),
+            ),
+            failed(
+              WebSocketConnectionFailure.tls,
+              tls: WebSocketTlsFailure.untrusted,
+            ),
+          );
+        });
+
+        test('allowInsecure skips the chain, never the pins', () async {
+          final c = client(
+            vm: pinned([server.wssPin], roots: false, insecure: true),
+          );
+          await c.connect(server.tls('/echo'));
+          await roundTrip(c);
+          await c.close();
+          // Same CA, another key.
+          expect(
+            await connectError(
+              'wss://localhost:${server.wssBadHost}/echo',
+              vm: pinned([server.wssPin], roots: false, insecure: true),
+            ),
+            failed(
+              WebSocketConnectionFailure.tls,
+              tls: WebSocketTlsFailure.pinMismatch,
+            ),
+          );
+        });
+
+        test('through a CONNECT tunnel', () async {
+          final proxy = WebSocketProxy(host: '127.0.0.1', port: server.proxy);
+          final c = client(vm: pinned([server.wssPin], proxy: proxy));
+          await c.connect(server.tls('/echo'));
+          await roundTrip(c);
+          await c.close();
+          expect(
+            await connectError(
+              server.tls('/echo'),
+              vm: pinned([wrong], proxy: proxy),
+            ),
+            failed(
+              WebSocketConnectionFailure.tls,
+              tls: WebSocketTlsFailure.pinMismatch,
+            ),
+          );
+        });
+
+        test('an invalid pin fails without connecting or retrying', () async {
+          final c = WebSocketClient.text(
+            options: WebSocketOptions(vm: pinned(['not a pin'])),
+          );
+          final states = <WebSocketState>[];
+          c.states.listen(states.add);
+          await expectLater(
+            c.connect(server.tls('/echo')),
+            throwsA(
+              allOf(
+                failed(
+                  WebSocketConnectionFailure.tls,
+                  tls: WebSocketTlsFailure.other,
+                ),
+                isA<WebSocketException>().having(
+                  (e) => e.cause,
+                  'cause',
+                  isA<FormatException>(),
+                ),
+              ),
+            ),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          expect(states.last, isA<WebSocketState$Disconnected>());
+          expect(states.whereType<WebSocketState$Reconnecting>(), isEmpty);
+          await c.close();
+        });
+      });
+
       test('wss to a plain port and ws to a TLS port fail cleanly', () async {
         expect(
           await connectError(

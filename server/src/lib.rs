@@ -68,6 +68,10 @@ pub struct Options {
     pub proxy_auth_port: u16,
     /// Also listen on `[::1]` (same port number as `port` unless `port` is 0).
     pub ipv6: bool,
+    /// PEM files (chain, private key) the `wss` port serves instead of the
+    /// generated certificate: a CA installed on a test device. `wss_spki`
+    /// is then empty.
+    pub tls_cert: Option<(String, String)>,
 }
 
 impl Default for Options {
@@ -81,6 +85,7 @@ impl Default for Options {
             proxy_port: 0,
             proxy_auth_port: 0,
             ipv6: true,
+            tls_cert: None,
         }
     }
 }
@@ -104,6 +109,8 @@ pub struct Server {
     pub ca_pem: String,
     /// DER of the same CA certificate.
     pub ca_der: Vec<u8>,
+    /// SubjectPublicKeyInfo (DER) of the `wss` certificate.
+    pub wss_spki: Vec<u8>,
 }
 
 impl Server {
@@ -116,7 +123,11 @@ impl Server {
             p.ws, p.wss, p.wss_badhost, p.wss_expired, p.proxy, p.proxy_auth
         );
         http::json_str(&mut out, &self.ca_pem);
-        out.push('}');
+        out.push_str(",\"wss_spki\":\"");
+        for b in &self.wss_spki {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out.push_str("\"}");
         out
     }
 }
@@ -151,7 +162,11 @@ pub async fn start(opts: &Options) -> Result<Server, BoxError> {
         proxy_auth: proxy_auth.local_addr()?.port(),
     };
     tokio::spawn(accept_loop(plain, None, shared.clone()));
-    tokio::spawn(accept_loop(secure, Some(pki.good), shared.clone()));
+    let (good, wss_spki) = match &opts.tls_cert {
+        Some((cert, key)) => (tls::from_files(cert, key)?, Vec::new()),
+        None => (pki.good, pki.good_spki),
+    };
+    tokio::spawn(accept_loop(secure, Some(good), shared.clone()));
     tokio::spawn(accept_loop(badhost, Some(pki.badhost), shared.clone()));
     tokio::spawn(accept_loop(expired, Some(pki.expired), shared.clone()));
     if let Some((Some(l), _)) = ipv6 {
@@ -163,6 +178,7 @@ pub async fn start(opts: &Options) -> Result<Server, BoxError> {
         ports,
         ca_pem: pki.ca_pem,
         ca_der: pki.ca_der,
+        wss_spki,
     })
 }
 

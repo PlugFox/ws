@@ -10,6 +10,7 @@ import 'package:ws/src/client/exceptions.dart';
 import 'package:ws/src/client/metrics.dart';
 import 'package:ws/src/client/options.dart';
 import 'package:ws/src/client/state.dart';
+import 'package:ws/src/client/tls_pins.dart';
 import 'package:ws/src/protocol/handshake.dart';
 import 'package:ws/src/transport/transport.dart';
 import 'package:ws/src/transport/transport_registry.dart';
@@ -468,6 +469,21 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
           ..terminal = true
           ..fail(
             WebSocketHandshakeException('Invalid handshake request', cause: e),
+          );
+        return;
+      }
+      try {
+        pinDigests(_options.vm.tls.pins);
+      } on FormatException catch (e) {
+        session
+          ..terminal = true
+          ..fail(
+            WebSocketConnectionException(
+              'Invalid TLS pin',
+              failure: WebSocketConnectionFailure.tls,
+              tls: WebSocketTlsFailure.other,
+              cause: e,
+            ),
           );
         return;
       }

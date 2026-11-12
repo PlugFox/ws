@@ -109,7 +109,13 @@ Future<Uri?> _prebuilt(HookInput input, String target, String name) async {
   if (!file.existsSync()) return null;
   final sums = File.fromUri(dir.resolve('checksums.json'));
   if (!sums.existsSync()) {
-    throw StateError('ws_native: prebuilt/checksums.json is missing');
+    // A library built by hand (tool/build_native.sh) has no checksum:
+    // refuse it rather than load an unverified binary.
+    throw StateError(
+      'ws_native: prebuilt/checksums.json is missing next to '
+      'prebuilt/$target/$name. Run `mise run native:prebuilt` to write it, '
+      'or delete native/prebuilt/ to build from source.',
+    );
   }
   final expected =
       (jsonDecode(await sums.readAsString())

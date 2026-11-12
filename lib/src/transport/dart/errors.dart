@@ -1,7 +1,7 @@
 import 'dart:io' as io;
-import 'dart:typed_data';
 
 import 'package:ws/src/client/exceptions.dart';
+import 'package:ws/src/transport/dart/certificate.dart';
 
 /// Classifies a failure while opening a connection (DECISIONS.md D42).
 /// [viaProxy]: the socket was being opened to the proxy, so any socket
@@ -95,118 +95,4 @@ WebSocketTlsFailure tlsFailure(
     return WebSocketTlsFailure.untrusted;
   }
   return WebSocketTlsFailure.handshake;
-}
-
-/// The DNS names and IP addresses of a certificate's subjectAltName
-/// extension (RFC 5280 §4.2.1.6).
-typedef AltNames = ({List<String> dns, List<Uint8List> ip});
-
-/// Whether [host] is covered (RFC 6125: one leading `*` label at most).
-extension AltNamesMatch on AltNames {
-  /// Whether [host] (a name or an IP literal) is covered.
-  bool matches(String host) {
-    final address = io.InternetAddress.tryParse(host);
-    if (address != null) {
-      final raw = address.rawAddress;
-      return ip.any((a) => _sameBytes(a, raw));
-    }
-    final name = _normalize(host);
-    for (final pattern in dns.map(_normalize)) {
-      if (pattern == name) return true;
-      if (pattern.startsWith('*.')) {
-        final dot = name.indexOf('.');
-        if (dot > 0 && name.substring(dot) == pattern.substring(1)) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-}
-
-String _normalize(String name) {
-  final lower = name.toLowerCase();
-  return lower.endsWith('.') ? lower.substring(0, lower.length - 1) : lower;
-}
-
-bool _sameBytes(List<int> a, List<int> b) {
-  if (a.length != b.length) return false;
-  for (var i = 0; i < a.length; i++) {
-    if (a[i] != b[i]) return false;
-  }
-  return true;
-}
-
-/// Reads the subjectAltName extension from a DER certificate; `null` when
-/// it is absent or the encoding is not understood.
-AltNames? subjectAltNames(Uint8List der) {
-  try {
-    final certificate = _Der(der, 0, der.length).children().first;
-    final tbs = certificate.children().first;
-    final extensions = tbs.children().where((e) => e.tag == 0xA3);
-    if (extensions.isEmpty) return null;
-    for (final extension in extensions.first.children().first.children()) {
-      final parts = extension.children();
-      if (!_sameBytes(parts.first.value, const [0x55, 0x1D, 0x11])) continue;
-      final names = parts.last.value; // OCTET STRING
-      final dns = <String>[];
-      final ip = <Uint8List>[];
-      for (final name in _Der(
-        names,
-        0,
-        names.length,
-      ).children().first.children()) {
-        if (name.tag == 0x82) dns.add(String.fromCharCodes(name.value));
-        if (name.tag == 0x87) ip.add(name.value);
-      }
-      return (dns: dns, ip: ip);
-    }
-    return null;
-  } on Object {
-    return null;
-  }
-}
-
-/// A DER element list between [_start] and [_end] of [_bytes].
-final class _Der {
-  _Der(this._bytes, this._start, this._end);
-
-  final Uint8List _bytes;
-  final int _start;
-  final int _end;
-
-  /// The elements in this range.
-  List<_Element> children() {
-    final out = <_Element>[];
-    var i = _start;
-    while (i < _end) {
-      final tag = _bytes[i++];
-      var length = _bytes[i++];
-      if (length & 0x80 != 0) {
-        final count = length & 0x7F;
-        if (count == 0 || count > 4) throw const FormatException('DER length');
-        length = 0;
-        for (var k = 0; k < count; k++) {
-          length = (length << 8) | _bytes[i++];
-        }
-      }
-      if (i + length > _end) throw const FormatException('DER overrun');
-      out.add(_Element(tag, _bytes, i, i + length));
-      i += length;
-    }
-    return out;
-  }
-}
-
-final class _Element {
-  _Element(this.tag, this._bytes, this._start, this._end);
-
-  final int tag;
-  final Uint8List _bytes;
-  final int _start;
-  final int _end;
-
-  Uint8List get value => Uint8List.sublistView(_bytes, _start, _end);
-
-  List<_Element> children() => _Der(_bytes, _start, _end).children();
 }

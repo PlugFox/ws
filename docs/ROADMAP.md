@@ -172,9 +172,10 @@ Key properties:
 - [x] Certificate verification against the **platform trust store**
   (DECISIONS.md D35): OS verifier on Apple/Windows, system CA files on
   Linux and Android, `webpki-roots` only as a fallback.
-- [ ] Certificate pinning (SPKI hash) and custom CAs.
-- [ ] An option to allow bad certificates, for development only. Never the
-  default. The benchmarks use an accept-any verifier, and it must not leak
+- [x] Certificate pinning (SPKI hash) and custom CAs; Android user CAs
+  on request, disabled system CAs honoured (DECISIONS.md D45).
+- [x] An option to allow bad certificates, for development only. Never the
+  default (`WebSocketTls.allowInsecure`; pins still apply). The benchmarks use an accept-any verifier, and it must not leak
   into the library.
 - [ ] ALPN, SNI, TLS 1.2/1.3 support. Crypto provider: `ring` (as now) or
   `aws-lc-rs` — compare build complexity and binary size for mobile

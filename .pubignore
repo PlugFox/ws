@@ -75,3 +75,5 @@ target/
 /native/
 # Separate package `ws_flutter`, published from flutter/.
 /flutter/
+# Device checks (Flutter app), not part of any package.
+/device_test/

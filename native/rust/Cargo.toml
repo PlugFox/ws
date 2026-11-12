@@ -18,6 +18,8 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "mac
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-tungstenite = "0.30"
 socket2 = { version = "0.6", features = ["all"] }
+# Already linked through rustls (crypto provider); used for pin digests.
+ring = "0.17.14"
 
 [target.'cfg(any(target_vendor = "apple", windows))'.dependencies]
 rustls-platform-verifier = "0.7.1"
@@ -29,6 +31,7 @@ webpki-roots = "1.0.10"
 rustls-native-certs = "0.8.5"
 
 [dev-dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
 tokio = { version = "1.54.1", features = ["test-util"] }
 
 [profile.release]

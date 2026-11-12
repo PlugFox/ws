@@ -142,6 +142,27 @@ The library contains Rust crates whose licences ask for their notices next
 to binary copies: ship `THIRD_PARTY_LICENSES` from the same GitHub release
 (the installer prints its URL).
 
+### Certificates
+
+Native platforms check certificates against the system's trust store
+(`dart:io` or the OS verifier); the browser decides on the web. Options
+in `WebSocketVmOptions.tls`:
+
+```dart
+const tls = WebSocketTls(
+  // The server's key must match one of these (leaf only). Keep a backup.
+  pins: [
+    'sha256/p0dAcXTqjb1pOyqx9b1+gv64MBFcxSTFRp0WzCzKgG8=',
+    'sha256/if3U7Jiwl3/2MhGRAt/JaFJabO8K+rGnjmQ/ny4D3L4=',
+  ],
+  // Android: also trust user and MDM CAs (corporate TLS inspection).
+  trustUserCertificates: true,
+);
+```
+
+Android's `network_security_config` and Apple's ATS do not apply to this
+library: it opens its own sockets. See [docs/SECURITY.md](docs/SECURITY.md).
+
 ### Testing your code
 
 ```dart
@@ -161,6 +182,7 @@ server.last.drop();             // simulate a lost connection
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — layers and the rules per layer
 - [docs/DECISIONS.md](docs/DECISIONS.md) — every compared alternative, with numbers
+- [docs/SECURITY.md](docs/SECURITY.md) — trust stores, pins, platform policies that do not apply
 - [docs/ROADMAP.md](docs/ROADMAP.md) — plan, open checks, milestones
 - [docs/NATIVE_DISTRIBUTION.md](docs/NATIVE_DISTRIBUTION.md) — how Dart packages ship native code
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — tools and tasks (`mise run check`), releasing

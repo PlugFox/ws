@@ -23,6 +23,11 @@
   one ping and replaces a dead one at once, without the backoff. Also for
   network changes. New state `WebSocketState.suspended`. The `ws_flutter`
   package calls them from the Flutter app lifecycle.
+- `WebSocketTls.pins` (SHA-256 of the server key, leaf only, checked
+  after the chain; mismatch: `WebSocketTlsFailure.pinMismatch`) and
+  `WebSocketTls.trustUserCertificates` (Android: also trust user and MDM
+  CAs). On Android both transports drop the system CAs the user disabled.
+  TLS settings are built once per distinct value and reused.
 - `package:ws/testing.dart`: in-memory `FakeWebSocketServer` for tests.
 - `package:ws/native.dart`: the Rust transport loaded from a file
   (`WsNativeLibrary.open(path).install()`), and `dart run ws:install` to

@@ -89,6 +89,7 @@ const TLS_EXPIRED: i64 = 3;
 const TLS_NOT_YET_VALID: i64 = 4;
 const TLS_REVOKED: i64 = 5;
 const TLS_HANDSHAKE: i64 = 6;
+const TLS_PIN_MISMATCH: i64 = 7;
 
 const SEND_OK: u32 = 0;
 const SEND_CLOSED: u32 = 1;
@@ -188,6 +189,12 @@ struct Config {
     allow_insecure: bool,
     #[serde(default)]
     roots_pem: Option<String>,
+    /// SHA-256 of accepted SubjectPublicKeyInfos, 64 hex digits each.
+    #[serde(default)]
+    pins: Vec<String>,
+    /// Android: also trust user-installed CAs.
+    #[serde(default)]
+    user_roots: bool,
     #[serde(default)]
     proxy: Option<net::Proxy>,
     /// TCP keepalive idle time in milliseconds; absent disables it.
@@ -609,6 +616,9 @@ fn tls_detail(error: &std::io::Error) -> i64 {
             C::Expired | C::ExpiredContext { .. } => TLS_EXPIRED,
             C::NotValidYet | C::NotValidYetContext { .. } => TLS_NOT_YET_VALID,
             C::Revoked => TLS_REVOKED,
+            C::Other(other) if other.0.downcast_ref::<tls::PinMismatch>().is_some() => {
+                TLS_PIN_MISMATCH
+            }
             _ => TLS_UNTRUSTED,
         },
         _ => TLS_HANDSHAKE,
@@ -710,8 +720,19 @@ async fn open(config: &Config) -> Result<(WebSocketStream<Box<dyn Io>>, Option<S
     .await
     .map_err(Closed::connect)?;
     let mut stream: Box<dyn Io> = if secure {
-        let tls = tls::client_config(config.allow_insecure, config.roots_pem.as_deref())
-            .map_err(|e| Closed::error(ERR_TLS, e.to_string()))?;
+        let settings = tls::Settings {
+            allow_insecure: config.allow_insecure,
+            roots_pem: config.roots_pem.clone(),
+            pins: config
+                .pins
+                .iter()
+                .map(|p| tls::parse_pin(p))
+                .collect::<Result<_, _>>()
+                .map_err(|e| Closed::error(ERR_TLS, e.to_string()))?,
+            user_roots: config.user_roots,
+        };
+        let tls =
+            tls::client_config(settings).map_err(|e| Closed::error(ERR_TLS, e.to_string()))?;
         let name = ServerName::try_from(host).map_err(|e| Closed::error(ERR_TLS, e.to_string()))?;
         let stream = TlsConnector::from(tls)
             .connect(name, tcp)

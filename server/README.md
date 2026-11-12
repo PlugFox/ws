@@ -8,13 +8,15 @@ and script raw frames; well-behaved endpoints hand the socket to tungstenite.
 ```bash
 cargo run --release -- [--host 127.0.0.1] [--port 9090] [--tls-port 9443] \
   [--badhost-port 0] [--proxy-port 0] [--proxy-auth-port 0] [--no-ipv6] \
-  [--ready-json] [--verbose]
+  [--tls-cert chain.pem --tls-key key.pem] [--ready-json] [--verbose]
 # or from the repository root
 make server
 ```
 
 Without `--ready-json` it prints the listeners to stderr and runs until
-ctrl-c/SIGTERM.
+ctrl-c/SIGTERM. `--tls-cert`/`--tls-key` make the `wss` port serve your
+own chain instead of the generated one, for example one issued by a CA
+installed on a test device (`wss_spki` is then empty).
 
 ## Test harness contract (`--ready-json`)
 
@@ -26,7 +28,7 @@ Binds every listener (port `0` = ephemeral), then prints exactly one line to
 stdout:
 
 ```json
-{"ws":62406,"wss":62407,"wss_badhost":62408,"wss_expired":62412,"ws6":62411,"proxy":62409,"proxy_auth":62410,"ca_pem":"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"}
+{"ws":62406,"wss":62407,"wss_badhost":62408,"wss_expired":62412,"ws6":62411,"proxy":62409,"proxy_auth":62410,"ca_pem":"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n","wss_spki":"3059..."}
 ```
 
 | key | meaning |
@@ -39,6 +41,7 @@ stdout:
 | `proxy` | HTTP CONNECT proxy, no auth |
 | `proxy_auth` | CONNECT proxy requiring `Proxy-Authorization: Basic dGVzdDpzZWNyZXQ=` (`test:secret`) |
 | `ca_pem` | the CA that signed the TLS certificates (generated at startup) |
+| `wss_spki` | hex DER SubjectPublicKeyInfo of the `wss` certificate (pin tests) |
 
 The process exits when stdin reaches EOF (so a dead parent leaves no
 orphan) or on ctrl-c/SIGTERM. Per-connection errors are not printed unless

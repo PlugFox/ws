@@ -5,13 +5,16 @@ import 'dart:io' as io;
 import 'dart:typed_data';
 
 import 'package:ws/src/client/exceptions.dart';
+import 'package:ws/src/client/tls_pins.dart';
 import 'package:ws/src/protocol/frame.dart';
 import 'package:ws/src/protocol/frame_reader.dart';
 import 'package:ws/src/protocol/frame_writer.dart';
 import 'package:ws/src/protocol/handshake.dart';
+import 'package:ws/src/transport/dart/certificate.dart';
 import 'package:ws/src/transport/dart/errors.dart';
 import 'package:ws/src/transport/dart/keep_alive.dart';
 import 'package:ws/src/transport/dart/proxy_tunnel.dart';
+import 'package:ws/src/transport/dart/trust.dart';
 import 'package:ws/src/transport/transport.dart';
 
 /// The platform transport on native platforms: pure Dart.
@@ -101,12 +104,7 @@ final class _DartConnection implements TransportConnection, FrameHandler {
     StreamSubscription<io.RawSocketEvent>? tunnel;
     io.X509Certificate? rejected;
     try {
-      final context = !handshake.secure || tls.trustedRootsPem == null
-          ? null
-          : (io.SecurityContext(withTrustedRoots: true)
-              ..setTrustedCertificatesBytes(
-                Uint8List.fromList(tls.trustedRootsPem!.codeUnits),
-              ));
+      final context = handshake.secure ? securityContext(tls) : null;
       // Records the rejected certificate: on Apple platforms dart:io only
       // says "application verification failure", so its dates and names
       // classify the failure (D42).
@@ -151,6 +149,17 @@ final class _DartConnection implements TransportConnection, FrameHandler {
           tunnel = null;
           if (_finished) return socket.close().ignore();
           _socket = socket;
+        }
+      }
+      if (handshake.secure && tls.pins.isNotEmpty) {
+        final certificate = (socket as io.RawSecureSocket).peerCertificate;
+        if (certificate == null ||
+            !matchesPin(certificate.der, pinDigests(tls.pins))) {
+          throw const WebSocketConnectionException(
+            'TLS: the server certificate matches none of the pins',
+            failure: WebSocketConnectionFailure.tls,
+            tls: WebSocketTlsFailure.pinMismatch,
+          );
         }
       }
     } on Object catch (e) {

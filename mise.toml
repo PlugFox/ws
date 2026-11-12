@@ -95,6 +95,10 @@ depends = ["fmt:check", "analyze", "check:pubignore", "check:deny", "test"]
 description = "All tests: VM, Chrome (dart2js, dart2wasm), native (hook and path), Flutter, Rust"
 depends = ["test:vm", "test:web", "test:native", "test:flutter", "test:rust"]
 
+[tasks."test:device"]
+description = "Integration tests on a connected device (args: <device-id> [--user-ca] [test file]), see device_test/README.md"
+run = "tool/device_test.sh"
+
 [tasks."test:flutter"]
 description = "ws_flutter tests (app lifecycle)"
 dir = "flutter"

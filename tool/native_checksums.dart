@@ -13,7 +13,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:ws/src/native/install.dart' show nativeLibraryFileName;
-import 'package:ws/src/native/sha256.dart';
+import 'package:ws/src/util/sha256.dart';
 
 /// Every target a release ships (tool/build_native.sh, prebuilt.yml).
 const releaseTargets = [
