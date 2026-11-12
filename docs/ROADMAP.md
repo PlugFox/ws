@@ -192,8 +192,9 @@ Key properties:
 - [x] IPv6 and NAT64 (iOS review requirement): `getaddrinfo` + Happy
   Eyeballs (RFC 8305) in Rust, as `dart:io` does (DECISIONS.md D34). IPv4
   literals on NAT64 remain unsupported on both transports.
-- [ ] Network changes (Wi-Fi ↔ cellular): detect dead connections quickly
-  with heartbeats and TCP keepalive, then reconnect.
+- [x] Network changes (Wi-Fi ↔ cellular): detect dead connections quickly
+  with heartbeats and TCP keepalive, then reconnect. Both on by default
+  (DECISIONS.md D41).
 - [ ] App lifecycle: iOS suspends sockets in the background. Reconnect on
   resume. Do not drain the battery with heartbeats in the background.
 - [ ] App Store review: plain BSD sockets are fine. Document that ATS does
@@ -244,8 +245,9 @@ Key properties:
 
 - [ ] Reconnect with exponential backoff and jitter, max attempts, and a
   manual `reconnect()`.
-- [ ] Heartbeat: protocol ping/pong on native, an application-level hook on
-  web. Timeouts close the connection and trigger a reconnect.
+- [x] Heartbeat: protocol ping/pong on native, an application-level hook on
+  web. Timeouts close the connection and trigger a reconnect. On by
+  default; a draining send queue extends the wait (D41).
 - [ ] Metrics: bytes and messages in/out, reconnects, last error, round
   trip, transport in use, queue sizes and flow-control stalls.
 - [ ] Interceptors / middleware for outgoing and incoming messages (1.x had

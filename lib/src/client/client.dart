@@ -410,6 +410,7 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
             textMode: _codec.textMode,
             tls: _options.vm.tls,
             proxy: _options.vm.proxy,
+            keepAlive: _options.vm.keepAlive,
           ),
           session,
         );
@@ -1058,16 +1059,37 @@ final class _Session<T> implements TransportListener {
     }
     // Idle long enough (or the timer fired late after a suspension): probe
     // first, and only give up if the probe gets no answer.
-    final mark = _inbound;
+    _probe(heartbeat);
+  }
+
+  void _probe(WebSocketHeartbeat<T> heartbeat) {
+    final inbound = _inbound;
+    final sending = _sendProgress();
     _sendPing();
     _heartbeatTimer = Timer(heartbeat.timeout, () {
       if (!_current || _heartbeat == null) return;
-      if (_inbound == mark) {
-        fail(const WebSocketTimeoutException('Heartbeat timed out'));
-      } else {
-        _scheduleHeartbeat(heartbeat.interval);
+      if (_inbound != inbound) return _scheduleHeartbeat(heartbeat.interval);
+      // A large upload on a slow link: the ping waits behind it, but the
+      // queue keeps draining, so the peer is acknowledging data. Wait for
+      // the probe again instead of dropping a healthy connection.
+      final now = _sendProgress();
+      if (sending != null && now != null) {
+        final (pushed, queued) = now;
+        if (queued < sending.$2 + (pushed - sending.$1)) {
+          return _probe(heartbeat);
+        }
       }
+      fail(const WebSocketTimeoutException('Heartbeat timed out'));
     });
+  }
+
+  /// (bytes pushed so far, bytes still queued), or `null` without a
+  /// connection. Queued bytes may include framing, which only makes the
+  /// progress check stricter.
+  (int, int)? _sendProgress() {
+    final c = connection;
+    if (c == null) return null;
+    return (_client._bytesSent, c.bufferedAmount);
   }
 
   /// Sends a ping; returns the error if it could not be sent.

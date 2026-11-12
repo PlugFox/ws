@@ -946,6 +946,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simd-json",
+ "socket2",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",

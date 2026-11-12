@@ -17,6 +17,7 @@ simd-json = "0.19.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-tungstenite = "0.30"
+socket2 = { version = "0.6", features = ["all"] }
 
 [target.'cfg(any(target_vendor = "apple", windows))'.dependencies]
 rustls-platform-verifier = "0.7.1"

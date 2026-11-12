@@ -8,6 +8,10 @@
   `WebSocket`), browser transport on `package:web` (dart2js and dart2wasm).
 - Reconnect with full-jitter backoff and terminal-failure detection,
   heartbeat, request/response correlation, metrics.
+- Dead connections are detected by default: heartbeat on (30 s idle,
+  10 s to answer; a draining upload extends the wait) and TCP keepalive
+  (`WebSocketVmOptions.keepAlive`, 30 s; `TCP_USER_TIMEOUT` on Linux and
+  Android).
 - `package:ws/testing.dart`: in-memory `FakeWebSocketServer` for tests.
 - `package:ws/native.dart`: the Rust transport loaded from a file
   (`WsNativeLibrary.open(path).install()`), and `dart run ws:install` to

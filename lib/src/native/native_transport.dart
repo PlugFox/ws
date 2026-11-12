@@ -98,6 +98,8 @@ final class _NativeConnection implements TransportConnection, Finalizable {
             'port': proxy.port,
             'authorization': proxy.authorization,
           },
+        if (request.keepAlive case final keepAlive?)
+          'keepalive_ms': keepAlive.inMilliseconds,
       }),
     );
     _id = _lib.connect(

@@ -5,6 +5,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show sleep;
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
@@ -598,6 +599,81 @@ void serverConformance(WebSocketTransport Function() create) {
           }
         }
         expect(waited, isTrue, reason: 'push never applied backpressure');
+        await c.close();
+      });
+    });
+
+    group('liveness', () {
+      test('a blocked isolate does not drop a healthy connection', () async {
+        final c = WebSocketClient.text(
+          options: const WebSocketOptions(
+            reconnect: WebSocketReconnect.disabled(),
+            heartbeat: WebSocketHeartbeat(
+              interval: Duration(milliseconds: 100),
+              timeout: Duration(milliseconds: 200),
+            ),
+          ),
+        );
+        final states = <WebSocketState>[];
+        c.states.listen(states.add);
+        await c.connect(server.url('/echo'));
+        // Block longer than interval + timeout, wake up briefly (a ping goes
+        // out), block again while the pong arrives.
+        for (var i = 0; i < 6; i++) {
+          sleep(const Duration(milliseconds: 500));
+          await Future<void>.delayed(Duration(milliseconds: 20 + 15 * i));
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        expect(c.state.isOpen, isTrue, reason: '$states');
+        expect(c.metrics.lastRoundTrip, isNotNull);
+        await roundTrip(c);
+        await c.close();
+      });
+
+      test('a slow upload delays the pong without dropping', () async {
+        final c = WebSocketClient.binary(
+          options: const WebSocketOptions(
+            reconnect: WebSocketReconnect.disabled(),
+            disconnectTimeout: Duration(milliseconds: 500),
+            heartbeat: WebSocketHeartbeat(
+              interval: Duration(milliseconds: 300),
+              timeout: Duration(milliseconds: 1500),
+            ),
+          ),
+        );
+        final states = <WebSocketState>[];
+        c.states.listen(states.add);
+        await c.connect(server.url('/slow-read?bps=2097152'));
+        final chunk = Uint8List(256 << 10);
+        final pushes = [for (var i = 0; i < 32; i++) c.push(chunk)];
+        await Future.wait(pushes).timeout(const Duration(seconds: 20));
+        // 8 MiB at 2 MiB/s: pongs wait behind the data for seconds.
+        await Future<void>.delayed(const Duration(seconds: 1));
+        expect(c.state.isOpen, isTrue, reason: '$states');
+        await c.close();
+      });
+
+      test('a server that stops reading and answering is dropped', () async {
+        final c = WebSocketClient.binary(
+          options: const WebSocketOptions(
+            reconnect: WebSocketReconnect.disabled(),
+            heartbeat: WebSocketHeartbeat(
+              interval: Duration(milliseconds: 200),
+              timeout: Duration(milliseconds: 500),
+            ),
+          ),
+        );
+        final ended = c.states
+            .where((s) => s is WebSocketState$Disconnected)
+            .cast<WebSocketState$Disconnected>()
+            .first;
+        await c.connect(server.url('/silent?read=0'));
+        final chunk = Uint8List(256 << 10);
+        for (var i = 0; i < 64; i++) {
+          c.push(chunk).ignore();
+        }
+        final state = await ended.timeout(const Duration(seconds: 10));
+        expect(state.error, isA<WebSocketTimeoutException>());
         await c.close();
       });
     });

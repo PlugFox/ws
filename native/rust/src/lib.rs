@@ -173,6 +173,9 @@ struct Config {
     roots_pem: Option<String>,
     #[serde(default)]
     proxy: Option<net::Proxy>,
+    /// TCP keepalive idle time in milliseconds; absent disables it.
+    #[serde(default)]
+    keepalive_ms: Option<u64>,
 }
 
 fn default_max_message() -> usize {
@@ -624,9 +627,14 @@ async fn open(config: &Config) -> Result<(WebSocketStream<Box<dyn Io>>, Option<S
         format!("/{target}")
     };
 
-    let tcp = net::connect(&host, port, config.proxy.as_ref())
-        .await
-        .map_err(|e| connection(e.into()))?;
+    let tcp = net::connect(
+        &host,
+        port,
+        config.proxy.as_ref(),
+        config.keepalive_ms.map(Duration::from_millis),
+    )
+    .await
+    .map_err(|e| connection(e.into()))?;
     let mut stream: Box<dyn Io> = if secure {
         let tls = tls::client_config(config.allow_insecure, config.roots_pem.as_deref())
             .map_err(|e| Closed::error(ERR_TLS, e.to_string()))?;
@@ -717,8 +725,12 @@ async fn serve(
         }
     });
 
-    // Writer. `buffered` drops only after a successful flush, so it always
-    // counts bytes not yet handed to the OS.
+    // Writer. `buffered` counts bytes not yet handed to the OS. A message's
+    // bytes are subtracted once the next message was accepted (the sink
+    // has written everything before it then, apart from at most
+    // tungstenite's write buffer of 128 KiB) or after a flush. Under
+    // sustained load the count therefore falls steadily, which the
+    // heartbeat reads as upload progress (DECISIONS.md D41).
     let writer_shared = shared.clone();
     let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
     let writer = tokio::spawn(async move {
@@ -735,8 +747,15 @@ async fn serve(
             };
             let result = match command {
                 Command::Send(m, len) => {
+                    let result = sink.feed(m).await;
+                    if result.is_ok() && unflushed > 0 {
+                        writer_shared
+                            .buffered
+                            .fetch_sub(unflushed, Ordering::SeqCst);
+                        unflushed = 0;
+                    }
                     unflushed += len;
-                    sink.feed(m).await
+                    result
                 }
                 Command::Ping => sink.feed(Message::Ping(Default::default())).await,
                 Command::Close(code, reason) => {

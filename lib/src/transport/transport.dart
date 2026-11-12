@@ -27,6 +27,7 @@ final class TransportRequest {
     this.textMode = TransportTextMode.raw,
     this.tls = const WebSocketTls(),
     this.proxy,
+    this.keepAlive,
   });
 
   /// `ws://` or `wss://` URL.
@@ -49,6 +50,9 @@ final class TransportRequest {
 
   /// HTTP `CONNECT` proxy, or `null`.
   final WebSocketProxy? proxy;
+
+  /// TCP keepalive idle time, or `null` to leave keepalive off.
+  final Duration? keepAlive;
 }
 
 /// Receives the events of one connection.

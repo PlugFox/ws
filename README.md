@@ -31,7 +31,6 @@ Future<void> main() async {
   final client = WebSocketClient.json(
     options: WebSocketOptions(
       rpc: const WebSocketJsonRpc(), // {"id": n, ...} correlation
-      heartbeat: const WebSocketHeartbeat(),
       onStateChange: print,
     ),
   );

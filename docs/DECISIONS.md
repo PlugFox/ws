@@ -285,7 +285,9 @@ abstract interface class WebSocketRpc<T> {
 
 ### D15. Heartbeat
 
-- Native: ping/timeout runs in Rust (tokio timer), the isolate is not woken.
+- ~~Native: ping/timeout runs in Rust (tokio timer), the isolate is not
+  woken.~~ Superseded by D41: the heartbeat is a Dart timer on every
+  transport; Rust answers server pings itself.
 - Pure Dart: protocol ping from a Dart timer.
 - Web: browsers hide ping/pong. An idle watchdog without pings would kill
   healthy idle sockets. The app-level heartbeat is a common option
@@ -966,3 +968,50 @@ From `docs/review/distribution.md`:
   Rust crates, pinned action SHAs and Dependabot for cargo.
 - Status: **adopted**; zigbuild and the Windows static CRT are verified
   only by CI.
+
+### D41. Liveness by default: heartbeat, upload progress, TCP keepalive
+
+From `docs/review/future_risks.md` R3, R4, 6.7, 10.1–10.3. A half-open
+connection (radio loss, NAT rebinding, a load balancer reaping without a
+reset) is the normal failure on mobile; with the old defaults a client
+sat in `open` forever.
+
+- `WebSocketOptions.heartbeat` defaults to `WebSocketHeartbeat()` (ping
+  after 30 s without inbound traffic, 10 s to answer); `null` disables
+  it. In the browser it stays inert unless an application-level `ping`
+  is configured (pages cannot send protocol pings).
+- Upload progress counts as liveness: when the probe times out but the
+  send queue drained since it was sent (the ping waits behind a large
+  upload on a slow link), the probe is repeated instead of dropping the
+  connection. Pushing more is not progress. A queue that stops draining
+  with no inbound traffic is a dead connection (10.3).
+  Limitation: only bytes in our queue are seen; data already in the OS
+  send buffer is not, so the last few hundred KB of an upload still have
+  to fit in `timeout`.
+- The native writer now lowers `buffered` as soon as the sink accepted
+  the next message (everything before it is written, apart from at most
+  tungstenite's 128 KiB write buffer), not only after the queue emptied
+  and flushed. Before, an 8 MiB upload showed 8 MiB queued until the end,
+  and the heartbeat dropped it after 1.8 s (server suite "a slow upload
+  delays the pong without dropping"); now the count falls by about 1 MiB
+  every 500 ms at 2 MiB/s and the test passes on both transports.
+- TCP keepalive on both VM transports, `WebSocketVmOptions.keepAlive`,
+  default 30 s: probes after 30 s idle, every 10 s, 3 probes; on Linux
+  and Android `TCP_USER_TIMEOUT` = 60 s bounds unacknowledged data (a
+  black-holed write). Rust uses `socket2`; Dart sets the same raw
+  options (option numbers per platform in `keep_alive.dart`). Windows
+  ignores the probe count (10). Best effort: refused options are
+  ignored. Verified by reading the options back on macOS and Linux
+  (`test/transport/keep_alive_test.dart`, Rust `keepalive_is_set`);
+  Windows by CI.
+- The ping schedule stays in Dart for every transport instead of moving
+  into Rust (D15 said otherwise). One implementation serves the
+  application-level ping that the web needs anyway; Rust already answers
+  server pings without the isolate. The risk named in 6.7, a blocked
+  isolate declaring a healthy connection dead, does not happen: after a
+  gap the client probes first, and a pong that arrived while the isolate
+  was blocked is delivered before the late timeout timer (server suite
+  "a blocked isolate does not drop a healthy connection": six 500 ms
+  blocks with a 100 ms interval and 200 ms timeout, both transports).
+  Kernel keepalive covers the suspended app.
+- Status: **adopted**.

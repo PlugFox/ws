@@ -89,6 +89,8 @@ final class WebSocketReconnect {
 final class WebSocketHeartbeat<T> {
   /// Sends a ping after [interval] without incoming traffic, and drops the
   /// connection (then reconnects) if nothing arrives within [timeout].
+  /// While the send queue keeps draining (a long upload delays the ping),
+  /// the wait is extended.
   const WebSocketHeartbeat({
     this.interval = const Duration(seconds: 30),
     this.timeout = const Duration(seconds: 10),
@@ -194,6 +196,7 @@ final class WebSocketVmOptions {
     this.headers = const <String, String>{},
     this.tls = const WebSocketTls(),
     this.proxy,
+    this.keepAlive = const Duration(seconds: 30),
   });
 
   /// Handshake headers (e.g. `Authorization`).
@@ -205,6 +208,15 @@ final class WebSocketVmOptions {
   /// HTTP `CONNECT` proxy; `null` connects directly. System proxy
   /// settings are not read (DECISIONS.md D36).
   final WebSocketProxy? proxy;
+
+  /// TCP keepalive: the operating system probes the peer after this much
+  /// idle time, then every third of it (at least 1 s), and drops the
+  /// connection after 3 unanswered probes. On Linux and Android unsent or
+  /// unacknowledged data is bounded by the same total (`TCP_USER_TIMEOUT`).
+  /// It works while the isolate is busy or the app is suspended, behind
+  /// the [WebSocketOptions.heartbeat]. `null` leaves keepalive off.
+  /// Set where the platform allows it; failures are ignored.
+  final Duration? keepAlive;
 }
 
 /// Options that only apply in the browser. Plain data: compiles everywhere,
@@ -225,7 +237,7 @@ final class WebSocketOptions<T> {
     this.connectTimeout = const Duration(seconds: 10),
     this.disconnectTimeout = const Duration(seconds: 3),
     this.reconnect = const WebSocketReconnect(),
-    this.heartbeat,
+    this.heartbeat = const WebSocketHeartbeat(),
     this.rpc,
     this.rpcTimeout = const Duration(seconds: 30),
     this.maxMessageSize = 64 << 20,
@@ -254,7 +266,11 @@ final class WebSocketOptions<T> {
   /// Reconnect policy.
   final WebSocketReconnect reconnect;
 
-  /// Heartbeat; `null` disables it.
+  /// Heartbeat, on by default: a half-open connection (radio loss, NAT
+  /// rebinding, a load balancer reaping without a reset) is otherwise
+  /// never noticed. `null` disables it. In the browser it does nothing
+  /// unless [WebSocketHeartbeat.ping] is set, since pages cannot send
+  /// protocol pings.
   final WebSocketHeartbeat<T>? heartbeat;
 
   /// Request/response correlation for `rpc()`. Without it `rpc()` throws.

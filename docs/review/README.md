@@ -38,9 +38,8 @@ file; finding ids below refer to them.
    checksums, generate, draft release, publish both packages), licence
    notices for the Rust crates (`cargo about`), `rust-toolchain.toml`,
    pinned action SHAs, Dependabot for cargo and actions, `cargo deny`.
-2. **Liveness by default** (future_risks R3, R4, Top 20 #1): heartbeat on
-   by default on the VM, TCP keepalive / `TCP_USER_TIMEOUT`, decide where
-   pings are scheduled.
+2. ~~**Liveness by default**~~ done, DECISIONS.md D41 (R3, R4, 6.7,
+   10.1–10.3).
 3. **Lifecycle API** (Top 20 #2): suspend/resume in the core, a Flutter
    companion with the lifecycle observer and a path monitor.
 4. **Error hierarchy before the API freeze** (client "API design notes",

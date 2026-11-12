@@ -9,6 +9,7 @@ import 'package:ws/src/protocol/frame.dart';
 import 'package:ws/src/protocol/frame_reader.dart';
 import 'package:ws/src/protocol/frame_writer.dart';
 import 'package:ws/src/protocol/handshake.dart';
+import 'package:ws/src/transport/dart/keep_alive.dart';
 import 'package:ws/src/transport/dart/proxy_tunnel.dart';
 import 'package:ws/src/transport/transport.dart';
 
@@ -125,6 +126,7 @@ final class _DartConnection implements TransportConnection, FrameHandler {
       if (_finished) return socket.close().ignore();
       _socket = socket;
       socket.setOption(io.SocketOption.tcpNoDelay, true);
+      if (_request.keepAlive case final idle?) setKeepAlive(socket, idle);
       if (proxy != null) {
         tunnel = await openTunnel(socket, host, handshake.port, proxy);
         if (_finished) return;

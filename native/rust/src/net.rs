@@ -28,15 +28,53 @@ pub struct Proxy {
 }
 
 /// Opens a TCP connection to `host:port`, directly or through `proxy`.
-pub async fn connect(host: &str, port: u16, proxy: Option<&Proxy>) -> io::Result<TcpStream> {
-    match proxy {
-        None => connect_direct(host, port).await,
+/// With `keepalive`, TCP keepalive starts after that much idle time
+/// (see [`keep_alive`]).
+pub async fn connect(
+    host: &str,
+    port: u16,
+    proxy: Option<&Proxy>,
+    keepalive: Option<Duration>,
+) -> io::Result<TcpStream> {
+    let mut tcp = match proxy {
+        None => connect_direct(host, port).await?,
         Some(proxy) => {
             let mut tcp = connect_direct(&proxy.host, proxy.port).await?;
             tunnel(&mut tcp, host, port, proxy.authorization.as_deref()).await?;
-            Ok(tcp)
+            tcp
         }
+    };
+    if let Some(idle) = keepalive {
+        // Best effort: a second line behind the heartbeat, never a reason
+        // to fail the connection.
+        let _ = keep_alive(&mut tcp, idle);
     }
+    Ok(tcp)
+}
+
+/// Kernel-level liveness that also works while the isolate is suspended or
+/// blocked (DECISIONS.md D41): probes after `idle`, then every `idle / 3`
+/// (at least 1 s), 3 probes. On Linux and Android `TCP_USER_TIMEOUT` bounds
+/// unacknowledged data by the same total, so a black-holed write is
+/// detected too. Windows ignores the probe count (10 probes).
+pub fn keep_alive(tcp: &mut TcpStream, idle: Duration) -> io::Result<()> {
+    let interval = (idle / 3).max(Duration::from_secs(1));
+    let params = socket2::TcpKeepalive::new()
+        .with_time(idle)
+        .with_interval(interval);
+    #[cfg(any(
+        target_os = "android",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    let params = params.with_retries(3);
+    let socket = socket2::SockRef::from(&*tcp);
+    socket.set_tcp_keepalive(&params)?;
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    socket.set_tcp_user_timeout(Some(idle + interval * 3))?;
+    Ok(())
 }
 
 async fn connect_direct(host: &str, port: u16) -> io::Result<TcpStream> {
@@ -180,6 +218,36 @@ fn proxy_error(message: String) -> io::Error {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[tokio::test]
+    async fn keepalive_is_set() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let tcp = connect("127.0.0.1", port, None, Some(Duration::from_secs(30)))
+            .await
+            .unwrap();
+        let socket = socket2::SockRef::from(&tcp);
+        assert!(socket.keepalive().unwrap());
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                socket.tcp_keepalive_time().unwrap(),
+                Duration::from_secs(30)
+            );
+            assert_eq!(
+                socket.tcp_keepalive_interval().unwrap(),
+                Duration::from_secs(10)
+            );
+            assert_eq!(socket.tcp_keepalive_retries().unwrap(), 3);
+        }
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        assert_eq!(
+            socket.tcp_user_timeout().unwrap(),
+            Some(Duration::from_secs(60))
+        );
+        let plain = connect("127.0.0.1", port, None, None).await.unwrap();
+        assert!(!socket2::SockRef::from(&plain).keepalive().unwrap());
+    }
     use std::sync::{Arc, Mutex};
     use tokio::time::Instant;
 

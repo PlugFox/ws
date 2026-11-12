@@ -661,6 +661,85 @@ void main() {
       });
     });
 
+    test('is on by default and can be disabled with null', () {
+      expect(const WebSocketOptions<String>().heartbeat, isNotNull);
+      expect(
+        const WebSocketOptions<String>().heartbeat!.interval,
+        const Duration(seconds: 30),
+      );
+      expect(const WebSocketOptions<String>(heartbeat: null).heartbeat, isNull);
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(transport: server),
+        );
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        server.last.autoPong = false;
+        async.elapse(const Duration(seconds: 41));
+        expect(server.connections.first.pings, 1);
+        expect(server.connections.first.isEnded, isTrue);
+        client.close();
+      });
+    });
+
+    test('a draining send queue extends the wait (slow upload)', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            heartbeat: const WebSocketHeartbeat(
+              interval: Duration(seconds: 10),
+              timeout: Duration(seconds: 5),
+            ),
+          ),
+        );
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        final conn = server.last..autoPong = false;
+        // The ping is stuck behind a large queue that drains slowly.
+        conn.bufferedAmount = 1000;
+        async.elapse(const Duration(seconds: 10));
+        expect(conn.pings, 1);
+        for (var i = 0; i < 6; i++) {
+          conn.bufferedAmount -= 100;
+          async.elapse(const Duration(seconds: 5));
+          expect(conn.isEnded, isFalse, reason: 'round $i');
+        }
+        // Pushing more is not progress by itself (the fake does not count
+        // pushed bytes, a real queue does).
+        client.push('x' * 50);
+        conn.bufferedAmount += 50;
+        async.elapse(const Duration(seconds: 5));
+        expect(conn.isEnded, isTrue, reason: 'the queue stopped draining');
+        client.close();
+      });
+    });
+
+    test('a stalled send queue is a dead connection', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            heartbeat: const WebSocketHeartbeat(
+              interval: Duration(seconds: 10),
+              timeout: Duration(seconds: 5),
+            ),
+          ),
+        );
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        final conn = server.last
+          ..autoPong = false
+          ..bufferedAmount = 1000;
+        async.elapse(const Duration(seconds: 16));
+        expect(conn.isEnded, isTrue);
+        client.close();
+      });
+    });
+
     test('application-level ping and pong', () {
       fake((async) {
         final server = FakeWebSocketServer();
