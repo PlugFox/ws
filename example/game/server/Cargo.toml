@@ -1,0 +1,38 @@
+[package]
+name = "game_server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.43", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs", "set-header"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "macros", "chrono", "uuid"] }
+argon2 = "0.5"
+password-hash = "0.5"
+jsonwebtoken = "9.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+base64 = "0.22"
+subtle = "2.6"
+rand = "0.8"
+maxminddb = "0.24"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2.0"
+anyhow = "1.0"
+bytes = "1.10"
+futures-util = "0.3"
+dashmap = "6.1"
+png = "0.17"
+
+[dev-dependencies]
+tokio = { version = "1.43", features = ["full", "test-util"] }
+reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = "0.26"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
