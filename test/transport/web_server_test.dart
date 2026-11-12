@@ -18,6 +18,7 @@ void main() {
     sharedServerConformance(() => start!.server!, (
       protocolPing: false,
       protocolCloseCodes: false,
+      skipsInterim: false,
     ), unavailable: () => start?.skip);
   });
 }

@@ -45,6 +45,10 @@ final class CheckedTransport implements WebSocketTransport {
         inner.connect(request, checked),
         checked,
       );
+    } on Object {
+      // No connection exists, so no onClosed is owed.
+      _listeners.remove(checked);
+      rethrow;
     } finally {
       checked._depth--;
     }

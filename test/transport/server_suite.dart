@@ -777,6 +777,19 @@ void serverConformance(WebSocketTransport Function() create) {
         );
       });
 
+      test('a non-ASCII host name stops at once (use punycode)', () async {
+        expect(
+          await decision('ws://пример.рф/echo'),
+          stopped(
+            isA<WebSocketConnectionException>().having(
+              (e) => '${e.cause}',
+              'cause',
+              contains('punycode'),
+            ),
+          ),
+        );
+      });
+
       test('a refused port and an unknown host are retried', () async {
         expect(
           await decision('ws://127.0.0.1:1/echo'),
@@ -792,6 +805,7 @@ void serverConformance(WebSocketTransport Function() create) {
     sharedServerConformance(() => server, (
       protocolPing: true,
       protocolCloseCodes: true,
+      skipsInterim: true,
     ));
   });
 }

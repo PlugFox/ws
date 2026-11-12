@@ -260,6 +260,28 @@ void sharedServerConformance(
     });
   });
 
+  serverTest(
+    'informational 103 responses before the 101 are skipped',
+    () async {
+      // CDNs send 103 Early Hints (docs/review/protocol.md F16).
+      if (!caps.skipsInterim) {
+        final c = client();
+        await expectLater(
+          c.connect(url('/early-hints')),
+          throwsA(isA<WebSocketConnectionException>()),
+        );
+        await c.close();
+        return;
+      }
+      for (final count in [1, 3]) {
+        final c = client();
+        await c.connect(url('/early-hints?count=$count'));
+        await roundTrip(c, 'after $count');
+        await c.close();
+      }
+    },
+  );
+
   group('maxMessageSize', () {
     serverTest(
       'a larger message closes with 1009 and is not delivered',
@@ -331,6 +353,23 @@ void sharedServerConformance(
       );
       await c.close();
     });
+  });
+
+  serverTest('a long close reason is cut at a character boundary', () async {
+    final tag = id();
+    final events = _Events();
+    final c = WebSocketTransports.current.connect(
+      TransportRequest(url: Uri.parse(url('/echo?id=$tag'))),
+      events,
+    );
+    await events.opened.future.timeout(const Duration(seconds: 5));
+    // 70 'é' are 140 bytes; 61 (122 bytes) fit in a close frame.
+    c.close(4000, 'é' * 70);
+    await events.closed.future.timeout(const Duration(seconds: 5));
+    final log = await server().log(tag);
+    final close = log['close']! as Map<String, Object?>;
+    expect((close['code'], close['reason']), (4000, 'é' * 61));
+    expect(close['reason_utf8'], isTrue);
   });
 
   group('calls after close() (T-12)', () {
@@ -523,6 +562,35 @@ void sharedServerConformance(
           expect(state.error, lost, reason: mode);
           expect(state.closeCode, isNull, reason: mode);
         }
+      },
+    );
+
+    serverTest(
+      'a server still sending after its close frame gets our close',
+      () async {
+        // Close 1000, then 40 text frames written 8 bytes every 5 ms:
+        // closing TCP both ways at once would answer them with RST, and
+        // the server would lose our close frame (protocol.md F14).
+        final tag = id();
+        final frames = [
+          0x88, 0x02, 0x03, 0xE8, //
+          for (var i = 0; i < 40; i++) ...[0x81, 0x04, ...'late'.codeUnits],
+        ];
+        final hex = [
+          for (final b in frames) b.toRadixString(16).padLeft(2, '0'),
+        ].join();
+        final state = await serverEnds(
+          '/raw?id=$tag&hex=$hex&chunk=8&delay_ms=5&end=wait',
+        );
+        if (!caps.protocolCloseCodes) {
+          // Browsers treat data after a close frame as a failure (1006).
+          expect(state.error, lost);
+          return;
+        }
+        expect(state.closeCode, 1000);
+        final log = await server().log(tag);
+        expect((log['close']! as Map<String, Object?>)['code'], 1000);
+        expect(log['tcp'], 'fin');
       },
     );
 

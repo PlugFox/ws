@@ -268,9 +268,77 @@ void main() {
       ).add(FrameWriter(mask: true).close(4000, 'done'));
       expect(h.events, ['close:4000:done']);
     });
+
+    test('a long close reason is cut at a character boundary', () {
+      // 'é' is 2 bytes: 62 of them are 124 bytes; 61 fit in 123.
+      for (final (reason, kept) in [
+        ('é' * 62, 'é' * 61),
+        ('a${'€' * 41}', 'a${'€' * 40}'), // 1 + 123 bytes -> 1 + 120
+        ('x' * 200, 'x' * 123),
+        ('𝄞' * 31, '𝄞' * 30), // 124 bytes -> 120
+      ]) {
+        final h = _Events();
+        FrameReader(
+          h,
+          expectMasked: true,
+        ).add(FrameWriter(mask: true).close(1000, reason));
+        expect(h.events, ['close:1000:$kept'], reason: reason);
+      }
+    });
+
+    test('codes that may not appear on the wire are refused', () {
+      for (final code in [0, 999, 1004, 1005, 1006, 1015, 2000, 5000, -1]) {
+        expect(
+          () => FrameWriter(mask: true).close(code),
+          throwsArgumentError,
+          reason: '$code',
+        );
+      }
+      expect(FrameWriter(mask: true).close(null), isNotEmpty);
+    });
   });
 
   group('handshake', () {
+    test('IDN hosts are refused, IPv6 zone ids kept off the wire', () {
+      expect(
+        () => HandshakeRequest.checkHost(Uri.parse('ws://пример.рф/')),
+        throwsArgumentError,
+      );
+      HandshakeRequest.checkHost(Uri.parse('ws://xn--e1afmkfd.xn--p1ai/'));
+      final zoned = Uri.parse('ws://[fe80::1%25lo0]:8080/x');
+      HandshakeRequest.checkHost(zoned);
+      expect(HandshakeRequest.socketHost(zoned), 'fe80::1%lo0');
+      expect(
+        latin1.decode(HandshakeRequest(zoned).encode()),
+        contains('Host: [fe80::1]:8080\r\n'),
+      );
+    });
+
+    test('responses are parsed strictly (F15)', () {
+      // The same cases as native/rust/src/handshake.rs.
+      HandshakeResponse parse(String head) =>
+          HandshakeResponse.parse(latin1.encode(head));
+      const ok = 'HTTP/1.1 101 Switching Protocols';
+      for (final bad in [
+        'HTTP/1.1 +101 Switching Protocols',
+        'HTTP/1.1 0x65 Switching Protocols',
+        'HTTP/1.1 1010 Switching Protocols',
+        'HTTP/1.0 101 Switching Protocols',
+        'HTTP/2 101 Switching Protocols',
+        'HTTP/1.1  101 Switching Protocols',
+        '$ok\r\nUpgrade : websocket',
+        '$ok\r\n folded',
+        '$ok\r\nNoColon',
+        '$ok\r\n: x',
+      ]) {
+        expect(() => parse(bad), throwsFormatException, reason: bad);
+      }
+      expect(parse('HTTP/1.0 403 Forbidden\r\nX: y').statusCode, 403);
+      final bare = parse('HTTP/1.1 403');
+      expect((bare.statusCode, bare.reason), (403, ''));
+      expect(parse('$ok\r\nA: 1\r\na: 2').headers['a'], '1, 2');
+    });
+
     test('request and response', () {
       final request = HandshakeRequest(
         Uri.parse('wss://example.com:8443/socket?x=1'),

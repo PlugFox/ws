@@ -57,10 +57,31 @@ final class HandshakeRequest {
   /// The TCP port.
   int get port => uri.hasPort ? uri.port : (secure ? 443 : 80);
 
+  /// Throws [ArgumentError] for a host name this library cannot resolve:
+  /// a non-ASCII (IDN) name, which `Uri` percent-encodes. Browsers convert
+  /// it themselves; elsewhere give it in punycode
+  /// (docs/review/protocol.md F17).
+  static void checkHost(Uri uri) {
+    if (!uri.host.contains(':') && uri.host.contains('%')) {
+      throw ArgumentError.value(
+        uri.toString(),
+        'url',
+        'Give non-ASCII host names in punycode (xn--...)',
+      );
+    }
+  }
+
+  /// The host to open a socket to: an IPv6 zone id (`%25eth0` in the URL)
+  /// decoded to `%eth0`.
+  static String socketHost(Uri uri) =>
+      uri.host.contains(':') ? Uri.decodeComponent(uri.host) : uri.host;
+
   /// Encodes the HTTP/1.1 request.
   Uint8List encode() {
     final defaultPort = port == (secure ? 443 : 80);
-    final host = uri.host.contains(':') ? '[${uri.host}]' : uri.host;
+    // A zone id is local to this machine: never sent (RFC 6874 §4).
+    final ip = uri.host.split('%').first;
+    final host = uri.host.contains(':') ? '[$ip]' : uri.host;
     final path = uri.path.isEmpty ? '/' : uri.path;
     final target = uri.hasQuery ? '$path?${uri.query}' : path;
     final b = StringBuffer()
@@ -187,24 +208,55 @@ final class HandshakeResponse {
     return -1;
   }
 
-  /// Parses the response head (without the final empty line).
+  static final RegExp _statusLine = RegExp(
+    r'^HTTP/1\.([01]) ([0-9]{3})(?: (.*))?$',
+  );
+  static final RegExp _token = RegExp(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$");
+
+  /// Whether [head] is an informational response other than 101 (`100`,
+  /// `103 Early Hints`), which precedes the real one.
+  static bool isInterim(Uint8List head) {
+    final status = _statusLine.firstMatch(
+      latin1
+          .decode(Uint8List.sublistView(head, 0, math.min(head.length, 64)))
+          .split('\r\n')
+          .first,
+    );
+    final code = status == null ? 0 : int.parse(status[2]!);
+    return code >= 100 && code < 200 && code != 101;
+  }
+
+  /// Parses the response head (without the final empty line), as strictly
+  /// as RFC 9112 asks: `HTTP/1.1` (1.0 only for a refusal), a three-digit
+  /// status, header names without surrounding whitespace, no obsolete line
+  /// folding. A response a strict intermediary would read differently is
+  /// refused (docs/review/protocol.md F15).
   factory HandshakeResponse.parse(Uint8List head) {
     final lines = latin1.decode(head).split('\r\n');
-    final status = lines.first.split(' ');
-    if (status.length < 2 || !status[0].startsWith('HTTP/1.')) {
-      throw const FormatException('Not an HTTP response');
+    final status = _statusLine.firstMatch(lines.first);
+    if (status == null) throw const FormatException('Not an HTTP response');
+    final code = int.parse(status[2]!);
+    if (code == 101 && status[1] != '1') {
+      throw const FormatException('Switching protocols needs HTTP/1.1');
     }
-    final code = int.tryParse(status[1]);
-    if (code == null) throw const FormatException('Invalid HTTP status');
     final headers = <String, String>{};
     for (final line in lines.skip(1)) {
+      if (line.startsWith(' ') || line.startsWith('\t')) {
+        throw const FormatException('Obsolete line folding');
+      }
       final i = line.indexOf(':');
-      if (i <= 0) continue;
-      final name = line.substring(0, i).trim().toLowerCase();
+      final name = i < 0 ? '' : line.substring(0, i);
+      if (!_token.hasMatch(name)) {
+        throw FormatException('Invalid header line', line);
+      }
       final value = line.substring(i + 1).trim();
-      headers.update(name, (v) => '$v, $value', ifAbsent: () => value);
+      headers.update(
+        name.toLowerCase(),
+        (v) => '$v, $value',
+        ifAbsent: () => value,
+      );
     }
-    return HandshakeResponse._(code, status.skip(2).join(' '), headers);
+    return HandshakeResponse._(code, status[3] ?? '', headers);
   }
 
   /// Checks the response against [request]. Returns the selected

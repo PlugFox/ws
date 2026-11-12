@@ -28,6 +28,12 @@
   `WebSocketTls.trustUserCertificates` (Android: also trust user and MDM
   CAs). On Android both transports drop the system CAs the user disabled.
   TLS settings are built once per distinct value and reused.
+- Closing: the client lets the server close TCP first (FIN, then up to
+  1 s), so a server still sending never loses our close frame; long close
+  reasons are cut at a character boundary. Handshake: `103 Early Hints`
+  is skipped, responses are parsed strictly, non-ASCII host names are
+  refused on the VM (use punycode). Faster UTF-8 validation of non-Latin
+  text (up to 2x).
 - After `close()` every transport refuses sends and pings the same way.
   An explicit `Authorization` header wins over URL user info (one header
   is sent). A throwing transport listener loses no messages.

@@ -20,4 +20,8 @@ typedef ServerCapabilities = ({
   /// Protocol violations are reported with the close code the client sent
   /// (1002, 1007, 1009). Browsers report 1006 and hide the reason.
   bool protocolCloseCodes,
+
+  /// Informational responses (103) before the 101 are skipped. Chrome
+  /// fails the connection instead.
+  bool skipsInterim,
 });

@@ -79,8 +79,16 @@ where
     stream.flush().await.map_err(Failure::Io)?;
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 4096];
+    let mut interim = 0;
     let end = loop {
         if let Some(i) = find_head_end(&buf) {
+            // Informational responses (103 Early Hints from a CDN) precede
+            // the 101; skip them (docs/review/protocol.md F16).
+            if interim < 16 && i <= MAX_HEAD && is_interim(&buf[..i]) {
+                interim += 1;
+                buf.drain(..i + 4);
+                continue;
+            }
             break i;
         }
         if buf.len() > MAX_HEAD {
@@ -102,6 +110,22 @@ where
     Ok((protocol, buf[end + 4..].to_vec()))
 }
 
+/// Whether `head` is an informational response other than 101.
+fn is_interim(head: &[u8]) -> bool {
+    let line = head.split(|&b| b == b'\r').next().unwrap_or_default();
+    let digits = line.strip_prefix(b"HTTP/1.1 ").unwrap_or_default();
+    matches!(digits, [b'1', a, b, ..] if a.is_ascii_digit() && b.is_ascii_digit()
+        && (digits.len() == 3 || digits[3] == b' ')
+        && &digits[..3] != b"101")
+}
+
+/// An HTTP token (RFC 9110 §5.6.2).
+fn is_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
 fn find_head_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
@@ -111,22 +135,30 @@ pub fn validate(head: &[u8], request: &Request<'_>) -> Result<Option<String>, Fa
     let text = String::from_utf8_lossy(head);
     let mut lines = text.split("\r\n");
     let status_line = lines.next().unwrap_or_default();
+    // As strict as RFC 9112 and the pure-Dart transport: HTTP/1.1 (1.0
+    // only for a refusal), three digits, token header names, no line
+    // folding (docs/review/protocol.md F15).
     let mut parts = status_line.splitn(3, ' ');
     let version = parts.next().unwrap_or_default();
-    let status = parts.next().and_then(|s| s.parse::<u16>().ok());
-    let (true, Some(status)) = (version.starts_with("HTTP/1."), status) else {
+    let digits = parts.next().unwrap_or_default();
+    let status = (digits.len() == 3 && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| digits.parse::<u16>().ok())
+        .flatten();
+    let Some(status) =
+        status.filter(|&s| version == "HTTP/1.1" || (version == "HTTP/1.0" && s != 101))
+    else {
         return Err(Failure::Invalid("Not an HTTP response".into()));
     };
     let mut headers: HashMap<String, String> = HashMap::new();
     let mut counts: HashMap<String, usize> = HashMap::new();
     for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        let name = name.trim().to_ascii_lowercase();
-        if name.is_empty() {
-            continue;
+        if line.starts_with([' ', '\t']) {
+            return Err(Failure::Invalid("Obsolete line folding".into()));
         }
+        let Some((name, value)) = line.split_once(':').filter(|(n, _)| is_token(n)) else {
+            return Err(Failure::Invalid("Invalid header line".into()));
+        };
+        let name = name.to_ascii_lowercase();
         let value = value.trim().to_owned();
         *counts.entry(name.clone()).or_default() += 1;
         headers
@@ -214,6 +246,45 @@ mod tests {
         assert!(text.starts_with("GET /a?b=1 HTTP/1.1\r\nHost: h:8080\r\n"));
         assert!(text.contains("Sec-WebSocket-Protocol: v1, v2\r\n"));
         assert!(text.ends_with("X-Token: t\r\n\r\n"));
+    }
+
+    #[test]
+    fn parses_strictly() {
+        // The same cases as test/protocol/protocol_test.dart (F15).
+        for bad in [
+            "HTTP/1.1 +101 Switching Protocols",
+            "HTTP/1.1 0x65 Switching Protocols",
+            "HTTP/1.1 1010 Switching Protocols",
+            "HTTP/1.0 101 Switching Protocols",
+            "HTTP/2 101 Switching Protocols",
+            "HTTP/1.1  101 Switching Protocols",
+        ] {
+            let head = ok101("").replacen("HTTP/1.1 101 Switching Protocols", bad, 1);
+            assert!(
+                matches!(check(&head, &[]), Err(Failure::Invalid(_))),
+                "{bad}"
+            );
+        }
+        for bad in [
+            "\r\nUpgrade : websocket",
+            "\r\n folded",
+            "\r\nNoColon",
+            "\r\n: x",
+        ] {
+            assert!(
+                matches!(check(&ok101(bad), &[]), Err(Failure::Invalid(_))),
+                "{bad:?}"
+            );
+        }
+        // A refusal from an HTTP/1.0 intermediary keeps its status.
+        assert!(matches!(
+            check("HTTP/1.0 403 Forbidden\r\nX: y", &[]),
+            Err(Failure::Status(403, _))
+        ));
+        assert!(matches!(
+            check("HTTP/1.1 403", &[]),
+            Err(Failure::Status(403, _))
+        ));
     }
 
     #[test]

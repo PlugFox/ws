@@ -4,6 +4,8 @@
   bundled through a build hook.
 - TLS: the system trust store (OS verifier on Apple and Windows), pins,
   user CAs on Android on request, disabled system CAs honoured.
+- The same closing, handshake and close-reason rules as the pure-Dart
+  transport (FIN first, `103` skipped, strict response parsing).
 - `abort()` and the connect timeout work while the OS verifies a
   certificate (Apple, Windows). Large JSON documents no longer stall
   other connections; above 16 MiB they are decoded by Dart. A throwing

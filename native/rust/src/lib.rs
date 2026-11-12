@@ -1057,8 +1057,29 @@ async fn serve(
             .await;
         }
         let _ = tokio::time::timeout(Duration::from_secs(1), sink.close()).await;
+        if let Ok(ws) = stream.reunite(sink) {
+            tokio::spawn(linger(ws));
+        }
     }
     outcome
+}
+
+/// Ends the connection as RFC 6455 §7.1.1 asks, the server closing TCP
+/// first: FIN, then read and drop whatever still arrives until the
+/// server's FIN, for at most 1 s. Closing with unread data makes the
+/// kernel answer with RST, which can discard our close frame on the
+/// server (docs/review/protocol.md F14). Runs after the closed event.
+async fn linger(mut ws: WebSocketStream<Box<dyn Io>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let io = ws.get_mut();
+    let _ = tokio::time::timeout(Duration::from_secs(1), async {
+        if io.shutdown().await.is_err() {
+            return;
+        }
+        let mut buf = [0u8; 4096];
+        while matches!(io.read(&mut buf).await, Ok(n) if n > 0) {}
+    })
+    .await;
 }
 
 /// JSON texts above this size are parsed with `block_in_place`.

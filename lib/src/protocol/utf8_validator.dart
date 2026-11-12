@@ -30,7 +30,14 @@ final class Utf8Validator {
     var state = _state;
     var i = start;
     while (i < stop) {
-      if (state == _accept) {
+      // The word scan pays off only for a run of ASCII (two bytes in a
+      // row, so the space between non-Latin words does not count).
+      // Entering it after every multi-byte character halved the speed on
+      // non-Latin text (docs/review/protocol.md F10).
+      if (state == _accept &&
+          stop - i >= 16 &&
+          bytes[i] < 0x80 &&
+          bytes[i + 1] < 0x80) {
         i = _skipAscii(bytes, i, stop);
         if (i == stop) break;
       }

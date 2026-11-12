@@ -86,6 +86,7 @@ Extensions are never negotiated.
 | `/eof-handshake?partial=0\|1` | closes after the request; `partial=1` first writes `HTTP/1.1 101 Swi` |
 | `/junk` | writes `220 smtp.example ESMTP\r\n` and closes |
 | `/big-head?kb=64` | `101` with an `X-Filler` header of `kb` KiB, then echo |
+| `/early-hints?count=1` | `count` × `103 Early Hints`, then `101`, then echo |
 | `/bad-101?omit=accept,upgrade,connection,protocol&accept=wrong\|dup\|nonb64&upgrade=&connection=&protocol=&extensions=` | crafted `101` (unset parts correct), then echo |
 | `/headers` | `101`, then one text message `{method,target,version,headers:[[k,v],...],peer}`, then echo |
 

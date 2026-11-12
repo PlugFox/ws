@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:web/web.dart' as web;
 import 'package:ws/src/client/exceptions.dart';
 import 'package:ws/src/protocol/frame.dart' show CloseCode;
+import 'package:ws/src/protocol/frame_writer.dart';
 import 'package:ws/src/transport/transport.dart';
 
 /// The platform transport in the browser.
@@ -208,7 +209,10 @@ final class _WebConnection implements TransportConnection {
     if (code == null) {
       socket.close();
     } else {
-      socket.close(code, reason ?? '');
+      // The browser throws for a longer reason; cut it like the other
+      // transports do.
+      final bytes = FrameWriter.closeReason(reason ?? '');
+      socket.close(code, utf8.decode(bytes));
     }
   }
 

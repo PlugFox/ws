@@ -70,14 +70,34 @@ final class FrameWriter {
   }
 
   /// Encodes a close frame. A `null` [code] sends an empty close frame.
+  /// Throws [ArgumentError] for a code that may not appear on the wire
+  /// (1005, 1006, 1015, below 1000...). A reason over 123 bytes is cut at
+  /// the last whole character, so it stays valid UTF-8.
   Uint8List close(int? code, [String reason = '']) {
     if (code == null) return frame(Opcode.close, Uint8List(0));
-    final reasonBytes = utf8.encode(reason);
-    final payload = Uint8List(2 + math.min(reasonBytes.length, 123))
+    if (!CloseCode.isValidOnWire(code)) {
+      throw ArgumentError.value(code, 'code', 'Not a valid close code');
+    }
+    final reasonBytes = closeReason(reason);
+    final payload = Uint8List(2 + reasonBytes.length)
       ..[0] = code >> 8
       ..[1] = code & 0xFF
-      ..setRange(2, 2 + math.min(reasonBytes.length, 123), reasonBytes);
+      ..setRange(2, 2 + reasonBytes.length, reasonBytes);
     return frame(Opcode.close, payload);
+  }
+
+  /// [reason] as UTF-8, cut to at most 123 bytes at the last whole
+  /// character (what fits in a close frame next to the code).
+  static Uint8List closeReason(String reason) {
+    final bytes = utf8.encode(reason);
+    if (bytes.length <= 123) return bytes;
+    var length = 123;
+    // Back off continuation bytes (10xxxxxx) to the start of the character
+    // that does not fit.
+    while (length > 0 && bytes[length] & 0xC0 == 0x80) {
+      length--;
+    }
+    return Uint8List.sublistView(bytes, 0, length);
   }
 
   /// Copies [payload] into `out[offset..]` XORed with [key].

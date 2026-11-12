@@ -81,6 +81,7 @@ async fn websocket(mut conn: Conn, req: &Request) -> Result<(), BoxError> {
     let q = &req.query;
     match req.path.as_str() {
         "/big-head" => return hs::big_head(conn, req).await,
+        "/early-hints" => return hs::early_hints(conn, req).await,
         "/bad-101" => return hs::bad_101(conn, req).await,
         "/headers" => return hs::headers(conn, req).await,
         _ => {}
@@ -123,6 +124,7 @@ async fn not_websocket(mut conn: Conn, req: &Request) -> std::io::Result<()> {
         "/echo",
         "/stream",
         "/big-head",
+        "/early-hints",
         "/bad-101",
         "/headers",
         "/close",

@@ -8,6 +8,8 @@ import 'package:ws/src/client/exceptions.dart';
 import 'package:ws/src/client/tls_pins.dart';
 import 'package:ws/src/native/native_library.dart';
 import 'package:ws/src/native/tape.dart';
+import 'package:ws/src/protocol/frame.dart' show CloseCode;
+import 'package:ws/src/protocol/frame_writer.dart';
 import 'package:ws/src/protocol/handshake.dart';
 import 'package:ws/src/transport/transport.dart';
 
@@ -54,7 +56,10 @@ final class NativeTransport implements WebSocketTransport {
   TransportConnection connect(
     TransportRequest request,
     TransportListener listener,
-  ) => _NativeConnection(library, request, listener, window);
+  ) {
+    HandshakeRequest.checkHost(request.url);
+    return _NativeConnection(library, request, listener, window);
+  }
 }
 
 final class _NativeConnection implements TransportConnection, Finalizable {
@@ -289,8 +294,12 @@ final class _NativeConnection implements TransportConnection, Finalizable {
   @override
   void close(int? code, String? reason) {
     if (_finished || _closing) return;
+    // Same rules as the pure-Dart transport's frame writer.
+    if (code != null && !CloseCode.isValidOnWire(code)) {
+      throw ArgumentError.value(code, 'code', 'Not a valid close code');
+    }
     _closing = true;
-    final bytes = utf8.encode(reason ?? '');
+    final bytes = FrameWriter.closeReason(reason ?? '');
     _lib.close(_id, code ?? -1, _lib.copy(bytes), bytes.length);
   }
 

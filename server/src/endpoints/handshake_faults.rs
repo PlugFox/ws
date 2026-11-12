@@ -87,6 +87,17 @@ pub async fn big_head(mut conn: Conn, req: &Request) -> Result<(), BoxError> {
     bench::echo_conn(handshake::websocket(conn).await).await
 }
 
+/// `/early-hints?count=1`: `count` informational `103 Early Hints`
+/// responses, then the `101`, then echo.
+pub async fn early_hints(mut conn: Conn, req: &Request) -> Result<(), BoxError> {
+    for _ in 0..req.query.num("count", 1) {
+        conn.write_all(b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n")
+            .await?;
+    }
+    handshake::write_101(&mut conn, &Head101::new(req)).await?;
+    bench::echo_conn(handshake::websocket(conn).await).await
+}
+
 /// `/bad-101?omit=...&accept=wrong|dup|nonb64&upgrade=&connection=&protocol=&extensions=`
 /// A crafted `101`; unset parts are correct. Continues as `/echo`.
 pub async fn bad_101(mut conn: Conn, req: &Request) -> Result<(), BoxError> {

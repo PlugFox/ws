@@ -1564,3 +1564,56 @@ measurements on an M-series Mac, release builds, the Rust test server.
 - **29:** a test compares the ABI number in Dart and Rust.
 - **30:** the 32-bit finalizer token is commented.
 - Status: **adopted**.
+
+### D51. The remaining protocol findings
+
+docs/review/protocol.md F10–F18 (F13 was fixed earlier, F11 in D46, F18
+in D50 as native 26).
+
+- **F10, UTF-8 validator speed: fixed.** The word-wise ASCII scan is
+  entered only for a run of two ASCII bytes with at least 16 bytes left,
+  not after every multi-byte character. 1 MiB, AOT, validate vs
+  `utf8.decode`:
+
+  | Text | Before | After | `utf8.decode` |
+  |---|---|---|---|
+  | ASCII | 0.04 ms | 0.04 ms | 0.45 ms |
+  | mostly-ASCII JSON | 0.93 ms | 0.89 ms | 2.0 ms |
+  | Cyrillic | 3.82 ms | 2.51 ms | 2.1 ms |
+  | CJK | 3.41 ms | 2.24–2.35 ms | 1.9 ms |
+  | emoji | 4.46 ms | 2.25 ms | 1.9 ms |
+
+- **F12, close frames: fixed on every transport.** A reason over 123
+  bytes is cut at the last whole character; codes that may not appear on
+  the wire throw `ArgumentError` (pure Dart and native). Before, the
+  native transport sent a 140-byte reason as is (a control frame over
+  125 bytes) and the browser threw `SyntaxError`; the client limited
+  reasons already, so only direct transport users were affected. Shared
+  test: the server receives `'é' * 61` for `'é' * 70`, as valid UTF-8.
+- **F14, closing TCP: fixed on both VM transports.** After the closing
+  handshake the client sends FIN, reads and drops until the server's FIN,
+  for at most 1 s, and reports the end at once. Reproduced first: a
+  server that keeps writing after its close frame never received our
+  close (`close: null`, 0 bytes, 5 of 5 runs) on pure Dart and native;
+  now it gets close 1000 and a clean FIN. Browsers treat data after a
+  close frame as a failure (1006). A valid server does not send after
+  its close frame, but a broadcast racing the close does.
+- **F15, response parsing: strict in Dart and Rust alike.** `HTTP/1.1`
+  (1.0 only for a refusal, so a 403 from an old proxy keeps its status),
+  exactly three digits (`+101` and `0x65` were accepted; Rust's
+  `u16::from_str` accepts `+101` too), token header names (no
+  `Upgrade : websocket`), no obsolete line folding. The same ten cases in
+  both test suites.
+- **F16, `103 Early Hints` before the 101: fixed on both VM transports**
+  (up to 16 interim responses are skipped). New server endpoint
+  `/early-hints?count=`; shared test. Chrome fails such a handshake
+  (`skipsInterim: false` in the browser run).
+- **F17, hosts:** a non-ASCII host name (which `Uri` percent-encodes)
+  makes `connect()` throw `ArgumentError` on the VM transports ("give it
+  in punycode"), which the client treats as terminal; browsers convert
+  IDN themselves. An IPv6 zone id is kept out of the `Host` header and
+  decoded for the socket (pure Dart; unit-tested, no link-local server in
+  the suite). Full IDNA (UTS #46 mapping) is not worth a dependency here.
+- Found on the way: the contract checker (D47) waited for `onClosed`
+  from a connection whose `connect()` had thrown; fixed.
+- Status: **adopted**.

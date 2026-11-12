@@ -42,7 +42,12 @@ final class DartTransport implements WebSocketTransport {
   TransportConnection connect(
     TransportRequest request,
     TransportListener listener,
-  ) => _DartConnection(request, listener).._start();
+  ) {
+    // A hopeless URL fails before a connection exists (terminal for the
+    // client, which treats ArgumentError from connect() so).
+    HandshakeRequest.checkHost(request.url);
+    return _DartConnection(request, listener).._start();
+  }
 }
 
 /// Response heads larger than this are rejected (no legitimate handshake
@@ -95,7 +100,7 @@ final class _DartConnection implements TransportConnection, FrameHandler {
         WebSocketHandshakeException('Invalid handshake request', cause: e),
       );
     }
-    final host = uri.host;
+    final host = HandshakeRequest.socketHost(uri);
     final proxy = _request.proxy;
     final tls = _request.tls;
     // Idle subscription left by the proxy tunnel, re-used below (and
@@ -178,18 +183,32 @@ final class _DartConnection implements TransportConnection, FrameHandler {
     }
 
     final head = BytesBuilder(copy: false);
+    var interim = 0;
     void onEvent(io.RawSocketEvent event) {
+      if (_finished) return _onLingerEvent(event);
       switch (event) {
         case io.RawSocketEvent.read:
           final data = _socket?.read();
           if (data == null || data.isEmpty) return;
           if (_open) return _reader.add(data);
           head.add(data);
-          final bytes = head.takeBytes();
+          var bytes = head.takeBytes();
           // Search before checking the limit: the 101 response and the
           // first (large) frame often arrive in one read (found by
           // Autobahn 1.1.6 / 9.x).
-          final end = HandshakeResponse.headEnd(bytes);
+          var end = HandshakeResponse.headEnd(bytes);
+          // Informational responses (103 Early Hints from a CDN) precede
+          // the 101; skip them (docs/review/protocol.md F16).
+          while (end >= 0 &&
+              end <= _maxHeadSize &&
+              interim < 16 &&
+              HandshakeResponse.isInterim(
+                Uint8List.sublistView(bytes, 0, end),
+              )) {
+            interim++;
+            bytes = Uint8List.sublistView(bytes, end + 4);
+            end = HandshakeResponse.headEnd(bytes);
+          }
           if (end >= 0 && end <= _maxHeadSize) {
             return _onHandshake(handshake, bytes, end);
           }
@@ -223,7 +242,9 @@ final class _DartConnection implements TransportConnection, FrameHandler {
       }
     }
 
-    void onError(Object e) => _closeAfterFlush
+    void onError(Object e) => _finished
+        ? _endLinger()
+        : _closeAfterFlush
         ? _finishStored()
         : _finish(
             null,
@@ -237,8 +258,11 @@ final class _DartConnection implements TransportConnection, FrameHandler {
               cause: e,
             ),
           );
-    void onDone() =>
-        _closeAfterFlush ? _finishStored() : _finish(null, '', _lost);
+    void onDone() => _finished
+        ? _endLinger()
+        : _closeAfterFlush
+        ? _finishStored()
+        : _finish(null, '', _lost);
     if (tunnel != null) {
       _subscription = tunnel
         ..onData(onEvent)
@@ -432,7 +456,7 @@ final class _DartConnection implements TransportConnection, FrameHandler {
       _listener.onDrain();
     }
     if (_closeAfterFlush) {
-      socket.close().ignore();
+      _linger(socket);
       _finish(_closeCode, _closeReason, _error);
     }
   }
@@ -499,13 +523,59 @@ final class _DartConnection implements TransportConnection, FrameHandler {
     _finished = true;
     _closeTimer?.cancel();
     _reader.stop();
-    _subscription?.cancel().ignore();
-    _subscription = null;
     _queue.clear();
     _buffered = 0;
     final socket = _socket;
     _socket = null;
-    socket?.close().ignore();
+    if (_lingering == null) {
+      _subscription?.cancel().ignore();
+      _subscription = null;
+      socket?.close().ignore();
+    }
     _listener.onClosed(code, reason, error);
+  }
+
+  /// The socket after the closing handshake, until the server closes TCP.
+  io.RawSocket? _lingering;
+  Timer? _lingerTimer;
+
+  /// Ends the closing handshake as RFC 6455 §7.1.1 asks: the server closes
+  /// TCP first. Closing both directions at once while the server is still
+  /// sending makes the kernel answer with RST, which can discard our close
+  /// frame on the server (docs/review/protocol.md F14). So: FIN, read and
+  /// drop whatever still comes, close at the server's FIN or after 1 s.
+  /// The listener hears the end at once; only the socket lingers.
+  void _linger(io.RawSocket socket) {
+    _lingering = socket;
+    try {
+      socket.shutdown(io.SocketDirection.send);
+    } on Object {
+      return _endLinger();
+    }
+    _lingerTimer = Timer(const Duration(seconds: 1), _endLinger);
+  }
+
+  void _endLinger() {
+    final socket = _lingering;
+    if (socket == null) return;
+    _lingering = null;
+    _lingerTimer?.cancel();
+    _subscription?.cancel().ignore();
+    _subscription = null;
+    socket.close().ignore();
+  }
+
+  /// Socket events after [_finish]: only a lingering socket gets them.
+  void _onLingerEvent(io.RawSocketEvent event) {
+    final socket = _lingering;
+    if (socket == null) return;
+    switch (event) {
+      case io.RawSocketEvent.read:
+        socket.read();
+      case io.RawSocketEvent.readClosed:
+      case io.RawSocketEvent.closed:
+        _endLinger();
+      case io.RawSocketEvent.write:
+    }
   }
 }
