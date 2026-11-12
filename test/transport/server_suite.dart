@@ -6,10 +6,11 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show sleep;
+import 'dart:io' show InternetAddress, ServerSocket, Socket, sleep;
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
+import 'package:ws/src/protocol/handshake.dart' show acceptKey;
 import 'package:ws/transport.dart';
 import 'package:ws/ws.dart';
 
@@ -802,6 +803,128 @@ void serverConformance(WebSocketTransport Function() create) {
       });
     });
 
+    // ws 1.x wrapped `WebSocket.connect` in `Future.timeout`: the attempt
+    // that timed out kept its socket, and a reconnect that hung never
+    // moved out of `connecting` (issue #24, the 1.0.0 lifecycle report).
+    // Each attempt here owns its socket: the timeout, close() and a newer
+    // attempt release it, and the next attempt is scheduled.
+    group('abandoned connect attempts', () {
+      late _Listener listener;
+      setUp(() async => listener = await _Listener.bind());
+      tearDown(() => listener.close());
+
+      WebSocketClient<String> retrying() => WebSocketClient.text(
+        options: const WebSocketOptions(
+          connectTimeout: Duration(milliseconds: 200),
+          reconnect: WebSocketReconnect(
+            minDelay: Duration(milliseconds: 20),
+            maxDelay: Duration(milliseconds: 40),
+          ),
+        ),
+      );
+
+      Future<void> released(List<_Peer> peers) => Future.wait(
+        peers.map((p) => p.closed),
+      ).timeout(const Duration(seconds: 2));
+
+      for (final scheme in ['ws', 'wss']) {
+        test('$scheme: a timed-out attempt closes its socket, '
+            'and the next attempt follows', () async {
+          final c = retrying();
+          final states = <WebSocketState>[];
+          c.states.listen(states.add);
+          unawaited(
+            c
+                .connect('$scheme://127.0.0.1:${listener.port}/')
+                .then((_) => fail('opened'), onError: (_) {}),
+          );
+          // wss: the ClientHello is never answered (TLS stage);
+          // ws: the upgrade request is never answered.
+          await listener.waitFor(4);
+          final earlier = listener.peers.sublist(0, 3);
+          await released(earlier);
+          expect(listener.peers.where((p) => p.isOpen).length, lessThan(2));
+          if (scheme == 'ws') {
+            expect(earlier.map((p) => p.request), everyElement(isNotEmpty));
+          }
+          await c.close();
+          await released(listener.peers);
+          expect(
+            states.whereType<WebSocketState$Connecting>().length,
+            greaterThanOrEqualTo(4),
+          );
+          expect(states.whereType<WebSocketState$Open>(), isEmpty);
+        });
+      }
+
+      test('#24: after a drop, hanging reconnects keep timing out', () async {
+        // The first connection opens and is cut; the server then accepts
+        // and never answers, as when it "suddenly becomes unavailable".
+        listener.answerFirst = true;
+        final c = retrying();
+        final states = <WebSocketState>[];
+        c.states.listen(states.add);
+        await c.connect('ws://127.0.0.1:${listener.port}/');
+        listener.peers.single.socket.destroy();
+        await listener.waitFor(4);
+        await released(listener.peers.sublist(0, 3));
+        await c.close();
+        await released(listener.peers);
+        expect(states.whereType<WebSocketState$Open>(), hasLength(1));
+        expect(
+          states
+              .whereType<WebSocketState$Connecting>()
+              .map((s) => s.attempt)
+              .toList(),
+          containsAllInOrder(<int>[0, 1, 2, 3]),
+        );
+      });
+
+      test(
+        'close() during the handshake releases the socket at once',
+        () async {
+          final c = WebSocketClient.text(
+            options: const WebSocketOptions(
+              connectTimeout: Duration(seconds: 30),
+            ),
+          );
+          final pending = c.connect('ws://127.0.0.1:${listener.port}/');
+          await listener.waitFor(1);
+          final sw = Stopwatch()..start();
+          await c.close();
+          expect(sw.elapsed, lessThan(const Duration(seconds: 1)));
+          await expectLater(
+            pending,
+            throwsA(isA<WebSocketNotConnectedException>()),
+          );
+          await released(listener.peers);
+        },
+      );
+
+      test('an answer after the timeout does not open the client', () async {
+        // The 101 is written once the client has given up: by then the
+        // socket is gone, so it cannot revive a closed attempt.
+        listener.answerAfter = const Duration(milliseconds: 400);
+        final c = WebSocketClient.text(
+          options: const WebSocketOptions(
+            connectTimeout: Duration(milliseconds: 200),
+            reconnect: WebSocketReconnect.disabled(),
+          ),
+        );
+        final states = <WebSocketState>[];
+        c.states.listen(states.add);
+        await expectLater(
+          c.connect('ws://127.0.0.1:${listener.port}/'),
+          throwsA(isA<WebSocketTimeoutException>()),
+        );
+        await released(listener.peers);
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        expect(states.whereType<WebSocketState$Open>(), isEmpty);
+        expect(c.state, isA<WebSocketState$Disconnected>());
+        await c.close();
+      });
+    });
+
     sharedServerConformance(() => server, (
       protocolPing: true,
       protocolCloseCodes: true,
@@ -829,5 +952,102 @@ final class _Recorder implements TransportListener {
   @override
   void onClosed(int? code, String reason, WebSocketException? error) {
     if (!closed.isCompleted) closed.complete();
+  }
+}
+
+/// A TCP listener that accepts and, by default, never answers. Records
+/// each connection and when the client closed it.
+final class _Listener {
+  _Listener._(this._server);
+
+  static Future<_Listener> bind() async =>
+      _Listener._(await ServerSocket.bind(InternetAddress.loopbackIPv4, 0))
+        .._listen();
+
+  final ServerSocket _server;
+  final List<_Peer> peers = [];
+  final StreamController<void> _accepted = StreamController.broadcast();
+
+  /// Answer the first upgrade with 101, then go silent.
+  bool answerFirst = false;
+
+  /// Answer every upgrade with 101 after this delay.
+  Duration? answerAfter;
+
+  int get port => _server.port;
+
+  void _listen() => _server.listen((socket) {
+    final peer = _Peer(socket);
+    final answer = (answerFirst && peers.isEmpty) ? Duration.zero : answerAfter;
+    peers.add(peer);
+    _accepted.add(null);
+    if (answer != null) peer.answer(answer);
+  });
+
+  Future<void> waitFor(int count) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (peers.length < count) {
+      if (DateTime.now().isAfter(deadline)) {
+        fail('${peers.length} of $count attempts arrived');
+      }
+      await _accepted.stream.first.timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {},
+      );
+    }
+  }
+
+  Future<void> close() async {
+    for (final p in peers) {
+      p.socket.destroy();
+    }
+    await _server.close();
+    await _accepted.close();
+  }
+}
+
+final class _Peer {
+  _Peer(this.socket) {
+    socket.listen(
+      _request.addAll,
+      onDone: _done,
+      onError: (Object _) => _done(),
+      cancelOnError: true,
+    );
+  }
+
+  final Socket socket;
+  final List<int> _request = [];
+  final Completer<void> _closed = Completer<void>();
+
+  /// Completes when the client closed (FIN or RST) its end.
+  Future<void> get closed => _closed.future;
+  bool get isOpen => !_closed.isCompleted;
+  String get request => latin1.decode(_request);
+
+  void _done() {
+    if (!_closed.isCompleted) _closed.complete();
+    socket.destroy();
+  }
+
+  Future<void> answer(Duration after) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (!request.contains('\r\n\r\n') && isOpen) {
+      if (DateTime.now().isAfter(deadline)) return;
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    await Future<void>.delayed(after);
+    final key = RegExp(
+      r'sec-websocket-key: *(\S+)',
+      caseSensitive: false,
+    ).firstMatch(request)?.group(1);
+    if (key == null || !isOpen) return;
+    socket.add(
+      latin1.encode(
+        'HTTP/1.1 101 Switching Protocols\r\n'
+        'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+        'Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n',
+      ),
+    );
   }
 }

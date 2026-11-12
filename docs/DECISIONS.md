@@ -1694,3 +1694,46 @@ docs/review/distribution.md F21–F30.
   better than D28 (4.1.5 and 4.2.5, reserved opcodes after a text frame,
   are now OK). Not in CI: a run takes minutes and needs Docker.
 - Status: **adopted**.
+
+### D54. Every connect attempt owns its socket, TLS stage included
+
+GitHub issue #24 and an outside report on ws 1.0.0 (2026-11-12, Toxiproxy):
+1.x wrapped `io.WebSocket.connect` in `Future.timeout`. The timed-out
+attempt kept running with its socket (12 failed attempts left 12 open
+sockets, still open a second after `close()`), and a reconnect that hung
+never left `connecting`, so no further attempt was made.
+
+2.0 already gave each attempt a session that the connect timeout,
+`close()` and a newer attempt abort. A regression group
+(`server_suite.dart`, "abandoned connect attempts", both VM transports)
+drives a plain TCP listener that accepts and never answers, and checks
+on the server side that each socket is closed. It found one hole: the
+pure-Dart transport opened `wss://` with `RawSecureSocket.startConnect`,
+whose `ConnectionTask.cancel()` only works until TCP is up. An attempt
+aborted during the TLS handshake (ClientHello sent, no answer) kept its
+socket until the server answered or the OS gave up. TLS now always runs
+through `RawSecureSocket.secure` over a TCP socket the transport holds,
+as the proxy path already did, so `abort()` closes it at any stage.
+Native was not affected (dropping the tokio task closes the socket).
+
+Pinned by tests, on pure Dart and native:
+- `ws` and `wss`: after 4 timed-out attempts, the first 3 sockets are
+  closed by the client and attempts keep coming; after `close()` all are.
+- #24 itself: open, the connection is cut, then every reconnect hangs:
+  attempts 1, 2, 3 each time out and the next one starts.
+- `close()` during the handshake returns within 1 s (connect timeout
+  30 s), fails `connect()` with `WebSocketNotConnectedException` and
+  closes the socket.
+- A 101 written after the timeout cannot open the client: the socket is
+  gone by then.
+
+The same report's second defect, an exception from
+`WSInterceptor.wrap(onSend:)` escaping `await add()` into the zone (exit
+code 255), has no 2.0 counterpart: interceptors are gone, and the user
+code left on the send path (`toJson`, `WebSocketRpc.encode`, the
+heartbeat ping builder) fails only its own call. A new test pins
+`toJson`: `push()` returns normally, its future fails with
+`WebSocketFormatException` (cause: the `StateError`), the zone sees
+nothing, and the connection stays open.
+
+- Status: **adopted**.

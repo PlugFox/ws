@@ -119,19 +119,13 @@ final class _DartConnection implements TransportConnection, FrameHandler {
         return false;
       }
 
-      final io.ConnectionTask<io.RawSocket> task;
-      if (proxy != null) {
-        task = await io.RawSocket.startConnect(proxy.host, proxy.port);
-      } else if (handshake.secure) {
-        task = await io.RawSecureSocket.startConnect(
-          host,
-          handshake.port,
-          context: context,
-          onBadCertificate: onBadCertificate,
-        );
-      } else {
-        task = await io.RawSocket.startConnect(host, handshake.port);
-      }
+      // TLS always runs over a TCP socket this transport holds: the task
+      // of `RawSecureSocket.startConnect` cannot be cancelled once TCP is
+      // up, so an attempt aborted during the TLS handshake (timeout,
+      // close) would keep its socket until the server answered.
+      final task = proxy != null
+          ? await io.RawSocket.startConnect(proxy.host, proxy.port)
+          : await io.RawSocket.startConnect(host, handshake.port);
       if (_finished) return task.cancel();
       _task = task;
       var socket = await task.socket;
@@ -143,18 +137,18 @@ final class _DartConnection implements TransportConnection, FrameHandler {
       if (proxy != null) {
         tunnel = await openTunnel(socket, host, handshake.port, proxy);
         if (_finished) return;
-        if (handshake.secure) {
-          socket = await io.RawSecureSocket.secure(
-            socket,
-            subscription: tunnel,
-            host: host,
-            context: context,
-            onBadCertificate: onBadCertificate,
-          );
-          tunnel = null;
-          if (_finished) return socket.close().ignore();
-          _socket = socket;
-        }
+      }
+      if (handshake.secure) {
+        socket = await io.RawSecureSocket.secure(
+          socket,
+          subscription: tunnel,
+          host: host,
+          context: context,
+          onBadCertificate: onBadCertificate,
+        );
+        tunnel = null;
+        if (_finished) return socket.close().ignore();
+        _socket = socket;
       }
       if (handshake.secure && tls.pins.isNotEmpty) {
         final certificate = (socket as io.RawSecureSocket).peerCertificate;

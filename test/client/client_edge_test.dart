@@ -493,6 +493,42 @@ void main() {
       },
     );
 
+    // ws 1.0.0 lost an exception thrown by WSInterceptor.wrap(onSend:):
+    // `await add()` succeeded and the error killed the process (the 1.0.0
+    // error-propagation report). The send path's user code here is the
+    // message's toJson: its error must fail that push() and nothing else.
+    test('a throwing toJson fails that push, not the zone', () async {
+      final zoneErrors = <Object>[];
+      await runZonedGuarded(() async {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.json(
+          options: WebSocketOptions(transport: server),
+        );
+        await client.connect('ws://t');
+        late final Future<void> sent;
+        // Never synchronously: the failure is the future's.
+        expect(
+          () => sent = client.push({'x': _ThrowingToJson()}),
+          returnsNormally,
+        );
+        await expectLater(
+          sent,
+          throwsA(
+            isA<WebSocketFormatException>().having(
+              (e) => (e.cause! as JsonUnsupportedObjectError).cause,
+              'cause',
+              isA<StateError>(),
+            ),
+          ),
+        );
+        expect(client.state.isOpen, isTrue);
+        await client.push({'ok': true});
+        expect(server.last.receivedJson.single, {'ok': true});
+        await client.close();
+      }, (e, _) => zoneErrors.add(e));
+      expect(zoneErrors, isEmpty);
+    });
+
     test('push fails fast once the queue is over sendBufferLimit', () {
       fake((async) {
         final server = FakeWebSocketServer();
@@ -847,4 +883,8 @@ final class _ThrowingRpc implements WebSocketRpc<Map<String, Object?>> {
     if (failDecode) throw StateError('decode');
     return reply;
   }
+}
+
+final class _ThrowingToJson {
+  Object? toJson() => throw StateError('REJECTED_BY_TOJSON');
 }

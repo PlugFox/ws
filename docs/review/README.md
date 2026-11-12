@@ -13,6 +13,9 @@ file; finding ids below refer to them.
 | [tests_docs.md](tests_docs.md) | tests, docs, benchmarks | ranked missing tests, doc fixes |
 | [future_risks.md](future_risks.md) | platforms, servers, ecosystem | 15 roadmap errors, Top 20 |
 
+GitHub issues and an outside report on 1.0.0, checked against 2.0:
+[issues.md](issues.md) (DECISIONS.md D54).
+
 ## Fixed (with tests)
 
 - **client** F1–F14, F15, F16, F17, F18, F19, F20, F21, F22, F24, F25,

@@ -73,6 +73,21 @@
   (`WebSocketVmOptions.proxy`), TLS options (`WebSocketTls`: extra roots,
   pins, user CAs, `allowInsecure`) and a send limit (`sendBufferLimit`).
 
+### Fixed from 1.x
+
+- A connect attempt that timed out kept its socket, and a hanging
+  reconnect stayed in `connecting` for good (#24). Each attempt now owns
+  its socket at every stage (TCP, TLS, HTTP upgrade); the timeout,
+  `close()` and the next attempt close it.
+- A dead connection that sends no FIN or RST is detected: the heartbeat
+  is on by default and uses protocol pings on native platforms (#25,
+  #26); `ws_flutter` re-checks the connection on resume and, given a
+  connectivity stream, on network changes.
+- An exception from user code on the send path fails that `push()` and
+  never reaches the zone (1.x `WSInterceptor.wrap`).
+- `package:web` ^1.1.0 (#23); messages arrive under dart2wasm, which CI
+  tests in Chrome (#19).
+
 ## 1.1.0-dev.1
 
 - Migration from 'dart:html' to 'package:web'
