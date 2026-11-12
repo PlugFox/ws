@@ -6,7 +6,7 @@ import 'package:ws/src/transport/transport_registry.dart';
 
 /// Version of the C ABI this package calls; must match `ABI_VERSION` in
 /// `native/rust/src/lib.rs`.
-const int nativeAbiVersion = 2;
+const int nativeAbiVersion = 3;
 
 /// The Rust library (`libws_native`), loaded and checked.
 ///

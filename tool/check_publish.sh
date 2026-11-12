@@ -8,7 +8,7 @@ cd "$root"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 version="$(awk '/^version:/ {print $2}' pubspec.yaml)"
-tool/stage_native.sh "$stage/ws_native" "^$version"
+tool/stage_native.sh "$stage/ws_native" "$version"
 printf 'dependency_overrides:\n  ws:\n    path: %s\n' "$root" \
   >"$stage/ws_native/pubspec_overrides.yaml"
 (cd "$stage/ws_native" && dart pub get >/dev/null && dart pub publish --dry-run)

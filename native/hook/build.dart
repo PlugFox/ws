@@ -34,7 +34,7 @@ void main(List<String> args) async {
   await build(args, (input, output) async {
     if (!input.config.buildCodeAssets) return;
     final code = input.config.code;
-    final source = input.userDefines['source'] as String? ?? 'auto';
+    final source = _source(input.userDefines['source'], code.targetOS);
     if (source == 'none') return;
 
     final fileName = code.targetOS.dylibFileName(_assetName);
@@ -59,7 +59,14 @@ void main(List<String> args) async {
     ]);
 
     Uri? library = input.userDefines.path('library');
-    if (library != null) output.dependencies.add(library);
+    if (library != null) {
+      if (!File.fromUri(library).existsSync()) {
+        throw ArgumentError(
+          'ws_native: user-define library: $library does not exist',
+        );
+      }
+      output.dependencies.add(library);
+    }
     if (library == null && source != 'build') {
       library = await _prebuilt(input, target, fileName);
       if (library == null && source == 'prebuilt') {
@@ -240,4 +247,22 @@ String _rustTriple(CodeConfig code) {
       'ws_native: unsupported target $os $arch',
     ),
   };
+}
+
+const _sources = {'auto', 'none', 'build', 'prebuilt'};
+
+/// `source:` is one value, or a map per OS with an optional `default`:
+/// `{default: auto, linux: none}` (as package:sqlite3 3.6+ allows).
+/// Anything else fails the build: a typo must not silently mean `auto`.
+String _source(Object? value, OS os) {
+  final picked = switch (value) {
+    null => 'auto',
+    final Map<Object?, Object?> map => map[os.name] ?? map['default'] ?? 'auto',
+    _ => value,
+  };
+  if (picked is String && _sources.contains(picked)) return picked;
+  throw ArgumentError(
+    'ws_native: user-define source must be one of ${_sources.join(', ')} '
+    '(or a map of OS name to one of them), got $value',
+  );
 }

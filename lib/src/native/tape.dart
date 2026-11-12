@@ -571,29 +571,34 @@ final class _TapeBuilder {
       negative = true;
       p++;
     }
+    // RFC 8259 grammar: int = "0" / [1-9]*DIGIT; frac = "." 1*DIGIT;
+    // exp = ("e" / "E") ["+" / "-"] 1*DIGIT. Same strictness as simd-json.
+    bool isDigit(int i) => i < b.length && b[i] >= 0x30 && b[i] <= 0x39;
     var value = 0;
     var digits = 0;
-    while (p < b.length) {
-      final d = b[p] - 0x30;
-      if (d < 0 || d > 9) break;
-      value = value * 10 + d;
+    if (!isDigit(p)) _fail('Unexpected character');
+    if (b[p] == 0x30 && isDigit(p + 1)) _fail('Leading zero in a number');
+    while (isDigit(p)) {
+      value = value * 10 + (b[p] - 0x30);
       digits++;
       p++;
     }
-    if (digits == 0) _fail('Unexpected character');
     var isDouble = false;
-    while (p < b.length) {
-      final c = b[p];
-      if (c == 0x2E ||
-          c == 0x65 ||
-          c == 0x45 ||
-          c == 0x2B ||
-          c == 0x2D ||
-          (c >= 0x30 && c <= 0x39)) {
-        isDouble = true;
+    if (p < b.length && b[p] == 0x2E) {
+      isDouble = true;
+      p++;
+      if (!isDigit(p)) _fail('Expected a digit after the decimal point');
+      while (isDigit(p)) {
         p++;
-      } else {
-        break;
+      }
+    }
+    if (p < b.length && (b[p] == 0x65 || b[p] == 0x45)) {
+      isDouble = true;
+      p++;
+      if (p < b.length && (b[p] == 0x2B || b[p] == 0x2D)) p++;
+      if (!isDigit(p)) _fail('Expected a digit in the exponent');
+      while (isDigit(p)) {
+        p++;
       }
     }
     _pos = p;

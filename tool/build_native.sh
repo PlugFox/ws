@@ -10,8 +10,12 @@
 #           windows-x64 windows-arm64
 #   out-dir: default native/prebuilt
 #
-# Minimum OS versions match Flutter's: iOS 13.0, macOS 10.15, Android API 21.
+# Minimum OS versions stay at or below Flutter's (iOS 13.0, macOS 10.15,
+# Android API 21): the binary's minimum must not exceed the app's.
 # Android needs ANDROID_NDK_HOME (or ANDROID_NDK_LATEST_HOME on CI runners).
+# Linux targets link against glibc 2.17 through cargo-zigbuild when it is
+# installed (CI does), so the library loads on old distributions
+# (distribution.md F3); libgcc is linked statically (native/rust/build.rs).
 set -euo pipefail
 target="${1:?usage: tool/build_native.sh <target> [out-dir]}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -58,7 +62,17 @@ case "$target" in
 esac
 
 rustup target add "$triple" >/dev/null 2>&1 || true
-(cd "$root/native/rust" && cargo build --release --locked --target "$triple")
+build=(cargo build --release --locked --target "$triple")
+case "$target" in
+  linux-*)
+    if cargo zigbuild --help >/dev/null 2>&1; then
+      build=(cargo zigbuild --release --locked --target "$triple.2.17")
+    else
+      echo "warning: cargo-zigbuild not found; glibc floor = this machine" >&2
+    fi
+    ;;
+esac
+(cd "$root/native/rust" && "${build[@]}")
 mkdir -p "$out/$target"
 cp "$root/native/rust/target/$triple/release/$file" "$out/$target/$file"
 echo "$out/$target/$file"

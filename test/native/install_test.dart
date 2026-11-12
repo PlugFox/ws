@@ -166,7 +166,41 @@ void main() {
   });
 
   test('wsVersion matches pubspec.yaml', () {
-    final pubspec = File('pubspec.yaml').readAsStringSync();
-    expect(pubspec, contains('\nversion: $wsVersion\n'));
+    // Windows checkouts may have CRLF line endings.
+    final pubspec = File('pubspec.yaml').readAsLinesSync();
+    expect(pubspec, contains('version: $wsVersion'));
+  });
+
+  group('parseInstallArgs', () {
+    test('the README line: --key value', () {
+      expect(parseInstallArgs(['--target', 'linux-x64', '--out', '/app/lib']), {
+        'target': 'linux-x64',
+        'out': '/app/lib',
+      });
+    });
+
+    test('--key=value, --list', () {
+      expect(parseInstallArgs(['--target=ios-arm64-sim', '--list']), {
+        'target': 'ios-arm64-sim',
+        'list': '',
+      });
+    });
+
+    test('rejects unknown, missing and invalid values', () {
+      for (final args in [
+        ['linux-x64'],
+        ['--bogus=1'],
+        ['--target'],
+        ['--target', '--out', 'x'],
+        ['--target=../../etc'],
+        ['--sha256=abc'],
+      ]) {
+        expect(
+          () => parseInstallArgs(args),
+          throwsFormatException,
+          reason: '$args',
+        );
+      }
+    });
   });
 }

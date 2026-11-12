@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:ws/src/client/exceptions.dart';
 import 'package:ws/src/native/native_library.dart';
 import 'package:ws/src/native/tape.dart';
+import 'package:ws/src/protocol/handshake.dart';
 import 'package:ws/src/transport/transport.dart';
 
 const int _evOpen = 0;
@@ -63,12 +64,27 @@ final class _NativeConnection implements TransportConnection, Finalizable {
   ) {
     _port = RawReceivePort(_onEvent, 'ws_native');
     final tls = request.tls;
+    // tungstenite ignores user info; send it like the other transports.
+    final url = request.url;
+    final String? authorization;
+    try {
+      HandshakeRequest.validateHeaders(request.headers);
+      HandshakeRequest.validateProtocols(request.protocols);
+      authorization = HandshakeRequest.basicAuthorization(url);
+    } on Object catch (e) {
+      // Same error as the pure-Dart transport.
+      _id = 0;
+      _rejectEarly(
+        WebSocketHandshakeException('Invalid handshake request', cause: e),
+      );
+      return;
+    }
+    final headers = {...request.headers, 'Authorization': ?authorization};
     final config = utf8.encode(
       jsonEncode(<String, Object?>{
-        'url': request.url.toString(),
+        'url': _wireUrl(url, stripUserInfo: authorization != null),
         'headers': [
-          for (final MapEntry(:key, :value) in request.headers.entries)
-            [key, value],
+          for (final MapEntry(:key, :value) in headers.entries) [key, value],
         ],
         'protocols': request.protocols,
         'max_message_size': request.maxMessageSize,
@@ -76,6 +92,12 @@ final class _NativeConnection implements TransportConnection, Finalizable {
         'window': window,
         'allow_insecure': tls.allowInsecure,
         'roots_pem': tls.trustedRootsPem,
+        if (request.proxy case final proxy?)
+          'proxy': <String, Object?>{
+            'host': proxy.host,
+            'port': proxy.port,
+            'authorization': proxy.authorization,
+          },
       }),
     );
     _id = _lib.connect(
@@ -84,20 +106,21 @@ final class _NativeConnection implements TransportConnection, Finalizable {
       _port.sendPort.nativePort,
     );
     if (_id == 0) {
-      _port.close();
-      _finished = true;
-      scheduleMicrotask(
-        () => _listener.onClosed(
-          null,
-          '',
-          const WebSocketConnectionException(
-            'The native transport rejected the connection request',
-          ),
+      _rejectEarly(
+        const WebSocketConnectionException(
+          'The native transport rejected the connection request',
         ),
       );
       return;
     }
     _lib.finalizer.attach(this, Pointer<Void>.fromAddress(_id), detach: this);
+  }
+
+  /// Fails before a native connection exists (never synchronously).
+  void _rejectEarly(WebSocketException error) {
+    _port.close();
+    _finished = true;
+    scheduleMicrotask(() => _listener.onClosed(null, '', error));
   }
 
   final WsNativeLibrary _lib;
@@ -135,6 +158,8 @@ final class _NativeConnection implements TransportConnection, Finalizable {
       case _evOpen:
         _listener.onOpen(e[1] as String?);
       case _evPong:
+        // Pongs are charged against the receive window (ABI 3).
+        if (e.length > 1) _lib.grant(_id, e[1]! as int);
         _listener.onPong();
       case _evDrain:
         _listener.onDrain();
@@ -221,4 +246,14 @@ final class _NativeConnection implements TransportConnection, Finalizable {
   void requestDrain() {
     if (!_finished) _lib.requestDrain(_id);
   }
+}
+
+/// The URL as tungstenite should see it: no user info (sent as a header),
+/// and `/` for an empty path, which it would otherwise send as
+/// `GET ?query` (docs/review/native.md, finding 1).
+String _wireUrl(Uri url, {required bool stripUserInfo}) {
+  var u = url;
+  if (stripUserInfo) u = u.replace(userInfo: '');
+  if (u.path.isEmpty) u = u.replace(path: '/');
+  return u.toString();
 }

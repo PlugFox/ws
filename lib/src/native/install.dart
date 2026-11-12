@@ -128,3 +128,40 @@ Future<String> _hashOf(Stream<List<int>> bytes) async {
   await bytes.forEach(digest.add);
   return digest.close();
 }
+
+/// Parses the arguments of `dart run ws:install`: `--key=value` or
+/// `--key value`, and the flag `--list`. Throws [FormatException] with a
+/// message for the user.
+Map<String, String> parseInstallArgs(List<String> args) {
+  const withValue = {'target', 'out', 'url', 'sha256'};
+  final options = <String, String>{};
+  for (var i = 0; i < args.length; i++) {
+    final match = RegExp(r'^--([a-z0-9]+)(?:=(.*))?$').firstMatch(args[i]);
+    if (match == null) throw FormatException('Unknown argument: ${args[i]}');
+    final key = match[1]!;
+    if (key == 'list') {
+      options[key] = '';
+      continue;
+    }
+    if (!withValue.contains(key)) {
+      throw FormatException('Unknown option: --$key');
+    }
+    var value = match[2];
+    if (value == null) {
+      if (i + 1 >= args.length || args[i + 1].startsWith('--')) {
+        throw FormatException('--$key needs a value');
+      }
+      value = args[++i];
+    }
+    options[key] = value;
+  }
+  if (options['target'] case final target?
+      when !RegExp(r'^[a-z0-9]+-[a-z0-9]+(-sim)?$').hasMatch(target)) {
+    throw FormatException('Invalid --target: $target (e.g. linux-x64)');
+  }
+  if (options['sha256'] case final hash?
+      when !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(hash)) {
+    throw const FormatException('--sha256 must be 64 hex characters');
+  }
+  return options;
+}

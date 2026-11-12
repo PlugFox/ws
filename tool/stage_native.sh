@@ -3,7 +3,10 @@
 # can be published: the repository's root .pubignore hides native/ (it must
 # not be part of the ws package), and pub applies parent ignore files.
 #
-# Usage: tool/stage_native.sh <out-dir> [ws-version-constraint]
+# Usage: tool/stage_native.sh <out-dir> [ws-version]
+#
+# ws_native is released together with ws and pins it exactly: the FFI glue
+# and the tape decoder live in ws, the binary here (distribution.md F10).
 set -euo pipefail
 out="${1:?usage: tool/stage_native.sh <out-dir> [ws-version]}"
 ws_version="${2:-}"

@@ -1,0 +1,7 @@
+# Windows: link the C runtime statically, so the DLL loads without the
+# VC++ redistributable (clean servers, Nano Server; distribution.md F17).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

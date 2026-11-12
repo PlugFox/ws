@@ -2,7 +2,7 @@
 // pubspec.yaml and the library hashes from native/prebuilt/checksums.json
 // (written by the release workflow). Run before `dart pub publish`.
 //
-//   dart run tool/native_release.dart [path/to/checksums.json]
+//   dart run tool/native_release.dart [path/to/checksums.json] [--allow-empty]
 import 'dart:convert';
 import 'dart:io';
 
@@ -12,12 +12,30 @@ void main(List<String> args) {
     multiLine: true,
   ).firstMatch(File('pubspec.yaml').readAsStringSync())![1]!;
   final checksums = File(
-    args.isEmpty ? 'native/prebuilt/checksums.json' : args.first,
+    args.where((a) => !a.startsWith('--')).firstOrNull ??
+        'native/prebuilt/checksums.json',
   );
+  // An empty map is written only on purpose (development builds): a
+  // release must never ship without hashes (distribution.md F7).
+  final allowEmpty = args.contains('--allow-empty');
+  if (!checksums.existsSync()) {
+    if (!allowEmpty) {
+      stderr.writeln('native_release: ${checksums.path} is missing');
+      exit(1);
+    }
+  }
   final hashes = checksums.existsSync()
       ? (jsonDecode(checksums.readAsStringSync()) as Map<String, Object?>)
             .cast<String, String>()
       : const <String, String>{};
+  const expected = 12;
+  if (!allowEmpty && hashes.length != expected) {
+    stderr.writeln(
+      'native_release: ${hashes.length} libraries in ${checksums.path}, '
+      'expected $expected',
+    );
+    exit(1);
+  }
   final entries = (hashes.keys.toList()..sort())
       .map((k) => "  '$k':\n      '${hashes[k]}',\n")
       .join();

@@ -23,7 +23,10 @@
 //! * `null` — liveness probe, ignored.
 
 mod dart;
+mod handshake;
+mod net;
 mod tape;
+mod tls;
 
 use std::collections::HashMap;
 use std::ffi::{CString, c_void};
@@ -35,29 +38,23 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio::sync::{Notify, mpsc};
 use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::{
-    self, ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature},
-    pki_types::{CertificateDer, ServerName, UnixTime, pem::PemObject},
-};
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::{
     self as tungstenite, Message, Utf8Bytes,
-    client::IntoClientRequest,
     error::{CapacityError, ProtocolError},
-    http::{HeaderName, HeaderValue},
-    protocol::{CloseFrame, WebSocketConfig, frame::coding::CloseCode},
+    handshake::client::generate_key,
+    http::{Uri, uri::InvalidUri},
+    protocol::{CloseFrame, Role, WebSocketConfig, frame::coding::CloseCode},
 };
-use tokio_tungstenite::{WebSocketStream, client_async_with_config};
 
 use dart::{DartCObject, DartPort, ExternalBytes, PostCObjectFn};
 
 /// Bumped on any change of the functions or events below.
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 3;
 
 const EV_OPEN: i64 = 0;
 const EV_CLOSED: i64 = 1;
@@ -154,7 +151,10 @@ impl Shared {
     }
 }
 
+/// Unknown fields are an error: a library older than its Dart side must
+/// not silently ignore a setting (a proxy, say) the caller relies on.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Config {
     url: String,
     #[serde(default)]
@@ -171,10 +171,21 @@ struct Config {
     allow_insecure: bool,
     #[serde(default)]
     roots_pem: Option<String>,
+    #[serde(default)]
+    proxy: Option<net::Proxy>,
 }
 
 fn default_max_message() -> usize {
     64 << 20
+}
+
+/// Credits charged per message on top of its payload: the bookkeeping
+/// (channel slot, `Dart_CObject`, external typed data) costs memory even
+/// for empty messages (docs/review/native.md, finding 3).
+const MESSAGE_OVERHEAD: i64 = 64;
+
+fn charge(len: usize) -> i64 {
+    len as i64 + MESSAGE_OVERHEAD
 }
 
 fn default_window() -> i64 {
@@ -578,43 +589,49 @@ async fn run(
 
 async fn open(config: &Config) -> Result<(WebSocketStream<Box<dyn Io>>, Option<String>), Closed> {
     let connection = |e: BoxError| Closed::error(ERR_CONNECTION, e.to_string());
-    let mut request = config
+    let uri: Uri = config
         .url
-        .as_str()
-        .into_client_request()
-        .map_err(map_error)?;
-    let uri = request.uri().clone();
-    let secure = uri.scheme_str() == Some("wss");
-    let host = uri
+        .parse()
+        .map_err(|e: InvalidUri| Closed::error(ERR_HANDSHAKE, e.to_string()))?;
+    let secure = match uri.scheme_str() {
+        Some("wss") => true,
+        Some("ws") => false,
+        _ => {
+            return Err(Closed::error(
+                ERR_HANDSHAKE,
+                "Expected a ws:// or wss:// URL".into(),
+            ));
+        }
+    };
+    let authority_host = uri
         .host()
         .ok_or_else(|| Closed::error(ERR_HANDSHAKE, "URL has no host".into()))?;
-    let host = host
+    let host = authority_host
         .trim_start_matches('[')
         .trim_end_matches(']')
         .to_owned();
-    let port = uri.port_u16().unwrap_or(if secure { 443 } else { 80 });
-    {
-        let headers = request.headers_mut();
-        for (name, value) in &config.headers {
-            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|e| connection(e.into()))?;
-            let value = HeaderValue::from_str(value).map_err(|e| connection(e.into()))?;
-            headers.append(name, value);
-        }
-        if !config.protocols.is_empty() {
-            let value = HeaderValue::from_str(&config.protocols.join(", "))
-                .map_err(|e| connection(e.into()))?;
-            headers.insert("sec-websocket-protocol", value);
-        }
-    }
+    let default_port = if secure { 443 } else { 80 };
+    let port = uri.port_u16().unwrap_or(default_port);
+    let host_header = if port == default_port {
+        authority_host.to_owned()
+    } else {
+        format!("{authority_host}:{port}")
+    };
+    let target = uri.path_and_query().map_or("/", |p| p.as_str()).to_owned();
+    let target = if target.starts_with('/') {
+        target
+    } else {
+        format!("/{target}")
+    };
 
-    let tcp = TcpStream::connect((host.as_str(), port))
+    let tcp = net::connect(&host, port, config.proxy.as_ref())
         .await
         .map_err(|e| connection(e.into()))?;
-    tcp.set_nodelay(true).map_err(|e| connection(e.into()))?;
-    let stream: Box<dyn Io> = if secure {
-        let tls = tls_config(config).map_err(|e| Closed::error(ERR_TLS, e.to_string()))?;
+    let mut stream: Box<dyn Io> = if secure {
+        let tls = tls::client_config(config.allow_insecure, config.roots_pem.as_deref())
+            .map_err(|e| Closed::error(ERR_TLS, e.to_string()))?;
         let name = ServerName::try_from(host).map_err(|e| Closed::error(ERR_TLS, e.to_string()))?;
-        let stream = TlsConnector::from(Arc::new(tls))
+        let stream = TlsConnector::from(tls)
             .connect(name, tcp)
             .await
             .map_err(|e| Closed::error(ERR_TLS, e.to_string()))?;
@@ -622,26 +639,37 @@ async fn open(config: &Config) -> Result<(WebSocketStream<Box<dyn Io>>, Option<S
     } else {
         Box::new(tcp)
     };
+
+    let key = generate_key();
+    let request = handshake::Request {
+        target: &target,
+        host: &host_header,
+        key: &key,
+        protocols: &config.protocols,
+        headers: &config.headers,
+    };
+    let (protocol, leftover) = handshake::run(&mut stream, &request)
+        .await
+        .map_err(|failure| match failure {
+            handshake::Failure::Status(status, headers) => Closed {
+                code: None,
+                reason: String::new(),
+                kind: ERR_HANDSHAKE,
+                message: Some(format!("Unexpected HTTP status {status}")),
+                status: Some(status),
+                headers: serde_json::to_string(&headers).ok(),
+            },
+            handshake::Failure::Invalid(message) => Closed::error(ERR_HANDSHAKE, message),
+            handshake::Failure::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                Closed::error(ERR_HANDSHAKE, e.to_string())
+            }
+            handshake::Failure::Io(e) => Closed::error(ERR_CONNECTION, e.to_string()),
+        })?;
     let ws_config = WebSocketConfig::default()
         .max_message_size(Some(config.max_message_size))
         .max_frame_size(Some(config.max_message_size));
-    let (ws, response) = client_async_with_config(request, stream, Some(ws_config))
-        .await
-        .map_err(|e| {
-            // Every protocol error before the upgrade is a handshake failure.
-            let mut closed = map_error(e);
-            if closed.kind == ERR_PROTOCOL {
-                closed.kind = ERR_HANDSHAKE;
-                closed.code = None;
-                closed.reason.clear();
-            }
-            closed
-        })?;
-    let protocol = response
-        .headers()
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
+    let ws =
+        WebSocketStream::from_partially_read(stream, leftover, Role::Client, Some(ws_config)).await;
     Ok((ws, protocol))
 }
 
@@ -799,13 +827,19 @@ async fn serve(
         };
         match next {
             Some(Ok(m @ (Message::Text(_) | Message::Binary(_)))) => {
-                shared.credits.fetch_sub(m.len() as i64, Ordering::SeqCst);
+                shared.credits.fetch_sub(charge(m.len()), Ordering::SeqCst);
                 if frames.send(m).await.is_err() {
                     break;
                 }
             }
             Some(Ok(Message::Pong(_))) => {
-                shared.post(&mut [DartCObject::int(EV_PONG)]);
+                // Pongs cost credits too, so a pong flood cannot queue
+                // unbounded events in the isolate; Dart grants them back.
+                shared.credits.fetch_sub(MESSAGE_OVERHEAD, Ordering::SeqCst);
+                shared.post(&mut [
+                    DartCObject::int(EV_PONG),
+                    DartCObject::int(MESSAGE_OVERHEAD),
+                ]);
             }
             Some(Ok(Message::Close(frame))) => {
                 outcome = Closed {
@@ -892,10 +926,15 @@ fn post_batch(shared: &Shared, json: bool, batch: &mut Vec<Message>) -> bool {
     items.push(Item::Plain(DartCObject::int(0)));
     let mut bytes = 0i64;
     for message in batch.drain(..) {
-        bytes += message.len() as i64;
+        bytes += charge(message.len());
         match message {
             Message::Text(text) => {
                 if json && let Ok(t) = tape::build_tape(text.as_bytes().to_vec()) {
+                    // The tape is larger than the text: charge the
+                    // difference too (it is granted back with the batch).
+                    let extra = t.bytes.saturating_sub(text.len()) as i64;
+                    shared.credits.fetch_sub(extra, Ordering::SeqCst);
+                    bytes += extra;
                     let (ptr, len) = (t.words.as_ptr() as *const u8, t.bytes);
                     items.push(Item::Plain(DartCObject::int(KIND_TAPE)));
                     items.push(Item::External(ExternalBytes::new(t.words, ptr, len, true)));
@@ -938,78 +977,6 @@ fn post_batch(shared: &Shared, json: bool, batch: &mut Vec<Message>) -> bool {
         shared.abort();
     }
     posted
-}
-
-// --- TLS -----------------------------------------------------------------------
-
-fn tls_config(config: &Config) -> Result<ClientConfig, BoxError> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let builder = ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()?;
-    if config.allow_insecure {
-        return Ok(builder
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AcceptAnyCertificate(provider)))
-            .with_no_client_auth());
-    }
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    if let Some(pem) = &config.roots_pem {
-        for cert in CertificateDer::pem_slice_iter(pem.as_bytes()) {
-            roots.add(cert?)?;
-        }
-    }
-    Ok(builder.with_root_certificates(roots).with_no_client_auth())
-}
-
-/// `allowInsecure` only (development): accepts any certificate but still
-/// checks handshake signatures.
-#[derive(Debug)]
-struct AcceptAnyCertificate(Arc<CryptoProvider>);
-
-impl ServerCertVerifier for AcceptAnyCertificate {
-    fn verify_server_cert(
-        &self,
-        _: &CertificateDer<'_>,
-        _: &[CertificateDer<'_>],
-        _: &ServerName<'_>,
-        _: &[u8],
-        _: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
 }
 
 #[cfg(test)]

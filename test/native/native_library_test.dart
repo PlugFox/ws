@@ -6,7 +6,9 @@ import 'dart:io';
 import 'package:test/test.dart';
 import 'package:ws/native.dart';
 
+import '../support/test_server.dart';
 import '../transport/conformance.dart';
+import '../transport/server_suite.dart';
 
 /// Path to a built `libws_native` (`cargo build --release` in
 /// `native/rust`); the conformance group is skipped without it.
@@ -47,6 +49,12 @@ void main() {
         expect(library.install(), isTrue);
       });
       transportConformance(() => library.transport());
+      group(
+        'native',
+        () => serverConformance(() => library.transport()),
+        // An inner `skip: false` would override the outer skip.
+        skip: _library == null ? 'needs WS_NATIVE_LIBRARY' : TestServer.skip,
+      );
     },
     skip: _library == null
         ? 'set WS_NATIVE_LIBRARY to a built libws_native to run'

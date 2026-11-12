@@ -17,7 +17,18 @@ simd-json = "0.19.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-tungstenite = "0.30"
+
+[target.'cfg(any(target_vendor = "apple", windows))'.dependencies]
+rustls-platform-verifier = "0.7.1"
+
+[target.'cfg(not(any(target_vendor = "apple", windows)))'.dependencies]
 webpki-roots = "1.0.10"
+
+[target.'cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))'.dependencies]
+rustls-native-certs = "0.8.5"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["test-util"] }
 
 [profile.release]
 opt-level = 3

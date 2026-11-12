@@ -1,5 +1,6 @@
 // `dart run ws:install`: downloads the native (Rust) library of this ws
 // release for apps built with `dart compile exe` (DECISIONS.md D32).
+import 'dart:async';
 import 'dart:io';
 
 import 'package:ws/src/native/install.dart';
@@ -27,19 +28,15 @@ Then load it in the app:
 ''';
 
 Future<void> main(List<String> args) async {
-  final options = <String, String>{};
-  for (final arg in args) {
-    if (arg == '-h' || arg == '--help') {
-      stdout.write(_usage.replaceAll('{host}', hostNativeTarget()));
-      return;
-    }
-    final match = RegExp(r'^--([a-z0-9]+)(?:=(.*))?$').firstMatch(arg);
-    if (match == null) return _fail('Unknown argument: $arg');
-    options[match[1]!] = match[2] ?? '';
+  if (args.contains('-h') || args.contains('--help')) {
+    stdout.write(_usage.replaceAll('{host}', hostNativeTarget()));
+    return;
   }
-  const known = {'target', 'out', 'url', 'sha256', 'list'};
-  for (final key in options.keys) {
-    if (!known.contains(key)) return _fail('Unknown option: --$key');
+  final Map<String, String> options;
+  try {
+    options = parseInstallArgs(args);
+  } on FormatException catch (e) {
+    return _fail(e.message);
   }
   if (options.containsKey('list')) {
     for (final key in nativeAssetHashes.keys) {
@@ -58,6 +55,10 @@ Future<void> main(List<String> args) async {
     stdout.writeln('Installed ${file.path} ($target, ws $wsVersion)');
   } on NativeInstallException catch (e) {
     _fail(e.message);
+  } on IOException catch (e) {
+    _fail('$e');
+  } on TimeoutException {
+    _fail('the download stalled');
   }
 }
 
