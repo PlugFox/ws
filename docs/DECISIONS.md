@@ -1407,3 +1407,31 @@ not exist.
   wrapped: its tests run in fake time, and it is a test double whose
   timing the tests set.
 - Status: **adopted**.
+
+### D48. The reconnect policy on real sockets
+
+- Context: with reconnect on, only 403 and "connection refused" were
+  pinned on real sockets; every other server-suite test ran with
+  reconnect off (docs/review/tests_docs.md §4 item 4; TEST_PLAN C12, T6).
+- Decision: each failure gets one test that records the client's first
+  decision: `reconnecting` (with the delay) or `disconnected` (terminal).
+  `minDelay` 10 ms, `maxDelay` 2 s, so "soon" (< 500 ms) and "after
+  `maxDelay`" are told apart.
+  - Every transport (`server_shared.dart`, browser included): server
+    close 1000, 1001, 1011, 1012, 4000, empty close and a dropped
+    connection are retried soon; 1013 waits `maxDelay`; 1003 and 1008
+    stop; a protocol violation stops on the VM (the client sent 1007) and
+    is retried in the browser, which reports it as 1006, the same as a
+    drop.
+  - VM transports (`server_suite.dart`): HTTP 400, 401, 403, 404, 410
+    stop; 408, 425, 429, 500, 502, 503 are retried; `Retry-After: 3` on
+    429 and 503 makes the delay at least 3 s; a 302 is reported and
+    retried, not followed; a broken 101 is retried; untrusted, expired
+    and wrong-host certificates and a pin mismatch are retried after
+    `maxDelay`; proxy 407 stops and proxy 502 is retried; refused and DNS
+    failures are retried soon.
+- Result: the policy matches the documentation on pure Dart, native and
+  the browser; no change to the client. Four mutations of the policy (408
+  terminal, 1013 not delayed, 407 retried, `Retry-After` ignored) each
+  fail exactly one of the new tests.
+- Status: **adopted**.

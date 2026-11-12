@@ -46,8 +46,9 @@ file; finding ids below refer to them.
    on Android 16 and iPadOS 26.6.1.
 6. **Tests** (tests_docs §4): ~~the browser on the shared suites
    (T-3)~~ done, DECISIONS.md D46 (also D-3); ~~transport contract
-   checker (T28) and the session-identity test (T-4)~~ done, D47; reconnect policy on real sockets,
-   randomized re-entrancy sequences, exact content checks.
+   checker (T28) and the session-identity test (T-4)~~ done, D47;
+   ~~reconnect policy on real sockets~~ done, D48; randomized re-entrancy
+   sequences, exact content checks.
 7. **Remaining medium/low items**: native 5–10, 12–30 (pinned read
    chunks, tape memory, OS verifier blocking `abort()`, custom roots
    rebuilding the TLS config), protocol F10–F12, F14–F18, client F23,

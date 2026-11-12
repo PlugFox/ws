@@ -332,6 +332,100 @@ void sharedServerConformance(
     });
   });
 
+  group('reconnect policy on server closes', () {
+    const maxDelay = Duration(seconds: 2);
+
+    /// The client's decision after the first failure: reconnecting (and
+    /// how soon) or disconnected for good.
+    Future<WebSocketState> decision(String path) async {
+      final c = WebSocketClient.text(
+        options: const WebSocketOptions(
+          reconnect: WebSocketReconnect(
+            minDelay: Duration(milliseconds: 10),
+            maxDelay: maxDelay,
+          ),
+        ),
+      );
+      final decided = c.states.firstWhere(
+        (s) =>
+            s is WebSocketState$Reconnecting ||
+            s is WebSocketState$Disconnected,
+      );
+      c.connect(url(path)).ignore();
+      final state = await decided.timeout(const Duration(seconds: 10));
+      await c.close();
+      return state;
+    }
+
+    Matcher retried(int? code, {bool late = false}) =>
+        isA<WebSocketState$Reconnecting>()
+            .having(
+              (s) => s.cause,
+              'cause',
+              code == null
+                  ? lost
+                  : isA<WebSocketClosedException>().having(
+                      (e) => e.code,
+                      'code',
+                      code,
+                    ),
+            )
+            .having(
+              (s) => s.delay,
+              'delay',
+              late
+                  ? greaterThanOrEqualTo(maxDelay)
+                  : lessThan(const Duration(milliseconds: 500)),
+            );
+
+    Matcher stopped(int code) => isA<WebSocketState$Disconnected>().having(
+      (s) => s.error,
+      'error',
+      isA<WebSocketClosedException>().having((e) => e.code, 'code', code),
+    );
+
+    for (final code in [1000, 1001, 1011, 1012, 4000]) {
+      serverTest('$code is retried soon', () async {
+        expect(await decision('/close?code=$code&reason=r'), retried(code));
+      });
+    }
+
+    serverTest('1013 (try again later) waits maxDelay', () async {
+      expect(
+        await decision('/close?code=1013&reason=busy'),
+        retried(1013, late: true),
+      );
+    });
+
+    for (final code in [1003, 1008]) {
+      serverTest('$code stops reconnecting', () async {
+        expect(await decision('/close?code=$code&reason=r'), stopped(code));
+      });
+    }
+
+    serverTest('an empty close (1005) is retried', () async {
+      expect(
+        await decision('/close-empty'),
+        isA<WebSocketState$Reconnecting>(),
+      );
+    });
+
+    serverTest('a dropped connection is retried', () async {
+      expect(await decision('/drop?mode=rst'), retried(null));
+    });
+
+    serverTest('a protocol violation by the server', () async {
+      final state = await decision('/raw?preset=utf8-bad');
+      if (caps.protocolCloseCodes) {
+        // We closed with 1007: repeating it would fail the same way.
+        expect(state, stopped(1007));
+      } else {
+        // The browser hides it as 1006: indistinguishable from a drop.
+        expect(state, retried(null));
+      }
+    });
+  });
+
   group('close semantics', () {
     serverTest('server close code and reason; empty close is 1005', () async {
       final state = await serverEnds('/close?code=4001&reason=bye');

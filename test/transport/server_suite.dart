@@ -598,6 +598,181 @@ void serverConformance(WebSocketTransport Function() create) {
       });
     });
 
+    group('reconnect policy on connect failures', () {
+      const maxDelay = Duration(seconds: 2);
+
+      Future<WebSocketState> decision(
+        String url, {
+        WebSocketVmOptions vm = const WebSocketVmOptions(),
+      }) async {
+        final c = WebSocketClient.text(
+          options: WebSocketOptions(
+            reconnect: const WebSocketReconnect(
+              minDelay: Duration(milliseconds: 10),
+              maxDelay: maxDelay,
+            ),
+            vm: vm,
+          ),
+        );
+        final decided = c.states.firstWhere(
+          (s) =>
+              s is WebSocketState$Reconnecting ||
+              s is WebSocketState$Disconnected,
+        );
+        c.connect(url).ignore();
+        final state = await decided.timeout(const Duration(seconds: 10));
+        await c.close();
+        return state;
+      }
+
+      Matcher handshake(int status) => isA<WebSocketHandshakeException>()
+          .having((e) => e.statusCode, 'statusCode', status);
+
+      Matcher retried(Matcher cause, {Matcher? delay}) =>
+          isA<WebSocketState$Reconnecting>()
+              .having((s) => s.cause, 'cause', cause)
+              .having(
+                (s) => s.delay,
+                'delay',
+                delay ?? lessThan(const Duration(milliseconds: 500)),
+              );
+
+      Matcher stopped(Matcher error) => isA<WebSocketState$Disconnected>()
+          .having((s) => s.error, 'error', error);
+
+      for (final status in [400, 401, 403, 404, 410]) {
+        test('HTTP $status stops reconnecting', () async {
+          expect(
+            await decision(server.url('/status?code=$status')),
+            stopped(handshake(status)),
+          );
+        });
+      }
+
+      for (final status in [408, 425, 429, 500, 502, 503]) {
+        test('HTTP $status is retried', () async {
+          expect(
+            await decision(server.url('/status?code=$status')),
+            retried(handshake(status)),
+          );
+        });
+      }
+
+      test('Retry-After (429, 503) sets the least delay', () async {
+        for (final status in [429, 503]) {
+          expect(
+            await decision(
+              server.url('/status?code=$status&header=Retry-After:3'),
+            ),
+            retried(
+              handshake(status),
+              delay: greaterThanOrEqualTo(const Duration(seconds: 3)),
+            ),
+            reason: '$status',
+          );
+        }
+      });
+
+      test('a redirect is reported and retried, not followed', () async {
+        expect(
+          await decision(server.url('/redirect?code=302&to=/echo')),
+          retried(handshake(302)),
+        );
+      });
+
+      test('a broken 101 is retried', () async {
+        expect(
+          await decision(server.url('/bad-101?accept=wrong')),
+          retried(isA<WebSocketHandshakeException>()),
+        );
+      });
+
+      test('a rejected certificate is retried after maxDelay', () async {
+        for (final (url, tls) in [
+          (server.tls('/echo'), WebSocketTlsFailure.untrusted),
+          (
+            'wss://localhost:${server.wssExpired}/echo',
+            WebSocketTlsFailure.expired,
+          ),
+          (
+            'wss://localhost:${server.wssBadHost}/echo',
+            WebSocketTlsFailure.hostname,
+          ),
+        ]) {
+          expect(
+            await decision(
+              url,
+              vm: tls == WebSocketTlsFailure.untrusted
+                  ? const WebSocketVmOptions()
+                  : WebSocketVmOptions(
+                      tls: WebSocketTls(trustedRootsPem: server.caPem),
+                    ),
+            ),
+            retried(
+              failed(WebSocketConnectionFailure.tls, tls: tls),
+              delay: greaterThanOrEqualTo(maxDelay),
+            ),
+            reason: '$tls',
+          );
+        }
+      });
+
+      test('a pin mismatch is retried after maxDelay', () async {
+        expect(
+          await decision(
+            server.tls('/echo'),
+            vm: WebSocketVmOptions(
+              tls: WebSocketTls(
+                trustedRootsPem: server.caPem,
+                pins: [base64.encode(List<int>.filled(32, 7))],
+              ),
+            ),
+          ),
+          retried(
+            failed(
+              WebSocketConnectionFailure.tls,
+              tls: WebSocketTlsFailure.pinMismatch,
+            ),
+            delay: greaterThanOrEqualTo(maxDelay),
+          ),
+        );
+      });
+
+      test('proxy 407 stops, proxy 502 is retried', () async {
+        expect(
+          await decision(
+            server.url('/echo'),
+            vm: WebSocketVmOptions(
+              proxy: WebSocketProxy.parse(
+                'http://test:wrong@127.0.0.1:${server.proxyAuth}',
+              ),
+            ),
+          ),
+          stopped(failed(WebSocketConnectionFailure.proxy, proxyStatus: 407)),
+        );
+        expect(
+          await decision(
+            'ws://127.0.0.1:1/echo',
+            vm: WebSocketVmOptions(
+              proxy: WebSocketProxy(host: '127.0.0.1', port: server.proxy),
+            ),
+          ),
+          retried(failed(WebSocketConnectionFailure.proxy, proxyStatus: 502)),
+        );
+      });
+
+      test('a refused port and an unknown host are retried', () async {
+        expect(
+          await decision('ws://127.0.0.1:1/echo'),
+          retried(failed(WebSocketConnectionFailure.refused)),
+        );
+        expect(
+          await decision('ws://no-such-host.invalid/echo'),
+          retried(failed(WebSocketConnectionFailure.dns)),
+        );
+      });
+    });
+
     sharedServerConformance(() => server, (
       protocolPing: true,
       protocolCloseCodes: true,
