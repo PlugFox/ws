@@ -38,8 +38,11 @@ void main() {
     final echoed = Completer<Uint8List>();
     binary.messages.listen(echoed.complete);
     await binary.connect('ws://127.0.0.1:$port/echo');
-    await binary.push(Uint8List.fromList(List<int>.generate(70000, (i) => i)));
-    expect((await echoed.future).length, 70000);
+    final sent = Uint8List.fromList(
+      List<int>.generate(70000, (i) => (i * 7 + i ~/ 251) & 0xFF),
+    );
+    await binary.push(sent);
+    expect(await echoed.future, orderedEquals(sent));
     await binary.close();
 
     final json = WebSocketClient.json();

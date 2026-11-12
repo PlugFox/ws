@@ -47,8 +47,11 @@ file; finding ids below refer to them.
 6. **Tests** (tests_docs §4): ~~the browser on the shared suites
    (T-3)~~ done, DECISIONS.md D46 (also D-3); ~~transport contract
    checker (T28) and the session-identity test (T-4)~~ done, D47;
-   ~~reconnect policy on real sockets~~ done, D48; randomized re-entrancy
-   sequences, exact content checks.
+   ~~reconnect policy on real sockets~~ done, D48; ~~randomized
+   re-entrancy sequences, exact content checks (T-5, T-6)~~ done, D49.
+   Left from §4 for item 7: exact backpressure (T-7, `sendBufferLimit`),
+   calls after close (T-12), close variants, tape equivalence, stalls,
+   native lifecycle.
 7. **Remaining medium/low items**: native 5–10, 12–30 (pinned read
    chunks, tape memory, OS verifier blocking `abort()`, custom roots
    rebuilding the TLS config), protocol F10–F12, F14–F18, client F23,

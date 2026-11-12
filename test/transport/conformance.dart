@@ -136,10 +136,12 @@ void transportConformance(WebSocketTransport Function() create) {
       final echoed = Completer<Uint8List>();
       binary.messages.listen(echoed.complete);
       await binary.connect(url());
-      await binary.push(
-        Uint8List.fromList(List<int>.generate(70000, (i) => i)),
+      // Not periodic in 256: an offset by a multiple of a block shows.
+      final sent = Uint8List.fromList(
+        List<int>.generate(70000, (i) => (i * 7 + i ~/ 251) & 0xFF),
       );
-      expect((await echoed.future).length, 70000);
+      await binary.push(sent);
+      expect(await echoed.future, orderedEquals(sent));
       await binary.close();
     });
 
@@ -316,7 +318,7 @@ void transportConformance(WebSocketTransport Function() create) {
               'Upgrade: websocket\r\nConnection: Upgrade\r\n'
               'Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n',
             ),
-            ...frame(Opcode.binary, List<int>.filled(100000, 7)),
+            ...frame(Opcode.binary, _pattern(100000)),
           ]);
         }, onError: (Object _) {}); // the client may reset when closing
       });
@@ -324,7 +326,7 @@ void transportConformance(WebSocketTransport Function() create) {
       final got = Completer<Uint8List>();
       client.messages.listen(got.complete);
       await client.connect('ws://127.0.0.1:${server.port}');
-      expect((await got.future).length, 100000);
+      expect(await got.future, orderedEquals(_pattern(100000)));
       await client.close();
       await server.close();
     });
@@ -399,6 +401,10 @@ void transportConformance(WebSocketTransport Function() create) {
     });
   });
 }
+
+/// Bytes that are not periodic in 256: an offset by a block shows (T-5).
+List<int> _pattern(int n) =>
+    List<int>.generate(n, (i) => (i * 7 + i ~/ 251) & 0xFF);
 
 /// Deep copy of a decoded message so lazy views compare with `equals`.
 Object? _plainJson(Object? v) => switch (v) {

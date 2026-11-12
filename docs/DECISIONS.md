@@ -1435,3 +1435,40 @@ not exist.
   terminal, 1013 not delayed, 407 retried, `Retry-After` ignored) each
   fail exactly one of the new tests.
 - Status: **adopted**.
+
+### D49. Re-entrancy, random sequences and exact content
+
+- Context: D22 promises that the client survives calls from its own
+  callbacks, but the only `onStateChange` in the tests recorded states
+  (TEST_PLAN C22, C24). Binary payloads were checked by length only, and
+  the flood test counted identical messages, so order was never checked
+  (docs/review/tests_docs.md T-5, T-6).
+- Decision: `test/client/reentrancy_test.dart` over the fake, in fake
+  time, on the VM and in the browser:
+  - each of 9 operations (`connect` to the same or another URL,
+    `disconnect`, `reconnect`, `suspend`, `suspend(disconnect: true)`,
+    `resume`, `push`, `close`) is called from `onStateChange` the first
+    time each of 6 states is reached, in a scenario that passes through
+    all of them;
+  - 300 fixed seeds of 60 random steps: client operations, the server
+    accepting, rejecting (403, 429, 503), dropping, closing (1000, 1001,
+    1008, 1013, 4000) and sending, `autoAccept` changes, time passing; one
+    step in eight of `onStateChange` also calls a random operation.
+  After every step: nothing after `closed`, at most one live connection,
+  `open` only on an open connection, no new connection between
+  `disconnect()`/`close()` and the next `connect()`. At the end, after
+  `close()` and 15 minutes: the state is `closed`, the stream is done,
+  every returned future completed, every connection ended.
+- Exact content: echoed and received binary messages (70 000 and 100 000
+  bytes) are compared in full, with a pattern that is not periodic in
+  256 so a block offset shows; a fragmented 70 000-byte binary message
+  from the server likewise. Two numbered streams from `/stream` (20 000
+  binary, 5 000 JSON with non-ASCII text) must arrive complete, in order,
+  and end with `1000 done`, on every transport including the browser.
+- Result: no bug found. The 5 000-seed run passes (2 s). Mutations:
+  emitting states after `closed`, and dropping `_wanted = false` in
+  `disconnect()`, each fail the suite; two other guards (the `!_wanted`
+  check when a session ends and in the reconnect timer) cannot be broken
+  observably, since `disconnect()` already cancels the timer and marks
+  the session.
+- Status: **adopted**.

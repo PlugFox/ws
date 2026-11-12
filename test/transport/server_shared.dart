@@ -530,6 +530,63 @@ void sharedServerConformance(
       },
     );
 
+    serverTest('a numbered stream arrives in order, nothing more', () async {
+      // /stream numbers its messages (u64 LE at offset 0): order and
+      // completeness across batch and credit boundaries (T-6).
+      const count = 20000;
+      final c = WebSocketClient.binary(
+        options: const WebSocketOptions(
+          reconnect: WebSocketReconnect.disabled(),
+        ),
+      );
+      final seqs = <int>[];
+      c.messages.listen((m) {
+        final data = ByteData.sublistView(m);
+        // Two u32 halves: dart2js has no 64-bit getUint64.
+        expect(data.getUint32(4, Endian.little), 0);
+        seqs.add(data.getUint32(0, Endian.little));
+      });
+      final ended = c.states
+          .where((s) => s is WebSocketState$Disconnected)
+          .cast<WebSocketState$Disconnected>()
+          .first;
+      await c.connect(url('/stream?format=binary&size=64&rate=0&count=$count'));
+      final state = await ended.timeout(const Duration(seconds: 30));
+      expect((state.closeCode, state.closeReason), (1000, 'done'));
+      expect(seqs, hasLength(count));
+      expect(
+        [
+          for (var i = 0; i < seqs.length; i++)
+            if (seqs[i] != i) i,
+        ].take(3),
+        isEmpty,
+        reason: 'out of order at these indexes',
+      );
+      await c.close();
+    });
+
+    serverTest('a numbered JSON stream arrives in order', () async {
+      const count = 5000;
+      final c = WebSocketClient.json(
+        options: const WebSocketOptions(
+          reconnect: WebSocketReconnect.disabled(),
+        ),
+      );
+      final seqs = <int>[];
+      c.messages.listen((m) => seqs.add((m['seq']! as num).toInt()));
+      final ended = c.states
+          .where((s) => s is WebSocketState$Disconnected)
+          .cast<WebSocketState$Disconnected>()
+          .first;
+      await c.connect(
+        url('/stream?format=json&size=256&rate=0&count=$count&unicode=1'),
+      );
+      final state = await ended.timeout(const Duration(seconds: 30));
+      expect(state.closeCode, 1000);
+      expect(seqs, [for (var i = 0; i < count; i++) i]);
+      await c.close();
+    });
+
     serverTest('binary flood with then=close ends with 1000 done', () async {
       final c = WebSocketClient.binary(
         options: const WebSocketOptions(
