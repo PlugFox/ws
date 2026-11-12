@@ -21,7 +21,8 @@
 - `package:ws/native.dart`: the Rust transport loaded from a file
   (`WsNativeLibrary.open(path).install()`), and `dart run ws:install` to
   download the released library with a SHA-256 check, for executables built
-  with `dart compile exe`. Flutter and `dart build cli` apps use the
+  with `dart compile exe`; it prints where the libraries' third-party
+  notices are. Flutter and `dart build cli` apps use the
   `ws_native` package instead, which bundles the library through a build
   hook.
 

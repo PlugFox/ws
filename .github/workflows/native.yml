@@ -39,11 +39,11 @@ jobs:
       run:
         working-directory: native/rust
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 🦀 Rust from rust-toolchain.toml
+        shell: bash
+        run: '"$GITHUB_WORKSPACE/tool/rust_toolchain.sh"'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: native/rust
       - run: cargo fmt --check
@@ -61,14 +61,16 @@ jobs:
     env:
       CI: "true"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 🦀 Rust from rust-toolchain.toml
+        shell: bash
+        run: '"$GITHUB_WORKSPACE/tool/rust_toolchain.sh"'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             native/rust
             server
-      - uses: dart-lang/setup-dart@v1
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
         with:
           sdk: stable
       - name: 👷 Install dependencies

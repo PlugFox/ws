@@ -33,11 +33,8 @@ file; finding ids below refer to them.
 
 ## Open, in planned order
 
-1. **Release pipeline** (distribution F7, F8, F14, F15, F19, F20;
-   future_risks Top 20 #7): one tag-triggered workflow (build, verify,
-   checksums, generate, draft release, publish both packages), licence
-   notices for the Rust crates (`cargo about`), `rust-toolchain.toml`,
-   pinned action SHAs, Dependabot for cargo and actions, `cargo deny`.
+1. ~~**Release pipeline**~~ done, DECISIONS.md D43 (distribution F6,
+   F7, F8, F14, F15, F19, F20, F29; future_risks Top 20 #7).
 2. ~~**Liveness by default**~~ done, DECISIONS.md D41 (R3, R4, 6.7,
    10.1–10.3).
 3. **Lifecycle API** (Top 20 #2): suspend/resume in the core, a Flutter

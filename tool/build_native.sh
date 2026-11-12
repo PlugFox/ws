@@ -61,7 +61,8 @@ case "$target" in
     ;;
 esac
 
-rustup target add "$triple" >/dev/null 2>&1 || true
+# In native/rust, so the target goes to the toolchain rust-toolchain.toml pins.
+(cd "$root/native/rust" && rustup target add "$triple" >/dev/null 2>&1) || true
 build=(cargo build --release --locked --target "$triple")
 case "$target" in
   linux-*)

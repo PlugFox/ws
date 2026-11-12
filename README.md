@@ -120,6 +120,10 @@ void main() {
 }
 ```
 
+The library contains Rust crates whose licences ask for their notices next
+to binary copies: ship `THIRD_PARTY_LICENSES` from the same GitHub release
+(the installer prints its URL).
+
 ### Testing your code
 
 ```dart

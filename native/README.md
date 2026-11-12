@@ -31,3 +31,10 @@ hooks:
       source: none # none | build | prebuilt
       # library: path/to/libws_native.so  # use this file instead
 ```
+
+## Licences
+
+The libraries are built from Rust crates under permissive licences (MIT,
+Apache-2.0, ISC, BSD-3-Clause, Zlib, Unicode-3.0, CDLA-Permissive-2.0).
+Their notices are part of this package's `LICENSE`, so Flutter's
+`showLicensePage` lists them with no work on your side.

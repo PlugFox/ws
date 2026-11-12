@@ -1,0 +1,44 @@
+name: Audit
+
+# cargo deny on the shipped library and on the test server: advisories
+# (RustSec), licences (allow-list in deny.toml), wildcard dependencies and
+# unknown sources (distribution.md F8, F14). Weekly as well, because new
+# advisories appear without any change here.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1"
+  push:
+    branches: ["master", "develop", "rewrite"]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "**/deny.toml"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    branches: ["master", "develop", "rewrite"]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "**/deny.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    name: "cargo deny (${{ matrix.crate }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [native/rust, server]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: ${{ matrix.crate }}/Cargo.toml
+          command: check
+          command-arguments: --config ${{ matrix.crate }}/deny.toml

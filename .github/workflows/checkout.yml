@@ -31,10 +31,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: 🚂 Get latest code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: 🎯 Set up Dart
-        uses: dart-lang/setup-dart@v1
+        uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
         with:
           # Same as mise.toml, so format and lints match local runs.
           sdk: 3.13.7
@@ -75,14 +75,16 @@ jobs:
       # test/support/test_server.dart fails instead of skipping on CI.
       CI: "true"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 🦀 Rust from rust-toolchain.toml
+        shell: bash
+        run: '"$GITHUB_WORKSPACE/tool/rust_toolchain.sh"'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             server
             native/rust
-      - uses: dart-lang/setup-dart@v1
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
         with:
           sdk: stable
       - run: dart pub get
@@ -108,11 +110,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: dart-lang/setup-dart@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
         with:
           sdk: stable
-      - uses: browser-actions/setup-chrome@v1
       - run: dart pub get
       - name: 🧪 dart2js
         run: dart test --platform chrome --reporter expanded
@@ -127,13 +128,33 @@ jobs:
       run:
         working-directory: server
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 🦀 Rust from rust-toolchain.toml
+        shell: bash
+        run: '"$GITHUB_WORKSPACE/tool/rust_toolchain.sh"'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: server
       - run: cargo fmt --check
       - run: cargo clippy --release --all-targets -- -D warnings
       - run: cargo test --release
+
+  min-sdk:
+    name: "Lowest bounds (Dart 3.10.0)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
+        with:
+          sdk: 3.10.0 # environment.sdk lower bound in pubspec.yaml
+      - name: 📉 Lowest dependency versions compile
+        # Only the library: the lowest test tooling (analyzer 6) does not
+        # build on Dart 3.
+        run: |
+          dart pub downgrade
+          dart analyze --fatal-warnings lib bin
+      - name: 🧪 Tests on the lowest SDK (pure Dart; server suites skip)
+        run: |
+          dart pub upgrade
+          dart test --platform vm --reporter expanded

@@ -1,0 +1,5 @@
+# Same Rust as mise.toml; CI and release builds use it too (distribution.md F15).
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

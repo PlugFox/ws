@@ -157,6 +157,28 @@ void main() {
       );
     });
 
+    test('the CLI installs and names the notices', () async {
+      final result = await Process.run(Platform.resolvedExecutable, [
+        'run',
+        'bin/install.dart',
+        '--target',
+        target,
+        '--out',
+        out.path,
+        '--url',
+        pattern(),
+        '--sha256',
+        _sha(library),
+      ]);
+      expect(result.exitCode, 0, reason: '${result.stderr}');
+      expect(result.stdout, contains('Installed '));
+      expect(
+        result.stdout,
+        contains('/releases/download/$nativeReleaseTag/THIRD_PARTY_LICENSES'),
+      );
+      expect(File('${out.path}/libws_native.so').readAsBytesSync(), library);
+    });
+
     test('file names and host target', () {
       expect(nativeLibraryFileName('windows-x64'), 'ws_native.dll');
       expect(nativeLibraryFileName('macos-arm64'), 'libws_native.dylib');

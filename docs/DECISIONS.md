@@ -747,9 +747,7 @@ a port probe on `init`.
   `linux-x64-libws_native.so`. The hash keys are `<target>/<file>`, the
   same as in `native/prebuilt/checksums.json`. The tag is the package
   version.
-- Status: **adopted**. The release workflow that builds every target,
-  creates the GitHub release and runs the generator is still to be written
-  (ROADMAP).
+- Status: **adopted**. The release workflow is D43.
 
 ### D33. Project tasks in mise
 
@@ -960,12 +958,12 @@ From `docs/review/distribution.md`:
   `dart run ws:install` accepts `--key value` (the README form) and
   validates its arguments.
 - The old tag-triggered `deploy.yml` no longer runs on tags: it would
-  publish `ws` alone, without native hashes.
+  publish `ws` alone, without native hashes. (Deleted in D43.)
 - CI builds the test server and the native library for the VM tests on
   Linux, macOS and Windows, fails (instead of skipping) when the server is
   missing, and lints and tests `server/`.
-- Open: the release workflow itself, third-party licence notices for the
-  Rust crates, pinned action SHAs and Dependabot for cargo.
+- ~~Open: the release workflow itself, third-party licence notices for the
+  Rust crates, pinned action SHAs and Dependabot for cargo.~~ Done in D43.
 - Status: **adopted**; zigbuild and the Windows static CRT are verified
   only by CI.
 
@@ -1066,3 +1064,98 @@ failures were one `WebSocketConnectionException` with a string.
   this package with a prefix.
 - Status: **adopted**.
 
+
+### D43. One tag releases both packages
+
+From `docs/review/distribution.md` F6–F8, F14, F15, F19, F20.
+
+- `.github/workflows/release.yml` runs on a version tag (`2.0.0`,
+  `2.0.0-dev.1`). The jobs, in order:
+  1. `check`: `tool/release_check.dart` checks that the tag equals the
+     version of both pubspecs, `wsVersion` and the first heading of both
+     CHANGELOGs.
+  2. `build`: the 12 targets come from `prebuilt.yml`, which verifies each
+     binary (D40). Tag builds use no cache.
+  3. `notices`: `cargo about` writes `THIRD_PARTY_LICENSES`.
+  4. `package`:
+     - `native_checksums.dart --check` verifies the libraries;
+     - `native_release.dart` writes the hashes and the commit into
+       `package:ws`;
+     - `ws_native` is staged with the notices appended to its `LICENSE`;
+     - both publish dry runs run;
+     - the release assets are collected.
+  5. `release`: a draft GitHub release with the assets
+     (`<target>-<file>`, `checksums.json`, `THIRD_PARTY_LICENSES`,
+     `native_release.dart`) and a build-provenance attestation of the
+     libraries.
+  6. `publish` (GitHub environment `pub.dev` with a required reviewer):
+     undraft the release, then publish `ws`.
+  7. `publish-native`: wait until pub.dev serves that `ws`, then publish
+     `ws_native`.
+
+  A push to `rewrite` that touches the release tooling runs steps 1–4
+  without releasing anything. This is how the workflow is tested.
+- **The hashes are not committed.** They exist only after the build. The
+  published `ws` therefore differs from the tag by one file,
+  `lib/src/native/native_release.dart`. That file is a release asset, and
+  it names the commit the libraries were built from. The alternative,
+  committing the hashes first, would need bit-for-bit reproducible builds
+  on five operating systems.
+- **Every release carries the libraries** (F20). `nativeReleaseTag` stays
+  equal to `wsVersion`, so a Dart-only patch also rebuilds and attaches
+  all 12 targets. This costs one CI run and keeps `ws:install` simple.
+- **The draft is published before `ws`.** `dart run ws:install` therefore
+  never points at assets that do not exist yet. If publishing fails
+  afterwards, the publish jobs can be re-run.
+- **`ws_native` allows exactly one `ws`.** pub warns about a
+  single-version constraint, which would fail the dry run, so the pin is a
+  range with nothing else inside it:
+  - `>=2.1.0 <2.1.1` (pub excludes `2.1.1-dev.x`);
+  - `>=2.1.0-dev.3 <2.1.0-dev.3.0`.
+
+  Checked with `pub_semver`: neither neighbour is allowed.
+- **Staging uses `git ls-files native` plus `prebuilt/`** (F19). Untracked
+  files are never published. `test/` and the Rust tooling configuration
+  stay out. A `--release` staging fails unless `checksums.json` lists
+  exactly the 12 targets and matches the files.
+- **Licences** (F8):
+  - `cargo deny` (`deny.toml` in `native/rust` and `server`) allows only
+    MIT, Apache-2.0 (also WITH LLVM-exception), ISC, BSD-3-Clause, Zlib,
+    Unicode-3.0 and CDLA-Permissive-2.0. It also checks RustSec
+    advisories, wildcard versions and unknown sources.
+  - `audit.yml` runs it on dependency changes and weekly.
+  - The notices go into the `ws_native` `LICENSE` after a line of 80
+    hyphens, so Flutter's `showLicensePage` lists them. They are also a
+    release asset, and `ws:install` prints their URL.
+  - 121 crate entries today. Platform-only crates (jni, schannel,
+    security-framework) are included.
+- **Toolchains** (F15):
+  - `rust-toolchain.toml` in `native/rust` and `server` pins Rust 1.99.0,
+    the same version as `mise.toml`. `tool/rust_toolchain.sh` installs it
+    in CI and fails if the three disagree.
+  - zig and cargo-zigbuild are pinned too.
+  - Dart for format, analyze and release is 3.13.7. The test jobs stay on
+    `stable` as an early warning.
+  - A job runs the lowest bounds: Dart 3.10.0 with `pub downgrade` for
+    `lib` and `bin`, and the VM tests on 3.10.0. Tests cannot run with
+    downgraded dev dependencies, because analyzer 6 does not build on
+    Dart 3.
+- **Supply chain** (F14, F29):
+  - every action is pinned to a commit SHA, with the version in a comment;
+  - checkout v7, upload-artifact v7, download-artifact v8 (Node 24);
+  - `setup-chrome` is dropped, because the runner's Chrome is used;
+  - `permissions: contents: read` is the default, and write permissions
+    are granted per job;
+  - Dependabot covers pub (`/`, `/native`), cargo (`/native/rust`,
+    `/server`) and github-actions.
+- `deploy.yml` is deleted. `release:hashes` in mise now verifies
+  `checksums.json` instead of regenerating it (F7b).
+- Manual setup, once (DEVELOPMENT.md):
+  - the first `ws_native` upload, because OIDC cannot create a package;
+  - automated publishing on pub.dev for both packages, with tag pattern
+    `{{version}}` and environment `pub.dev`;
+  - required reviewers on that environment;
+  - immutable releases in the repository settings.
+- Status: **adopted**. The dry-run path is verified in CI. The tag path
+  (draft, attestation, OIDC publish) can only be verified by the first
+  real tag.

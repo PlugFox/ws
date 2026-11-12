@@ -202,7 +202,7 @@ Key properties:
 
 ### 4.7 Distribution (native library)
 
-- [ ] Release workflow: build every target in CI, put the libraries into
+- [x] Release workflow (D43): build every target in CI, put the libraries into
   `native/prebuilt/` with `checksums.json`, create the GitHub release (tag
   = version, assets `<target>-<file>`), run `tool/native_release.dart`,
   then publish `ws` and the staged `ws_native`. The libraries are bundled

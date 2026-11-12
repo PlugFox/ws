@@ -2,6 +2,8 @@
 name = "ws_bench_server"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+publish = false
 
 [dependencies]
 bytes = "1.12.1"

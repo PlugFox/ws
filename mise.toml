@@ -8,6 +8,8 @@ rust = { version = "1.99.0", components = "rustfmt,clippy" }
 gh = "2"
 actionlint = "1"
 shellcheck = "0.11"
+"cargo:cargo-deny" = "0.19.4"
+"cargo:cargo-about" = { version = "0.9.3", features = "cli" }
 
 [settings]
 # Run a task's dependencies in parallel where they are independent.
@@ -81,7 +83,7 @@ run = "tool/check_publish.sh"
 
 [tasks.check]
 description = "Everything CI checks: format, analyzers, .pubignore, all tests"
-depends = ["fmt:check", "analyze", "check:pubignore", "test"]
+depends = ["fmt:check", "analyze", "check:pubignore", "check:deny", "test"]
 
 # --- tests -------------------------------------------------------------------
 
@@ -146,14 +148,25 @@ description = "Build libraries this machine can build into native/prebuilt/ + ch
 run = "tool/prebuilt.sh"
 
 [tasks."native:stage"]
-description = "Stage ws_native for publishing (args: <dir outside the repo> [ws version constraint])"
+description = "Stage ws_native for publishing (args: <dir outside the repo> [ws version] [--release <notices>])"
 run = "tool/stage_native.sh"
 
 [tasks."release:hashes"]
-description = "Write native/prebuilt/checksums.json into package:ws (dart run ws:install)"
+description = "Verify native/prebuilt/checksums.json (from ci:prebuilt) and write the hashes into package:ws"
 run = [
-  "dart run tool/native_checksums.dart native/prebuilt",
+  "dart run tool/native_checksums.dart --check native/prebuilt",
   "dart run tool/native_release.dart",
+]
+
+[tasks."release:notices"]
+description = "Third-party licence notices of the Rust crates (arg: out file)"
+run = "tool/third_party_licenses.sh"
+
+[tasks."check:deny"]
+description = "cargo deny: advisories, licences, sources (native/rust and server)"
+run = [
+  "cd native/rust && cargo deny check",
+  "cd server && cargo deny check",
 ]
 
 # --- remote (GitHub Actions; needs `gh auth login` and a pushed branch) ------

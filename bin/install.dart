@@ -52,7 +52,15 @@ Future<void> main(List<String> args) async {
       urlPattern: options['url'] ?? defaultNativeUrlPattern,
       sha256: options['sha256'],
     );
-    stdout.writeln('Installed ${file.path} ($target, ws $wsVersion)');
+    stdout
+      ..writeln('Installed ${file.path} ($target, ws $wsVersion)')
+      // The library contains Rust crates whose licences require their
+      // notices next to binary copies (distribution.md F8).
+      ..writeln(
+        'Ship its third-party notices with it: '
+        'https://github.com/PlugFox/ws/releases/download/'
+        '$nativeReleaseTag/THIRD_PARTY_LICENSES',
+      );
   } on NativeInstallException catch (e) {
     _fail(e.message);
   } on IOException catch (e) {
