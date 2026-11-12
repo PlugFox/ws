@@ -13,7 +13,10 @@ Duration backoffDelay(
   final lo = min.inMicroseconds;
   final hi = max.inMicroseconds;
   if (lo >= hi) return max;
-  final ceiling = math.min(hi - lo, lo * math.pow(2, attempt.clamp(0, 31)));
+  // A zero minimum must still grow (100 ms base), or every retry is
+  // immediate.
+  final base = math.max(lo, _minBase);
+  final ceiling = math.min(hi - lo, base * math.pow(2, attempt.clamp(0, 31)));
   final jitter = ceiling <= 0
       ? 0
       : ((random ?? _random).nextDouble() * ceiling).floor();
@@ -21,3 +24,5 @@ Duration backoffDelay(
 }
 
 final math.Random _random = math.Random();
+
+const int _minBase = 100000; // µs

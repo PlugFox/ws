@@ -149,6 +149,35 @@ void transportConformance(WebSocketTransport Function() create) {
       await client.close();
     });
 
+    test('json corpus decodes like jsonDecode', () async {
+      // Raw texts, so escapes and number forms reach the transport's own
+      // decoder (simd-json tape on native, dart:convert on dart:io).
+      const corpus = [
+        r'{"esc":"\" \\ \/ \b \f \n \r \t","u":"\u0041\u00e9\ud834\udd1e"}',
+        '{"n":[0,-0,1,-1,123456789012345678,9007199254740993,1.5,-0.0]}',
+        '{"e":[1e3,1E-3,2.5e+10,1.7976931348623157e308,5e-324]}',
+        '{"deep":{"a":[{"b":[{"c":[]}]},{}],"t":true,"f":false,"z":null}}',
+        r'{"k\u00e9y":1,"":"empty","ünï":"cødé ✓"}',
+        '{"dup":1,"dup":2}',
+        ' { "ws" : [ 1 , 2 ] } ',
+      ];
+      final server = await ioServer((socket, _) => corpus.forEach(socket.add));
+      final client = WebSocketClient.json();
+      final got = <Map<String, Object?>>[];
+      final done = Completer<void>();
+      client.messages.listen((m) {
+        got.add(m);
+        if (got.length == corpus.length) done.complete();
+      });
+      await client.connect('ws://127.0.0.1:${server.port}');
+      await done.future.timeout(const Duration(seconds: 5));
+      for (var i = 0; i < corpus.length; i++) {
+        expect(_plainJson(got[i]), jsonDecode(corpus[i]), reason: corpus[i]);
+      }
+      await client.close();
+      await server.close(force: true);
+    });
+
     test('protocol ping', () async {
       final client = WebSocketClient.text();
       await client.connect(url());
@@ -362,3 +391,12 @@ void transportConformance(WebSocketTransport Function() create) {
     });
   });
 }
+
+/// Deep copy of a decoded message so lazy views compare with `equals`.
+Object? _plainJson(Object? v) => switch (v) {
+  final Map<String, Object?> m => {
+    for (final e in m.entries) e.key: _plainJson(e.value),
+  },
+  final List<Object?> l => [for (final e in l) _plainJson(e)],
+  _ => v,
+};

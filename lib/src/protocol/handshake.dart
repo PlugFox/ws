@@ -1,4 +1,4 @@
-import 'dart:convert' show ascii, base64, latin1;
+import 'dart:convert' show ascii, base64, latin1, utf8;
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -70,30 +70,88 @@ final class HandshakeRequest {
       ..write('Connection: Upgrade\r\n')
       ..write('Sec-WebSocket-Key: $key\r\n')
       ..write('Sec-WebSocket-Version: 13\r\n');
+    validateProtocols(protocols);
     if (protocols.isNotEmpty) {
       b.write('Sec-WebSocket-Protocol: ${protocols.join(', ')}\r\n');
     }
-    if (uri.userInfo.isNotEmpty) {
-      b.write(
-        'Authorization: Basic '
-        '${base64.encode(latin1.encode(Uri.decodeComponent(uri.userInfo)))}'
-        '\r\n',
-      );
+    if (basicAuthorization(uri) case final authorization?) {
+      b.write('Authorization: $authorization\r\n');
     }
+    validateHeaders(headers);
     for (final MapEntry(:key, :value) in headers.entries) {
-      if (_reserved.contains(key.toLowerCase())) {
-        throw ArgumentError.value(key, 'headers', 'Reserved handshake header');
-      }
-      if (_hasLineBreak(key) || _hasLineBreak(value)) {
-        throw ArgumentError.value(key, 'headers', 'Header contains CR or LF');
-      }
       b.write('$key: $value\r\n');
     }
     b.write('\r\n');
     return latin1.encode(b.toString());
   }
 
-  static bool _hasLineBreak(String s) => s.contains('\r') || s.contains('\n');
+  /// `Basic` credentials from the URL's user info (UTF-8, RFC 7617), or
+  /// `null`. Every transport sends them, as browsers do.
+  static String? basicAuthorization(Uri uri) {
+    if (uri.userInfo.isEmpty) return null;
+    final credentials = utf8.encode(Uri.decodeComponent(uri.userInfo));
+    return 'Basic ${base64.encode(credentials)}';
+  }
+
+  /// Throws [ArgumentError] unless every subprotocol is an RFC 9110 token
+  /// (RFC 6455 §4.1), which also rules out header injection.
+  static void validateProtocols(List<String> protocols) {
+    for (final protocol in protocols) {
+      if (!_isToken(protocol)) {
+        throw ArgumentError.value(
+          protocol,
+          'protocols',
+          'A subprotocol must be an RFC 9110 token',
+        );
+      }
+    }
+  }
+
+  /// Throws [ArgumentError] for a header no transport may send: reserved
+  /// handshake headers, names that are not RFC 9110 tokens, values with
+  /// control characters or non-ASCII.
+  static void validateHeaders(Map<String, String> headers) {
+    for (final MapEntry(:key, :value) in headers.entries) {
+      if (_reserved.contains(key.toLowerCase())) {
+        throw ArgumentError.value(key, 'headers', 'Reserved handshake header');
+      }
+      if (!_isToken(key)) {
+        throw ArgumentError.value(key, 'headers', 'Invalid header name');
+      }
+      if (!_isVisibleAscii(value)) {
+        throw ArgumentError.value(
+          key,
+          'headers',
+          'Header value must be visible ASCII (no CR, LF or non-ASCII)',
+        );
+      }
+    }
+  }
+
+  /// RFC 9110 field values as every transport can send them: visible
+  /// ASCII, space and tab (tungstenite rejects the rest too).
+  static bool _isVisibleAscii(String s) {
+    for (var i = 0; i < s.length; i++) {
+      final c = s.codeUnitAt(i);
+      if (c != 0x09 && (c < 0x20 || c > 0x7E)) return false;
+    }
+    return true;
+  }
+
+  /// RFC 9110 token (header names).
+  static bool _isToken(String s) {
+    if (s.isEmpty) return false;
+    for (var i = 0; i < s.length; i++) {
+      final c = s.codeUnitAt(i);
+      final ok =
+          (c >= 0x30 && c <= 0x39) ||
+          (c >= 0x41 && c <= 0x5A) ||
+          (c >= 0x61 && c <= 0x7A) ||
+          r"!#$%&'*+-.^_`|~".codeUnits.contains(c);
+      if (!ok) return false;
+    }
+    return true;
+  }
 }
 
 /// The server's handshake response.

@@ -9,6 +9,7 @@ import 'package:ws/src/protocol/frame.dart';
 import 'package:ws/src/protocol/frame_reader.dart';
 import 'package:ws/src/protocol/frame_writer.dart';
 import 'package:ws/src/protocol/handshake.dart';
+import 'package:ws/src/transport/dart/proxy_tunnel.dart';
 import 'package:ws/src/transport/transport.dart';
 
 /// The platform transport on native platforms: pure Dart.
@@ -78,99 +79,154 @@ final class _DartConnection implements TransportConnection, FrameHandler {
       headers: _request.headers,
       protocols: _request.protocols,
     );
-    final host = uri.host;
+    final Uint8List request;
     try {
+      request = handshake.encode();
+    } on Object catch (e) {
+      // ArgumentError (headers, protocols) or FormatException (user info).
+      // Never call the listener synchronously from connect().
+      await null;
+      return _fail(
+        WebSocketHandshakeException('Invalid handshake request', cause: e),
+      );
+    }
+    final host = uri.host;
+    final proxy = _request.proxy;
+    final tls = _request.tls;
+    // Idle subscription left by the proxy tunnel, re-used below (and
+    // cancelled in _finish).
+    // ignore: cancel_subscriptions
+    StreamSubscription<io.RawSocketEvent>? tunnel;
+    try {
+      final context = !handshake.secure || tls.trustedRootsPem == null
+          ? null
+          : (io.SecurityContext(withTrustedRoots: true)
+              ..setTrustedCertificatesBytes(
+                Uint8List.fromList(tls.trustedRootsPem!.codeUnits),
+              ));
+      final onBadCertificate = tls.allowInsecure ? (_) => true : null;
       final io.ConnectionTask<io.RawSocket> task;
-      if (handshake.secure) {
-        final tls = _request.tls;
-        final context = tls.trustedRootsPem == null
-            ? null
-            : (io.SecurityContext(withTrustedRoots: true)
-                ..setTrustedCertificatesBytes(
-                  Uint8List.fromList(tls.trustedRootsPem!.codeUnits),
-                ));
+      if (proxy != null) {
+        task = await io.RawSocket.startConnect(proxy.host, proxy.port);
+      } else if (handshake.secure) {
         task = await io.RawSecureSocket.startConnect(
           host,
           handshake.port,
           context: context,
-          onBadCertificate: tls.allowInsecure ? (_) => true : null,
+          onBadCertificate: onBadCertificate,
         );
       } else {
         task = await io.RawSocket.startConnect(host, handshake.port);
       }
       if (_finished) return task.cancel();
       _task = task;
-      final socket = await task.socket;
+      var socket = await task.socket;
       _task = null;
       if (_finished) return socket.close().ignore();
       _socket = socket;
       socket.setOption(io.SocketOption.tcpNoDelay, true);
+      if (proxy != null) {
+        tunnel = await openTunnel(socket, host, handshake.port, proxy);
+        if (_finished) return;
+        if (handshake.secure) {
+          socket = await io.RawSecureSocket.secure(
+            socket,
+            subscription: tunnel,
+            host: host,
+            context: context,
+            onBadCertificate: onBadCertificate,
+          );
+          tunnel = null;
+          if (_finished) return socket.close().ignore();
+          _socket = socket;
+        }
+      }
     } on Object catch (e) {
-      return _finish(
-        null,
-        '',
+      return _fail(
         e is io.TlsException || e is io.HandshakeException
             ? WebSocketConnectionException('TLS handshake failed', cause: e)
+            : e is WebSocketException
+            ? e
             : WebSocketConnectionException(
-                'Could not connect to $host',
+                'Could not connect to ${proxy == null ? host : proxy.host}',
                 cause: e,
               ),
       );
     }
 
     final head = BytesBuilder(copy: false);
-    _subscription = _socket!.listen(
-      (event) {
-        switch (event) {
-          case io.RawSocketEvent.read:
-            final data = _socket?.read();
-            if (data == null || data.isEmpty) return;
-            if (_open) return _reader.add(data);
-            head.add(data);
-            final bytes = head.takeBytes();
-            // Search before checking the limit: the 101 response and the
-            // first (large) frame often arrive in one read (found by
-            // Autobahn 1.1.6 / 9.x).
-            final end = HandshakeResponse.headEnd(bytes);
-            if (end >= 0) return _onHandshake(handshake, bytes, end);
-            if (bytes.length > _maxHeadSize) {
-              return _fail(
-                const WebSocketHandshakeException(
-                  'Handshake response is too large',
-                ),
-              );
-            }
-            head.add(bytes);
-          case io.RawSocketEvent.write:
-            _flush();
-          case io.RawSocketEvent.readClosed:
-          case io.RawSocketEvent.closed:
-            _finish(
-              null,
-              '',
-              _open
-                  ? const WebSocketConnectionException(
-                      'Connection closed without a close frame',
-                    )
-                  : const WebSocketHandshakeException(
-                      'Connection closed during the handshake',
-                    ),
+    void onEvent(io.RawSocketEvent event) {
+      switch (event) {
+        case io.RawSocketEvent.read:
+          final data = _socket?.read();
+          if (data == null || data.isEmpty) return;
+          if (_open) return _reader.add(data);
+          head.add(data);
+          final bytes = head.takeBytes();
+          // Search before checking the limit: the 101 response and the
+          // first (large) frame often arrive in one read (found by
+          // Autobahn 1.1.6 / 9.x).
+          final end = HandshakeResponse.headEnd(bytes);
+          if (end >= 0 && end <= _maxHeadSize) {
+            return _onHandshake(handshake, bytes, end);
+          }
+          if (end > _maxHeadSize || bytes.length > _maxHeadSize) {
+            return _fail(
+              const WebSocketHandshakeException(
+                'Handshake response is too large',
+              ),
             );
-        }
-      },
-      onError: (Object e) => _finish(
-        null,
-        '',
-        WebSocketConnectionException('Socket error', cause: e),
-      ),
-      onDone: () => _finish(
-        null,
-        '',
-        const WebSocketConnectionException('Connection closed'),
-      ),
-      cancelOnError: true,
-    );
-    _write(handshake.encode());
+          }
+          head.add(bytes);
+        case io.RawSocketEvent.write:
+          _flush();
+        case io.RawSocketEvent.readClosed:
+        case io.RawSocketEvent.closed:
+          // A close frame we already received (or our protocol failure)
+          // wins over the TCP end (protocol.md F7).
+          if (_closeAfterFlush) return _finishStored();
+          _finish(
+            null,
+            '',
+            _open
+                ? const WebSocketConnectionException(
+                    'Connection closed without a close frame',
+                  )
+                : const WebSocketHandshakeException(
+                    'Connection closed during the handshake',
+                  ),
+          );
+      }
+    }
+
+    void onError(Object e) => _closeAfterFlush
+        ? _finishStored()
+        : _finish(
+            null,
+            '',
+            WebSocketConnectionException('Socket error', cause: e),
+          );
+    void onDone() => _closeAfterFlush
+        ? _finishStored()
+        : _finish(
+            null,
+            '',
+            const WebSocketConnectionException('Connection closed'),
+          );
+    if (tunnel != null) {
+      _subscription = tunnel
+        ..onData(onEvent)
+        ..onError(onError)
+        ..onDone(onDone);
+    } else {
+      _subscription = _socket!.listen(
+        onEvent,
+        onError: onError,
+        onDone: onDone,
+        cancelOnError: true,
+      );
+    }
+    _write(request);
   }
 
   void _onHandshake(HandshakeRequest request, Uint8List bytes, int end) {
@@ -211,8 +267,21 @@ final class _DartConnection implements TransportConnection, FrameHandler {
 
   @override
   void onPing(Uint8List payload) {
-    if (!_closeSent) _write(_writer.frame(Opcode.pong, payload));
+    if (_closeSent) return;
+    // At most one pong waits in the queue: answering only the latest ping
+    // is allowed (RFC 6455 §5.5.3), and a ping flood from a server that
+    // does not read must not grow memory (protocol.md F6).
+    final queued = _queuedPong;
+    // Not the head: the head may be partly written already.
+    if (queued != null && !identical(_queue.firstOrNull, queued)) {
+      if (_queue.remove(queued)) _buffered -= queued.length;
+    }
+    final pong = _writer.frame(Opcode.pong, payload);
+    _queuedPong = _write(pong) ? null : pong;
   }
+
+  /// The pong frame waiting in [_queue], if any.
+  Uint8List? _queuedPong;
 
   @override
   void onPong(Uint8List payload) => _listener.onPong();
@@ -222,7 +291,7 @@ final class _DartConnection implements TransportConnection, FrameHandler {
     _closeCode = code;
     _closeReason = reason;
     if (!_closeSent) {
-      _closeSent = true;
+      _markCloseSent();
       // Echo the status code (RFC 6455 §5.5.1).
       _write(_writer.close(code));
     }
@@ -241,7 +310,7 @@ final class _DartConnection implements TransportConnection, FrameHandler {
     _closeCode = code;
     _closeReason = reason;
     if (!_closeSent) {
-      _closeSent = true;
+      _markCloseSent();
       _write(_writer.close(code, reason));
     }
     _closeAfterFlush = true;
@@ -271,7 +340,7 @@ final class _DartConnection implements TransportConnection, FrameHandler {
   }
 
   void _send(int opcode, Uint8List payload) {
-    if (_closeSent || _finished) {
+    if (!_open || _closeSent || _finished) {
       throw const WebSocketNotConnectedException('The connection is closing');
     }
     _write(_writer.frame(opcode, payload));
@@ -289,12 +358,13 @@ final class _DartConnection implements TransportConnection, FrameHandler {
   @override
   void ping() => _send(Opcode.ping, Uint8List(0));
 
-  void _write(Uint8List bytes) {
+  /// Writes or queues [bytes]; `true` if they went to the socket at once.
+  bool _write(Uint8List bytes) {
     final socket = _socket;
-    if (socket == null || _finished) return;
+    if (socket == null || _finished) return true;
     if (_queue.isEmpty) {
       final written = socket.write(bytes);
-      if (written == bytes.length) return;
+      if (written == bytes.length) return true;
       _queue.add(bytes);
       _queueOffset = written;
       _buffered += bytes.length - written;
@@ -303,6 +373,7 @@ final class _DartConnection implements TransportConnection, FrameHandler {
       _queue.add(bytes);
       _buffered += bytes.length;
     }
+    return false;
   }
 
   void _flush() {
@@ -317,7 +388,7 @@ final class _DartConnection implements TransportConnection, FrameHandler {
         socket.writeEventsEnabled = true;
         return;
       }
-      _queue.removeFirst();
+      if (identical(_queue.removeFirst(), _queuedPong)) _queuedPong = null;
       _queueOffset = 0;
     }
     if (_drainRequested && !_finished) {
@@ -335,7 +406,7 @@ final class _DartConnection implements TransportConnection, FrameHandler {
   @override
   void close(int? code, String? reason) {
     if (_closeSent || _finished) return;
-    _closeSent = true;
+    _markCloseSent();
     if (!_open) return abort();
     _write(_writer.close(code, reason ?? ''));
   }
@@ -360,9 +431,35 @@ final class _DartConnection implements TransportConnection, FrameHandler {
     _finish(null, '', error);
   }
 
+  /// Bounds every closing handshake this transport starts (user close,
+  /// echo of a server close, protocol failure): a peer that never reads or
+  /// never closes TCP cannot keep the connection (protocol.md F8).
+  static const Duration _closeTimeout = Duration(seconds: 5);
+  Timer? _closeTimer;
+
+  void _markCloseSent() {
+    _closeSent = true;
+    _closeTimer ??= Timer(_closeTimeout, () {
+      _socket?.close().ignore();
+      _finishStored();
+    });
+  }
+
+  /// Finishes with the close frame received or the failure recorded, or
+  /// as a lost connection if there is neither.
+  void _finishStored() => _finish(
+    _closeCode,
+    _closeReason,
+    _error ??
+        (_closeCode == null && !_closeAfterFlush
+            ? const WebSocketConnectionException('Connection closed')
+            : null),
+  );
+
   void _finish(int? code, String reason, WebSocketException? error) {
     if (_finished) return;
     _finished = true;
+    _closeTimer?.cancel();
     _reader.stop();
     _subscription?.cancel().ignore();
     _subscription = null;

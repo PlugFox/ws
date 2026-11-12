@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert' show utf8;
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:clock/clock.dart';
@@ -9,6 +10,7 @@ import 'package:ws/src/client/exceptions.dart';
 import 'package:ws/src/client/metrics.dart';
 import 'package:ws/src/client/options.dart';
 import 'package:ws/src/client/state.dart';
+import 'package:ws/src/protocol/handshake.dart';
 import 'package:ws/src/transport/transport.dart';
 import 'package:ws/src/transport/transport_registry.dart';
 import 'package:ws/src/util/backoff.dart';
@@ -207,11 +209,22 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     }
   }
 
+  /// Runs user code; its errors go to [_reportUserError].
   void _guard(void Function() fn) {
     try {
       fn();
     } on Object catch (e, s) {
-      _reportError(e, s);
+      _reportUserError(e, s);
+    }
+  }
+
+  /// Errors thrown by user code (callbacks, hooks, handlers): `onError`,
+  /// or the zone when there is none, like any other uncaught error.
+  void _reportUserError(Object error, StackTrace stackTrace) {
+    if (_options.onError == null) {
+      Zone.current.handleUncaughtError(error, stackTrace);
+    } else {
+      _reportError(error, stackTrace);
     }
   }
 
@@ -252,10 +265,21 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     return waiter.future..ignore();
   }
 
-  void _completeWaiters([WebSocketException? error]) {
-    if (_connectWaiters.isEmpty) return;
+  void _completeWaiters([WebSocketException? error]) =>
+      _complete(_takeWaiters(), error);
+
+  /// Detaches the current waiters, so that a listener notified next can
+  /// start a new attempt with its own waiter (DECISIONS.md D38).
+  List<Completer<void>> _takeWaiters() {
     final waiters = List<Completer<void>>.of(_connectWaiters);
     _connectWaiters.clear();
+    return waiters;
+  }
+
+  static void _complete(
+    List<Completer<void>> waiters, [
+    WebSocketException? error,
+  ]) {
     for (final w in waiters) {
       error == null ? w.complete() : w.completeError(error);
     }
@@ -294,7 +318,8 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     }
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
-    _dropSession(1001, 'Reconnecting');
+    // 1000: browsers reject 1001 from scripts.
+    _dropSession(1000, 'Reconnecting');
     _start();
     return _waitForOpen();
   }
@@ -308,44 +333,75 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     _failCalls(WebSocketRpcFailure.disconnected);
     final connection = session.connection;
     if (connection == null) return;
-    if (session.transportOpen) {
+    if (!session.transportOpen) return _abort(connection);
+    try {
       connection.close(code, reason);
-      // Do not wait: abort if the peer does not finish the handshake.
-      Timer(_options.disconnectTimeout, connection.abort);
-    } else {
+    } on Object {
+      return _abort(connection);
+    }
+    // Do not wait: abort if the peer does not finish the handshake.
+    _dropped[connection] = Timer(_options.disconnectTimeout, () {
+      _dropped.remove(connection);
+      _abort(connection);
+    });
+  }
+
+  /// Connections dropped without waiting for their closing handshake;
+  /// aborted by their timer or by `close()`.
+  final Map<TransportConnection, Timer> _dropped =
+      <TransportConnection, Timer>{};
+
+  static void _abort(TransportConnection connection) {
+    try {
       connection.abort();
+    } on Object {
+      // A broken transport must not break the client.
     }
   }
 
   void _start() {
+    if (_session != null) _dropSession(1000, 'Restarting');
     final url = _url!;
     final attempt = _failures;
     final session = _Session<T>(this);
     _session = session;
+    // One budget for the whole attempt: request provider, TCP, TLS,
+    // handshake and the onOpen hook.
+    session.connectTimer = Timer(_options.connectTimeout, () {
+      session.fail(const WebSocketTimeoutException('Connect timed out'));
+    });
     _setState(WebSocketState.connecting(url: url, attempt: attempt));
     Future<void>.microtask(() async {
+      if (!identical(_session, session)) return;
       WebSocketRequest request;
       try {
         request =
             await (_options.request?.call(url, attempt) ??
                 WebSocketRequest(url, headers: _options.vm.headers));
-      } on Object catch (e, s) {
+      } on Object catch (e) {
         if (!identical(_session, session)) return;
-        _reportError(e, s);
-        _onSessionClosed(
-          session,
-          null,
-          '',
+        session.fail(
           WebSocketConnectionException('The request provider failed', cause: e),
         );
         return;
       }
       if (!identical(_session, session)) return;
-      session
-        ..connectTimer = Timer(_options.connectTimeout, () {
-          session.fail(const WebSocketTimeoutException('Connect timed out'));
-        })
-        ..connection = _transport.connect(
+      try {
+        // Errors no retry can fix: report once and stop.
+        HandshakeRequest.validateHeaders(request.headers);
+        HandshakeRequest.validateProtocols(_options.protocols);
+        HandshakeRequest.basicAuthorization(request.url);
+      } on Object catch (e) {
+        session
+          ..terminal = true
+          ..fail(
+            WebSocketHandshakeException('Invalid handshake request', cause: e),
+          );
+        return;
+      }
+      session.effectiveUrl = request.url;
+      try {
+        session.connection = _transport.connect(
           TransportRequest(
             url: request.url,
             headers: request.headers,
@@ -353,40 +409,55 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
             maxMessageSize: _options.maxMessageSize,
             textMode: _codec.textMode,
             tls: _options.vm.tls,
+            proxy: _options.vm.proxy,
           ),
           session,
         );
+      } on Object catch (e) {
+        session
+          ..terminal = e is ArgumentError || e is UnsupportedError
+          ..fail(
+            WebSocketConnectionException(
+              'The transport could not start',
+              cause: e,
+            ),
+          );
+      }
     });
   }
 
   Future<void> _onTransportOpen(_Session<T> session, String? protocol) async {
-    session
-      ..connectTimer?.cancel()
-      ..transportOpen = true;
+    session.transportOpen = true;
+    bool stillWanted() =>
+        identical(_session, session) &&
+        !session.byUser &&
+        session.failure == null;
     final onOpen = _options.onOpen;
     if (onOpen != null) {
       try {
         await onOpen(this);
-      } on Object catch (e, s) {
-        if (!identical(_session, session)) return;
-        _reportError(e, s);
+      } on Object catch (e) {
+        if (!stillWanted()) return;
         session.fail(
           WebSocketConnectionException('onOpen callback failed', cause: e),
         );
         return;
       }
-      if (!identical(_session, session)) return;
     }
-    session.openedAt = clock.now();
+    // disconnect(), close() or a failure during the hook wins.
+    if (!stillWanted()) return;
     _connects++;
-    final stableAfter = _options.reconnect.stableAfter;
-    session.stableTimer = Timer(stableAfter, () => _failures = 0);
+    session
+      ..connectTimer?.cancel()
+      ..openedAt = clock.now()
+      ..stableTimer = Timer(_options.reconnect.stableAfter, () => _failures = 0)
+      ..startHeartbeat(
+        _options.heartbeat,
+        supportsPing: _transport.supportsPing,
+      );
+    final waiters = _takeWaiters();
     _setState(WebSocketState.open(url: _url!, protocol: protocol));
-    _completeWaiters();
-    session.startHeartbeat(
-      _options.heartbeat,
-      supportsPing: _transport.supportsPing,
-    );
+    _complete(waiters);
   }
 
   void _onSessionClosed(
@@ -410,19 +481,20 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
           byServer: !session.closingByUs,
         );
 
+    // Every field is final before any user code runs (D38): listeners
+    // may call connect(), reconnect(), disconnect() or close().
     if (session.byUser || !_wanted) {
       _setState(
         WebSocketState.disconnected(closeCode: code, closeReason: reason),
       );
-      session.closed.complete();
       return;
     }
-    session.closed.complete();
 
     final attempt = _failures + 1;
-    if (!_shouldReconnect(cause, attempt)) {
+    if (session.terminal || !_shouldReconnect(cause, attempt)) {
       _wanted = false;
       _lastError = cause;
+      final waiters = _takeWaiters();
       _setState(
         WebSocketState.disconnected(
           closeCode: code,
@@ -430,28 +502,46 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
           error: cause,
         ),
       );
-      _completeWaiters(cause);
+      _complete(waiters, cause);
       return;
     }
-    _reportError(cause, StackTrace.current);
     _failures = attempt;
     _reconnectAttempts++;
-    final reconnect = _options.reconnect;
-    var delay = backoffDelay(
-      attempt - 1,
-      reconnect.minDelay,
-      reconnect.maxDelay,
-    );
-    if (cause case WebSocketClosedException(code: 1013)) {
-      delay = reconnect.maxDelay; // Try Again Later
-    }
-    _setState(
-      WebSocketState.reconnecting(attempt: attempt, delay: delay, cause: cause),
-    );
-    _reconnectTimer = Timer(delay, () {
+    final delay = _reconnectDelay(cause, attempt);
+    final timer = _reconnectTimer = Timer(delay, () {
       _reconnectTimer = null;
-      if (_wanted && !_closed) _start();
+      if (_wanted && !_closed && _session == null) _start();
     });
+    _reportError(cause, StackTrace.current);
+    // onError may have called connect(), reconnect() or disconnect().
+    if (identical(_reconnectTimer, timer)) {
+      _setState(
+        WebSocketState.reconnecting(
+          attempt: attempt,
+          delay: delay,
+          cause: cause,
+        ),
+      );
+    }
+  }
+
+  /// Backoff with jitter; 1013 waits the maximum delay, `Retry-After` (429,
+  /// 503) at least what the server asked for (capped at 10 minutes).
+  Duration _reconnectDelay(WebSocketException cause, int attempt) {
+    final policy = _options.reconnect;
+    var delay = backoffDelay(attempt - 1, policy.minDelay, policy.maxDelay);
+    if (cause case WebSocketClosedException(code: 1013)) {
+      // Try Again Later; jitter so shed clients do not return together.
+      delay = policy.maxDelay + delay * 0.5;
+    }
+    if (cause case WebSocketHandshakeException(:final headers)) {
+      final retryAfter = int.tryParse(headers['retry-after']?.trim() ?? '');
+      if (retryAfter != null && retryAfter > 0) {
+        final asked = Duration(seconds: math.min(retryAfter, 600));
+        if (asked > delay) delay = asked + delay * 0.1;
+      }
+    }
+    return delay;
   }
 
   bool _shouldReconnect(WebSocketException cause, int attempt) {
@@ -462,7 +552,7 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
       try {
         return decide(cause, attempt);
       } on Object catch (e, s) {
-        _reportError(e, s);
+        _reportUserError(e, s);
         return false;
       }
     }
@@ -517,6 +607,11 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     session
       ..byUser = true
       ..closingByUs = true;
+    // Replies are no longer delivered (D37): fail calls now, not after the
+    // closing handshake.
+    _failCalls(
+      _closed ? WebSocketRpcFailure.closed : WebSocketRpcFailure.disconnected,
+    );
     final connection = session.connection;
     if (connection == null || !session.transportOpen) {
       // Still connecting: nothing to close politely.
@@ -534,16 +629,29 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     return session.closed.future;
   }
 
+  Future<void>? _closing;
+
   @override
-  Future<void> close([int? code = 1000, String? reason]) async {
-    if (_closed) return;
+  Future<void> close([int? code = 1000, String? reason]) {
+    _checkClose(code, reason);
+    return _closing ??= _close(code, reason);
+  }
+
+  Future<void> _close(int? code, String? reason) async {
     _closed = true;
+    _failCalls(WebSocketRpcFailure.closed);
     await disconnect(code, reason);
     _failCalls(WebSocketRpcFailure.closed);
     _rpcTimer?.cancel();
+    for (final MapEntry(key: connection, value: timer) in _dropped.entries) {
+      timer.cancel();
+      _abort(connection);
+    }
+    _dropped.clear();
     _setState(const WebSocketState.closed());
-    await _states.close();
-    await _messages.close();
+    // Not awaited: a paused subscription would never let these complete.
+    unawaited(_states.close());
+    unawaited(_messages.close());
   }
 
   // --- send ------------------------------------------------------------------
@@ -567,14 +675,21 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
       );
     }
     final before = connection.bufferedAmount;
+    if (before > _options.sendBufferLimit) {
+      return Future<void>.error(
+        WebSocketBufferFullException(
+          'More than ${_options.sendBufferLimit} bytes wait to be sent',
+          buffered: before,
+        ),
+      );
+    }
     try {
-      _codec.send(connection, data);
+      _bytesSent += _codec.send(connection, data);
     } on WebSocketException catch (e, s) {
       return Future<void>.error(e, s);
     }
     _sent++;
     final buffered = connection.bufferedAmount;
-    if (buffered > before) _bytesSent += buffered - before;
     if (buffered <= _options.sendHighWaterMark) return Future<void>.value();
     final drained = _session!.waitForDrain();
     connection.requestDrain();
@@ -590,7 +705,13 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     }
     if (_openConnection == null) {
       return Future<T>.error(
-        const WebSocketNotConnectedException('Not connected'),
+        WebSocketRpcException(
+          'Not connected',
+          failure: _closed
+              ? WebSocketRpcFailure.closed
+              : WebSocketRpcFailure.disconnected,
+          cause: const WebSocketNotConnectedException('Not connected'),
+        ),
       );
     }
     final Object id;
@@ -599,6 +720,11 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
       (id, message) = handler.encode(++_seq, data);
     } on Object catch (e, s) {
       return Future<T>.error(e, s);
+    }
+    if (_calls.containsKey(id)) {
+      return Future<T>.error(
+        ArgumentError.value(id, 'id', 'An RPC call with this id is pending'),
+      );
     }
     final call = _PendingCall<T>(
       id,
@@ -609,13 +735,17 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     push(message).catchError((Object e, StackTrace s) {
       if (identical(_calls[id], call)) {
         _calls.remove(id);
+        _scheduleRpcTimer();
         call.completer.completeError(
-          WebSocketRpcException(
-            'Sending the request failed',
-            failure: WebSocketRpcFailure.disconnected,
-            id: id,
-            cause: e,
-          ),
+          // Not sent at all (encoding, full buffer): the error itself.
+          e is WebSocketFormatException || e is WebSocketBufferFullException
+              ? e
+              : WebSocketRpcException(
+                  'Sending the request failed',
+                  failure: WebSocketRpcFailure.disconnected,
+                  id: id,
+                  cause: e,
+                ),
           s,
         );
       }
@@ -651,6 +781,7 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
         if (!value.deadline.isAfter(now)) key,
     ];
     for (final id in expired) {
+      _forget(id);
       _calls
           .remove(id)!
           .completer
@@ -665,9 +796,20 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     _scheduleRpcTimer();
   }
 
+  /// Ids of calls that ended without a reply: a late reply is dropped (and
+  /// counted), any other message with an id is delivered (F12 of
+  /// docs/review/client.md).
+  final Set<Object> _abandoned = <Object>{};
+
+  void _forget(Object id) {
+    _abandoned.add(id);
+    if (_abandoned.length > 1024) _abandoned.remove(_abandoned.first);
+  }
+
   void _failCalls(WebSocketRpcFailure failure) {
     if (_calls.isEmpty) return;
     final calls = List<_PendingCall<T>>.of(_calls.values);
+    _calls.keys.forEach(_forget);
     _calls.clear();
     _scheduleRpcTimer();
     for (final call in calls) {
@@ -703,14 +845,13 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     session.touch();
     _received++;
     _bytesReceived += bytes;
-    if (session.openedAt != null) _failures = 0;
 
     if (_options.heartbeat?.isPong case final isPong?) {
       var pong = false;
       try {
         pong = isPong(message);
       } on Object catch (e, s) {
-        _reportError(e, s);
+        _reportUserError(e, s);
       }
       if (pong) return session.pongReceived();
     }
@@ -720,14 +861,14 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
       try {
         id = handler.match(message);
       } on Object catch (e, s) {
-        _reportError(e, s);
+        _reportUserError(e, s);
       }
-      if (id != null) {
-        final call = _calls.remove(id);
-        if (call == null) {
-          _droppedReplies++;
-          return;
-        }
+      final call = id == null ? null : _calls.remove(id);
+      if (id != null && call == null && _abandoned.remove(id)) {
+        _droppedReplies++;
+        return;
+      }
+      if (call != null) {
         _scheduleRpcTimer();
         try {
           call.completer.complete(handler.decode(message));
@@ -750,17 +891,29 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
 
     if (_options.onMessage case final onMessage?) {
       _guard(() => onMessage(message));
+      // onMessage may have called disconnect().
+      if (!session._delivering) return;
     }
     if (_messages.hasListener) _messages.add(message);
   }
 
   void _onDecodeError(_Session<T> session, Object error, StackTrace stack) {
     if (error is InvalidUtf8) {
-      session.connection?.close(1007, 'Invalid UTF-8');
-      session.failure ??= const WebSocketClosedException(
-        'Received invalid UTF-8',
-        code: 1007,
-        byServer: false,
+      if (session.failure != null) return;
+      session
+        ..failure = const WebSocketClosedException(
+          'Received invalid UTF-8',
+          code: 1007,
+          byServer: false,
+        )
+        ..closingByUs = true
+        ..stopHeartbeat();
+      final connection = session.connection;
+      if (connection == null) return;
+      connection.close(1007, 'Invalid UTF-8');
+      session.closeTimer ??= Timer(
+        _options.disconnectTimeout,
+        connection.abort,
       );
       return;
     }
@@ -796,6 +949,12 @@ final class _Session<T> implements TransportListener {
   bool transportOpen = false;
   bool byUser = false;
   bool closingByUs = false;
+
+  /// The failure cannot be fixed by retrying (invalid request).
+  bool terminal = false;
+
+  /// The URL the request provider returned for this attempt.
+  Uri? effectiveUrl;
   WebSocketException? failure;
   DateTime? openedAt;
   final Completer<void> closed = Completer<void>();
@@ -812,9 +971,20 @@ final class _Session<T> implements TransportListener {
 
   bool get _current => identical(_client._session, this);
 
-  void touch() => _sinceInbound
-    ..reset()
-    ..start();
+  /// Messages are delivered only until `disconnect()`: what the server
+  /// sends during the closing handshake is dropped, as browsers do (HTML
+  /// "feedback from the protocol": not OPEN, return).
+  bool get _delivering => _current && !byUser && failure == null;
+
+  /// Inbound frames so far; the heartbeat compares counts, not times.
+  int _inbound = 0;
+
+  void touch() {
+    _inbound++;
+    _sinceInbound
+      ..reset()
+      ..start();
+  }
 
   /// Drops the connection; `onClosed` reports [cause].
   void fail(WebSocketException cause) {
@@ -847,6 +1017,9 @@ final class _Session<T> implements TransportListener {
       p.completeError(error);
     }
     _pings.clear();
+    // Nobody waits forever on a discarded session (disconnect() then
+    // connect(), URL switches).
+    if (!closed.isCompleted) closed.complete();
   }
 
   // --- heartbeat ---
@@ -885,11 +1058,11 @@ final class _Session<T> implements TransportListener {
     }
     // Idle long enough (or the timer fired late after a suspension): probe
     // first, and only give up if the probe gets no answer.
-    final mark = _sinceInbound.elapsedMicroseconds;
+    final mark = _inbound;
     _sendPing();
     _heartbeatTimer = Timer(heartbeat.timeout, () {
       if (!_current || _heartbeat == null) return;
-      if (_sinceInbound.elapsedMicroseconds >= mark) {
+      if (_inbound == mark) {
         fail(const WebSocketTimeoutException('Heartbeat timed out'));
       } else {
         _scheduleHeartbeat(heartbeat.interval);
@@ -897,9 +1070,10 @@ final class _Session<T> implements TransportListener {
     });
   }
 
-  void _sendPing() {
+  /// Sends a ping; returns the error if it could not be sent.
+  Object? _sendPing() {
     final c = connection;
-    if (c == null) return;
+    if (c == null) return const WebSocketNotConnectedException('Not connected');
     _pingClock
       ..reset()
       ..start();
@@ -910,8 +1084,10 @@ final class _Session<T> implements TransportListener {
         c.ping();
       }
     } on Object catch (e, s) {
-      _client._reportError(e, s);
+      _client._reportUserError(e, s);
+      return e;
     }
+    return null;
   }
 
   Future<void> ping(Duration timeout) {
@@ -932,7 +1108,16 @@ final class _Session<T> implements TransportListener {
     }
     final waiter = Completer<void>();
     _pings.add(waiter);
-    if (_pings.length == 1) _sendPing();
+    if (_pings.length == 1) {
+      if (_sendPing() case final error?) {
+        _pings.remove(waiter);
+        return Future<void>.error(
+          error is WebSocketException
+              ? error
+              : WebSocketConnectionException('Ping failed', cause: error),
+        );
+      }
+    }
     return waiter.future.timeout(
       timeout,
       onTimeout: () {
@@ -966,7 +1151,7 @@ final class _Session<T> implements TransportListener {
 
   @override
   void onTextBytes(Uint8List bytes) {
-    if (!_current) return;
+    if (!_delivering) return;
     final T message;
     try {
       message = _client._codec.fromTextBytes(bytes);
@@ -978,7 +1163,7 @@ final class _Session<T> implements TransportListener {
 
   @override
   void onTextString(String text) {
-    if (!_current) return;
+    if (!_delivering) return;
     final T message;
     try {
       message = _client._codec.fromTextString(text);
@@ -990,7 +1175,7 @@ final class _Session<T> implements TransportListener {
 
   @override
   void onJson(Object? value) {
-    if (!_current) return;
+    if (!_delivering) return;
     final T message;
     try {
       message = _client._codec.fromJson(value);
@@ -1002,7 +1187,7 @@ final class _Session<T> implements TransportListener {
 
   @override
   void onBinary(Uint8List bytes) {
-    if (!_current) return;
+    if (!_delivering) return;
     final T message;
     try {
       message = _client._codec.fromBinary(bytes);

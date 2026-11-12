@@ -37,8 +37,9 @@ abstract base class MessageCodec<T> {
   /// Decodes a binary message.
   T fromBinary(Uint8List bytes);
 
-  /// Encodes and queues [data].
-  void send(TransportConnection connection, T data);
+  /// Encodes and queues [data]; returns the payload size in UTF-8 bytes on
+  /// every platform.
+  int send(TransportConnection connection, T data);
 }
 
 /// `Uint8List` messages. Text messages arrive as their UTF-8 bytes.
@@ -56,8 +57,10 @@ final class BinaryCodec extends MessageCodec<Uint8List> {
   Uint8List fromBinary(Uint8List bytes) => bytes;
 
   @override
-  void send(TransportConnection connection, Uint8List data) =>
-      connection.sendBinary(data);
+  int send(TransportConnection connection, Uint8List data) {
+    connection.sendBinary(data);
+    return data.length;
+  }
 }
 
 /// `String` messages. Binary messages are decoded as UTF-8.
@@ -87,9 +90,14 @@ final class TextCodec extends MessageCodec<String> {
   }
 
   @override
-  void send(TransportConnection connection, String data) {
-    if (_isWeb) return connection.sendText(data);
-    connection.sendTextBytes(encodeText(data));
+  int send(TransportConnection connection, String data) {
+    if (_isWeb) {
+      connection.sendText(data);
+      return utf8Length(data);
+    }
+    final bytes = encodeText(data);
+    connection.sendTextBytes(bytes);
+    return bytes.length;
   }
 
   /// `ascii.encode` is 2.2× faster than `utf8.encode` for ASCII strings and
@@ -152,17 +160,49 @@ final class JsonCodec extends MessageCodec<Map<String, Object?>> {
   static final JsonUtf8Encoder _encoder = JsonUtf8Encoder();
 
   @override
-  void send(TransportConnection connection, Map<String, Object?> data) {
-    if (_isWeb) return connection.sendText(json.encode(data));
-    final List<int> bytes;
+  int send(TransportConnection connection, Map<String, Object?> data) {
+    final Object encoded;
     try {
-      bytes = _encoder.convert(data);
+      encoded = _isWeb ? json.encode(data) : _encoder.convert(data);
       // ignore: avoid_catching_errors
     } on JsonUnsupportedObjectError catch (e) {
       throw WebSocketFormatException('Cannot encode message as JSON', cause: e);
     }
-    connection.sendTextBytes(
-      bytes is Uint8List ? bytes : Uint8List.fromList(bytes),
-    );
+    switch (encoded) {
+      case final String text:
+        connection.sendText(text);
+        return utf8Length(text);
+      case final Uint8List bytes:
+        connection.sendTextBytes(bytes);
+        return bytes.length;
+      case final List<int> bytes:
+        connection.sendTextBytes(Uint8List.fromList(bytes));
+        return bytes.length;
+    }
+    throw StateError('unreachable');
   }
+}
+
+/// UTF-8 length of [s] without encoding it (the browser encodes strings
+/// itself; this keeps `bytesSent` the same on every platform).
+int utf8Length(String s) {
+  var n = s.length;
+  for (var i = 0; i < s.length; i++) {
+    final c = s.codeUnitAt(i);
+    if (c < 0x80) continue;
+    if (c < 0x800) {
+      n += 1;
+    } else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) {
+      final d = s.codeUnitAt(i + 1);
+      if (d >= 0xDC00 && d <= 0xDFFF) {
+        n += 2; // 4 bytes for 2 code units
+        i++;
+        continue;
+      }
+      n += 2;
+    } else {
+      n += 2;
+    }
+  }
+  return n;
 }

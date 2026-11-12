@@ -92,6 +92,20 @@ final class WebSocketNotConnectedException extends WebSocketException {
   String get _name => 'WebSocketNotConnectedException';
 }
 
+/// `push()` was refused because more than
+/// `WebSocketOptions.sendBufferLimit` bytes wait to be sent. The connection
+/// stays open; wait (or await earlier `push()` futures) and retry.
+final class WebSocketBufferFullException extends WebSocketException {
+  /// Creates the exception.
+  const WebSocketBufferFullException(super.message, {required this.buffered});
+
+  /// Bytes queued when the message was refused.
+  final int buffered;
+
+  @override
+  String get _name => 'WebSocketBufferFullException';
+}
+
 /// A message could not be decoded or encoded. Incoming messages that fail
 /// are dropped and reported through `onError`; the connection stays open.
 final class WebSocketFormatException extends WebSocketException {

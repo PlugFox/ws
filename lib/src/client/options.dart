@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert' show base64, utf8;
 
 import 'package:meta/meta.dart';
 import 'package:ws/src/client/exceptions.dart';
@@ -124,6 +125,66 @@ final class WebSocketTls {
   final bool allowInsecure;
 }
 
+/// An HTTP proxy reached with `CONNECT` (RFC 9110 §9.3.6), for native
+/// platforms. The tunnel carries `ws://` and `wss://` alike; TLS runs end to
+/// end through it.
+@immutable
+final class WebSocketProxy {
+  /// Creates proxy settings.
+  const WebSocketProxy({
+    required this.host,
+    required this.port,
+    this.username,
+    this.password,
+  });
+
+  /// Parses `http://[user:password@]host[:port]` (port defaults to 80) or
+  /// `host:port`.
+  factory WebSocketProxy.parse(String proxy) {
+    final uri = Uri.parse(proxy.contains('://') ? proxy : 'http://$proxy');
+    if (uri.scheme != 'http' || uri.host.isEmpty) {
+      throw FormatException(
+        'Expected http://[user:password@]host[:port]',
+        proxy,
+      );
+    }
+    final (username, password) = switch (uri.userInfo) {
+      '' => (null, null),
+      final info when info.contains(':') => (
+        Uri.decodeComponent(info.substring(0, info.indexOf(':'))),
+        Uri.decodeComponent(info.substring(info.indexOf(':') + 1)),
+      ),
+      final info => (Uri.decodeComponent(info), ''),
+    };
+    return WebSocketProxy(
+      host: uri.host,
+      port: uri.hasPort ? uri.port : 80,
+      username: username,
+      password: password,
+    );
+  }
+
+  /// Proxy host name or address.
+  final String host;
+
+  /// Proxy port.
+  final int port;
+
+  /// User for `Proxy-Authorization: Basic`.
+  final String? username;
+
+  /// Password for `Proxy-Authorization: Basic`.
+  final String? password;
+
+  /// The `Proxy-Authorization` header value, if credentials are set.
+  String? get authorization => username == null
+      ? null
+      : 'Basic ${base64.encode(utf8.encode('$username:${password ?? ''}'))}';
+
+  @override
+  String toString() => 'WebSocketProxy($host:$port)';
+}
+
 /// Options that only apply on native platforms (VM, Flutter mobile and
 /// desktop). Plain data: compiles everywhere, ignored on the web.
 @immutable
@@ -132,6 +193,7 @@ final class WebSocketVmOptions {
   const WebSocketVmOptions({
     this.headers = const <String, String>{},
     this.tls = const WebSocketTls(),
+    this.proxy,
   });
 
   /// Handshake headers (e.g. `Authorization`).
@@ -139,6 +201,10 @@ final class WebSocketVmOptions {
 
   /// TLS settings.
   final WebSocketTls tls;
+
+  /// HTTP `CONNECT` proxy; `null` connects directly. System proxy
+  /// settings are not read (DECISIONS.md D36).
+  final WebSocketProxy? proxy;
 }
 
 /// Options that only apply in the browser. Plain data: compiles everywhere,
@@ -164,6 +230,7 @@ final class WebSocketOptions<T> {
     this.rpcTimeout = const Duration(seconds: 30),
     this.maxMessageSize = 64 << 20,
     this.sendHighWaterMark = 1 << 20,
+    this.sendBufferLimit = 16 << 20,
     this.request,
     this.onOpen,
     this.onMessage,
@@ -203,6 +270,12 @@ final class WebSocketOptions<T> {
   /// When more than this many bytes wait to be sent, `push()` returns a
   /// future that completes only after the queue drains (backpressure).
   final int sendHighWaterMark;
+
+  /// Hard limit on bytes waiting to be sent. While more than this is
+  /// queued, `push()` fails with [WebSocketBufferFullException] instead of
+  /// queueing (callers that ignore the futures of `push()` cannot grow
+  /// memory without bound). The queue may exceed the limit by one message.
+  final int sendBufferLimit;
 
   /// Called before every connection attempt with the URL given to
   /// `connect()`; returns the URL and headers to use. Use it to refresh

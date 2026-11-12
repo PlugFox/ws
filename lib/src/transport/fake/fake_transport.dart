@@ -24,7 +24,11 @@ final class FakeWebSocketServer implements WebSocketTransport {
   /// Creates a server. With [autoAccept] every connection opens right away;
   /// otherwise the test calls [FakeWebSocketConnection.accept] or
   /// [FakeWebSocketConnection.reject].
-  FakeWebSocketServer({this.autoAccept = true, this.protocol});
+  FakeWebSocketServer({
+    this.autoAccept = true,
+    this.protocol,
+    this.supportsPing = true,
+  });
 
   /// Whether new connections open immediately.
   bool autoAccept;
@@ -50,8 +54,9 @@ final class FakeWebSocketServer implements WebSocketTransport {
   @override
   String get name => 'fake';
 
+  /// Whether protocol pings are available; `false` models a browser.
   @override
-  bool get supportsPing => true;
+  final bool supportsPing;
 
   @override
   bool get decodesJson => false;
@@ -132,9 +137,23 @@ final class FakeWebSocketConnection {
   /// Whether the connection ended.
   bool get isEnded => _ended;
 
+  /// Set once the terminal event ran; deliveries queued before the end
+  /// still run, in order (a real socket delivers frames that precede the
+  /// close frame).
+  bool _finished = false;
+
   void _later(void Function() fn) => scheduleMicrotask(() {
-    if (!_ended) fn();
+    if (!_finished) fn();
   });
+
+  void _end(void Function() fn) {
+    _ended = true;
+    scheduleMicrotask(() {
+      if (_finished) return;
+      _finished = true;
+      fn();
+    });
+  }
 
   /// Completes the handshake.
   void accept({String? protocol}) {
@@ -155,8 +174,7 @@ final class FakeWebSocketConnection {
   /// Ends the connection with [error] (e.g. a network failure).
   void fail(WebSocketException error) {
     if (_ended) return;
-    _ended = true;
-    scheduleMicrotask(() => _listener.onClosed(null, '', error));
+    _end(() => _listener.onClosed(null, '', error));
   }
 
   /// The connection is lost without a close frame (code 1006).
@@ -198,8 +216,7 @@ final class FakeWebSocketConnection {
   /// Starts a server-side close; the connection ends with [code].
   void close([int? code = 1000, String reason = '']) {
     if (_ended) return;
-    _ended = true;
-    scheduleMicrotask(() => _listener.onClosed(code, reason, null));
+    _end(() => _listener.onClosed(code, reason, null));
   }
 
   void _requireOpen() {

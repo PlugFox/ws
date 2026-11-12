@@ -74,7 +74,10 @@ final class FrameReader {
 
   // The fragmented message being assembled.
   int _messageOpcode = 0;
-  List<Uint8List>? _fragments;
+  // Fragments are copied into one buffer: views would pin whole read
+  // chunks, and a list of tiny views costs far more than the bytes
+  // (docs/review/protocol.md F1, F2). Bounded by maxMessageSize.
+  BytesBuilder? _fragments;
   int _messageLength = 0;
   final Utf8Validator _utf8 = Utf8Validator();
 
@@ -152,6 +155,19 @@ final class FrameReader {
       if (masked) header += 4;
       if (available < header) return _keepHeader(buf, off);
 
+      // Fail fast on what the header already tells (Autobahn "fail fast"),
+      // before buffering a payload of up to maxMessageSize.
+      if ((opcode > Opcode.binary && opcode < Opcode.close) ||
+          opcode > Opcode.pong) {
+        return _fail(CloseCode.protocolError, 'Unknown opcode $opcode');
+      }
+      if (opcode == Opcode.continuation && _messageOpcode == 0) {
+        return _fail(CloseCode.protocolError, 'Unexpected continuation');
+      }
+      if ((opcode == Opcode.text || opcode == Opcode.binary) &&
+          _messageOpcode != 0) {
+        return _fail(CloseCode.protocolError, 'Expected a continuation');
+      }
       if (opcode >= 0x8) {
         if (!fin) {
           return _fail(CloseCode.protocolError, 'Fragmented control frame');
@@ -209,7 +225,7 @@ final class FrameReader {
               : _handler.onBinary(payload);
         }
         _messageOpcode = opcode;
-        _fragments = <Uint8List>[payload];
+        _fragments = BytesBuilder()..add(payload);
         _messageLength = payload.length;
         if (opcode == Opcode.text) {
           _utf8.reset();
@@ -222,7 +238,7 @@ final class FrameReader {
         if (fragments == null) {
           return _fail(CloseCode.protocolError, 'Unexpected continuation');
         }
-        fragments.add(payload);
+        if (payload.isNotEmpty) fragments.add(payload);
         _messageLength += payload.length;
         final text = _messageOpcode == Opcode.text;
         if (text && !_utf8.add(payload)) {
@@ -232,7 +248,7 @@ final class FrameReader {
         if (text && !_utf8.isComplete) {
           return _fail(CloseCode.invalidPayload, 'Invalid UTF-8');
         }
-        final message = _join(fragments, _messageLength);
+        final message = fragments.takeBytes();
         _messageOpcode = 0;
         _fragments = null;
         _messageLength = 0;
@@ -272,16 +288,6 @@ final class FrameReader {
     _payload = null;
     _fragments = null;
     _handler.onFailure(code, reason);
-  }
-
-  static Uint8List _join(List<Uint8List> parts, int length) {
-    if (parts.length == 1) return parts.first;
-    final out = Uint8List(length);
-    var offset = 0;
-    for (final p in parts) {
-      out.setRange(offset, offset += p.length, p);
-    }
-    return out;
   }
 
   static void _unmask(Uint8List data, int start, int end, int key) {

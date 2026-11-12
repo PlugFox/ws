@@ -26,6 +26,7 @@ final class TransportRequest {
     this.maxMessageSize = 64 << 20,
     this.textMode = TransportTextMode.raw,
     this.tls = const WebSocketTls(),
+    this.proxy,
   });
 
   /// `ws://` or `wss://` URL.
@@ -45,6 +46,9 @@ final class TransportRequest {
 
   /// TLS settings.
   final WebSocketTls tls;
+
+  /// HTTP `CONNECT` proxy, or `null`.
+  final WebSocketProxy? proxy;
 }
 
 /// Receives the events of one connection.
