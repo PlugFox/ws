@@ -93,6 +93,44 @@ keep their connection, but timers are throttled to once a minute: a
 heartbeat may come late, so prefer server pings there (the browser answers
 them itself).
 
+### Dead connections and delivery
+
+A connection can die without a FIN or RST: a Wi-Fi switch, a NAT that
+forgot it, a server that hangs. The client then still says `open`. The
+heartbeat finds it: after `interval` (30 s) without incoming traffic it
+sends a ping and drops the connection, then reconnects, if nothing
+arrives within `timeout` (10 s). On native platforms that ping is a
+protocol ping by default. **Browsers cannot send protocol pings**: there
+the heartbeat works only with an application-level ping, so without one a
+dead connection in the browser is found only when the browser notices.
+
+Implement your own ping/pong in any case. A protocol pong comes from the
+server's WebSocket layer and proves the socket, not that the server
+application still answers. An application ping works the same on every
+platform:
+
+```dart
+final client = WebSocketClient.json(
+  options: WebSocketOptions(
+    rpc: const WebSocketJsonRpc(),
+    heartbeat: WebSocketHeartbeat(
+      ping: () => {'type': 'ping'}, // the server answers {"type": "pong"}
+      isPong: (message) => message['type'] == 'pong',
+    ),
+  ),
+);
+
+// Or an end-to-end check through the request path, with its own timeout:
+await client.rpc({'method': 'ping'}, timeout: const Duration(seconds: 5));
+```
+
+`open` and a completed `push()` mean the local side accepted the message,
+not that the server application processed it. When that matters, send it
+with `rpc()` and treat the reply as the acknowledgement; on a timeout or a
+disconnect, decide whether to send it again (make such requests
+idempotent, e.g. with your own message id). Nothing is resent
+automatically.
+
 ### Platforms
 
 | Platform | Transport |
