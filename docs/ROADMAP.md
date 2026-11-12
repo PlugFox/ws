@@ -360,10 +360,11 @@ here, including the ones that fail.
 
 - [x] **Autobahn TestSuite** (fuzzingserver) for native and pure Dart: 0
   failures (DECISIONS.md D28). [ ] Web through the browser; [ ] in CI.
-- [~] A shared conformance suite run against every transport
-  (`test/transport/conformance.dart`): pure Dart and native pass; web has
-  its own browser test. Flow control and reconnect-under-load cases still
-  to add.
+- [~] A shared conformance suite run against every transport:
+  `test/transport/conformance.dart` (pure Dart and native) and the Rust
+  server suite, whose platform-neutral half (`server_shared.dart`) also
+  runs in the browser on dart2js and dart2wasm (DECISIONS.md D46).
+  Reconnect-under-load cases still to add.
 - [ ] Fuzzing: the frame parser (pure Dart), the tape builder and the Dart
   tape reader (malformed JSON, deep nesting, huge numbers, invalid UTF-8,
   surrogate escapes).
@@ -418,7 +419,7 @@ here, including the ones that fail.
 | M2 | Core and pure-Dart transport | State machine, reconnect, heartbeat, metrics; RFC 6455 codec from `benchmark/lib/src/codec.dart` hardened; Autobahn green | [~] core, protocol layer, pure-Dart transport and fake done with tests; Autobahn 0 failed (D28) |
 | M3 | Native transport | Rust crate as a library (`native/` at the repo root): connections, credits, errors, TLS with the platform verifier, proxy; Autobahn green | [~] package `ws_native` (`native/`): Rust crate with credits, drain on request, liveness probe, `catch_unwind`, hook with prebuilt/cargo/none; passes the shared conformance suite; Autobahn 0 failed (D28); OS trust store (D35), Happy Eyeballs (D34), CONNECT proxy (D36). System proxy settings open |
 | M4 | Decoders | Tape (Rust and Dart builders), worker decoder, custom binary decoders; tape speedups (§5.3) | [ ] |
-| M5 | Web transport | `package:web` implementation, shared conformance suite in the browser | [~] implemented, tested on dart2js and dart2wasm |
+| M5 | Web transport | `package:web` implementation, shared conformance suite in the browser | [x] implemented; the shared server suite runs on dart2js and dart2wasm (D46) |
 | M6 | Robustness | §6.3 soak, faults, lifecycle, hot restart | [ ] |
 | M7 | Distribution | Prebuilt binaries, CI for every target, checksums, size budget, 16 KB pages, store validation | [ ] |
 | M8 | Example and docs | Dart example in `example/` (scope to be described by the maintainer), Rust server in `server/`, migration guide from 1.x, README, API docs | [ ] |
@@ -435,8 +436,9 @@ here, including the ones that fail.
   and beta.
 - **Platform trust store and proxy** on mobile: easy to get wrong, and
   users notice (corporate networks). See §4.5 and §4.6.
-- **Two (three) transports diverge** in behaviour. Mitigation: one shared
-  conformance suite.
+- **Two (three) transports diverge** in behaviour. Mitigation: shared
+  suites on every transport (§6.2, D46); the first browser run found four
+  divergences.
 - **App size**: ~1–2 MB per ABI may matter for some apps. Mitigation:
   document it; the pure-Dart transport works on its own.
 - **Settling on a local optimum**: the current transport and tape were the

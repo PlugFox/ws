@@ -138,9 +138,11 @@ path). Performance numbers: D4–D6, D19, D20.
 |---|---|---|
 | protocol | `test/protocol` | VM, Chrome (dart2js), Chrome (dart2wasm) |
 | client core | `test/client` over `FakeWebSocketServer`, `fake_async` | VM, dart2js, dart2wasm |
-| pure-Dart transport | `test/transport/dart_transport_test.dart` against `dart:io` and a raw socket server (fragments, byte-by-byte delivery, masked frames, oversize, silent server) | VM |
-| web transport | `test/transport/web_transport_test.dart`, server via `spawnHybridUri` | dart2js, dart2wasm |
+| pure-Dart transport | `test/transport/dart_transport_test.dart`: `conformance.dart` (against `dart:io` and a raw socket server) and `server_suite.dart` | VM |
+| native transport | `test/native` (loaded by path) and `native/test` (bundled by the hook): the same two suites | VM |
+| Rust test server suite | `server_suite.dart` (TLS, proxy, handshake faults; VM only) + `server_shared.dart` (close, traffic, protocol violations, liveness; every transport, D46) | VM, dart2js, dart2wasm |
+| web transport | `test/transport/web_server_test.dart` (the shared half, server in a hybrid isolate) and `web_transport_test.dart` | dart2js, dart2wasm |
 
-Still to come (ROADMAP §6): Autobahn TestSuite for the pure-Dart and native
-transports, randomized operation sequences over the fake, native lifecycle
-and soak tests.
+Autobahn TestSuite results for the pure-Dart and native transports are in
+D28. Still to come (ROADMAP §6): randomized operation sequences over the
+fake, native lifecycle and soak tests.

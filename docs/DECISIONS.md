@@ -1332,3 +1332,50 @@ not exist.
   still not read (no JNI, `docs/SECURITY.md`); certificate transparency
   and revocation as before (3.7).
 - Status: **adopted**.
+
+### D46. The browser runs the shared server suite
+
+- Context: the web transport had four tests of its own; the server suite
+  (`server_suite.dart`) imported `dart:io` and ran only on the VM
+  transports (docs/review/tests_docs.md T-3, D-3).
+- Decision: the platform-neutral half moved to
+  `test/transport/server_shared.dart` (no `dart:io`): protocol
+  violations, valid edge cases with exact content, `maxMessageSize`,
+  close semantics, flood, slow reader, liveness, suspend/resume. The VM
+  runs it inside `server_suite.dart` (pure Dart and native); the browser
+  runs it from `web_server_test.dart`, with the Rust server started in a
+  hybrid isolate (`test/support/server_hybrid.dart`, `/log` relayed over
+  the channel as JSON). The expectations differ only by two
+  capabilities: `protocolPing` (heartbeats use an application ping
+  otherwise) and `protocolCloseCodes` (browsers report a protocol
+  violation as 1006). TLS, proxies, handshake faults and the blocked
+  isolate stay VM-only. The browser CI job builds the server and fails
+  when it is missing.
+- Found, all fixed with the test that found it:
+  - The web transport ignored `maxMessageSize`. It now closes with 1009
+    and does not deliver the message, counting UTF-8 bytes (a surrogate
+    pair is 4). The browser has already buffered the message, so this is
+    consistency, not a memory bound.
+  - A dropped connection reported close code 1006 on the web and `null`
+    on the VM. 1005, 1006 and 1015 never appear on the wire; the web
+    transport reports `null` for all three now.
+  - Chrome passes an invalid close code from the server (999) through to
+    the page. The web transport reports it as a protocol violation, 1002,
+    `byServer: false`, like the pure-Dart transport.
+  - The native transport reported the same case as the server closing
+    with 1002 (`byServer: true`): tungstenite answers an invalid code with
+    1002 and returns its own frame instead of the server's. It is now
+    `ERR_PROTOCOL`.
+- Observed, not changed:
+  - Chrome rejects a non-minimal payload length (5 bytes in a 16-bit
+    length; RFC 6455 §5.2 makes minimal lengths the sender's MUST) and
+    fails the connection. The VM transports accept it.
+  - Chrome fragments large outgoing messages (a 256 KiB message arrives
+    as several frames).
+  - A browser cannot drop TCP: after `abort()` it keeps the socket until
+    its own closing timeout, so a server that never answers a close sees
+    the connection for longer than on the VM.
+- Measured: 47 browser tests per compiler (46 pass, the protocol ping
+  test is skipped on the web), about 10 s per compiler; 5 runs on dart2js
+  and 3 on the VM without a failure.
+- Status: **adopted**.

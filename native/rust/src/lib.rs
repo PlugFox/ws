@@ -959,11 +959,19 @@ async fn serve(
                 ]);
             }
             Some(Ok(Message::Close(frame))) => {
+                // tungstenite answers an invalid close code (999, 1005, ...)
+                // with 1002 and reports its own frame instead (`is_allowed`
+                // in tungstenite's protocol/mod.rs): a protocol violation by
+                // the server, as on the other transports. A server sending
+                // exactly this frame is reported the same way.
+                let invalid = frame.as_ref().is_some_and(|f| {
+                    f.code == CloseCode::Protocol && f.reason.as_str() == "Protocol violation"
+                });
                 outcome = Closed {
                     code: frame.as_ref().map(|f| f.code.into()),
                     reason: frame.map(|f| f.reason.to_string()).unwrap_or_default(),
-                    kind: ERR_NONE,
-                    message: None,
+                    kind: if invalid { ERR_PROTOCOL } else { ERR_NONE },
+                    message: invalid.then(|| "Invalid close code".into()),
                     status: None,
                     headers: None,
                     detail: 0,

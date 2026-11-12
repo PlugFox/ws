@@ -28,6 +28,10 @@
   `WebSocketTls.trustUserCertificates` (Android: also trust user and MDM
   CAs). On Android both transports drop the system CAs the user disabled.
   TLS settings are built once per distinct value and reused.
+- Web: `maxMessageSize` is enforced (1009, the message is not
+  delivered); a dropped connection reports no close code, like the other
+  transports; an invalid close code from the server is a protocol
+  violation (1002).
 - `package:ws/testing.dart`: in-memory `FakeWebSocketServer` for tests.
 - `package:ws/native.dart`: the Rust transport loaded from a file
   (`WsNativeLibrary.open(path).install()`), and `dart run ws:install` to

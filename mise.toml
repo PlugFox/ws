@@ -111,7 +111,7 @@ run = "dart test --platform vm"
 
 [tasks."test:web"]
 description = "Browser tests of ws in Chrome, dart2js and dart2wasm"
-depends = ["deps"]
+depends = ["deps", "server:build"]
 run = [
   "dart test --platform chrome",
   "dart test --platform chrome --compiler dart2wasm",

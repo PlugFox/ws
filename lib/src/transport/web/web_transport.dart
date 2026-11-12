@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:web/web.dart' as web;
 import 'package:ws/src/client/exceptions.dart';
+import 'package:ws/src/protocol/frame.dart' show CloseCode;
 import 'package:ws/src/transport/transport.dart';
 
 /// The platform transport in the browser.
@@ -36,7 +37,8 @@ final class WebTransport implements WebSocketTransport {
 }
 
 final class _WebConnection implements TransportConnection {
-  _WebConnection(TransportRequest request, this._listener) {
+  _WebConnection(TransportRequest request, this._listener)
+    : _maxMessageSize = request.maxMessageSize {
     try {
       _socket = web.WebSocket(
         request.url.toString(),
@@ -63,26 +65,14 @@ final class _WebConnection implements TransportConnection {
       web.EventStreamProviders.messageEvent
           .forTarget(socket)
           .listen(_onMessage),
-      web.EventStreamProviders.closeEvent.forTarget(socket).listen((close) {
-        _finish(
-          close.code == 1005 ? null : close.code,
-          close.reason,
-          close.code == 1006
-              ? _open
-                    ? const WebSocketConnectionException(
-                        'Connection lost',
-                        failure: WebSocketConnectionFailure.lost,
-                      )
-                    : const WebSocketConnectionException(
-                        'Could not connect (the browser hides the reason)',
-                      )
-              : null,
-        );
-      }),
+      web.EventStreamProviders.closeEvent
+          .forTarget(socket)
+          .listen((close) => _onClose(close.code, close.reason)),
     ];
   }
 
   final TransportListener _listener;
+  final int _maxMessageSize;
   web.WebSocket? _socket;
   List<StreamSubscription<web.Event>> _subscriptions =
       const <StreamSubscription<web.Event>>[];
@@ -90,13 +80,78 @@ final class _WebConnection implements TransportConnection {
   bool _finished = false;
   Timer? _drainTimer;
 
+  void _onClose(int code, String reason) {
+    switch (code) {
+      // 1005 (no code), 1006 (no close frame) and 1015 (TLS) never appear
+      // on the wire: no close code, like the other transports.
+      case 1005:
+        _finish(null, reason, null);
+      case 1006 || 1015:
+        _finish(
+          null,
+          '',
+          _open
+              ? const WebSocketConnectionException(
+                  'Connection lost',
+                  failure: WebSocketConnectionFailure.lost,
+                )
+              : const WebSocketConnectionException(
+                  'Could not connect (the browser hides the reason)',
+                ),
+        );
+      // Chrome passes invalid codes (999, 1004, 2000...) through; the
+      // other transports fail the connection with 1002 (RFC 6455 §7.4).
+      case _ when !CloseCode.isValidOnWire(code):
+        _finish(
+          CloseCode.protocolError,
+          'Invalid close code',
+          WebSocketClosedException(
+            'Protocol violation by the server: invalid close code $code',
+            code: CloseCode.protocolError,
+            reason: 'Invalid close code',
+            byServer: false,
+          ),
+        );
+      default:
+        _finish(code, reason, null);
+    }
+  }
+
   void _onMessage(web.MessageEvent event) {
+    if (_finished) return;
     final data = event.data;
     if (data.isA<JSString>()) {
-      _listener.onTextString((data as JSString).toDart);
+      final text = (data as JSString).toDart;
+      if (_utf8Length(text, _maxMessageSize) > _maxMessageSize) {
+        return _tooBig();
+      }
+      _listener.onTextString(text);
     } else if (data.isA<JSArrayBuffer>()) {
-      _listener.onBinary((data as JSArrayBuffer).toDart.asUint8List());
+      final buffer = (data as JSArrayBuffer).toDart;
+      if (buffer.lengthInBytes > _maxMessageSize) return _tooBig();
+      _listener.onBinary(buffer.asUint8List());
     }
+  }
+
+  /// The browser has no message limit; enforce it like the other
+  /// transports do (1009, never delivered), after the fact.
+  void _tooBig() {
+    const reason = 'Message too big';
+    try {
+      _socket?.close(CloseCode.messageTooBig, reason);
+    } on Object {
+      // Already closing.
+    }
+    _finish(
+      CloseCode.messageTooBig,
+      reason,
+      const WebSocketClosedException(
+        'Protocol violation by the server: $reason',
+        code: CloseCode.messageTooBig,
+        reason: reason,
+        byServer: false,
+      ),
+    );
   }
 
   @override
@@ -185,4 +240,22 @@ final class _WebConnection implements TransportConnection {
     }
     _listener.onClosed(code, reason, error);
   }
+}
+
+/// UTF-8 length of [text], or any value above [limit] once it is exceeded.
+/// UTF-16 code units never encode to fewer bytes, nor to more than three.
+int _utf8Length(String text, int limit) {
+  if (text.length > limit) return text.length;
+  if (text.length * 3 <= limit) return text.length;
+  var bytes = 0;
+  for (var i = 0; i < text.length && bytes <= limit; i++) {
+    final unit = text.codeUnitAt(i);
+    // A surrogate pair is 4 bytes: 2 + 2.
+    bytes += unit < 0x80
+        ? 1
+        : unit < 0x800 || unit & 0xF800 == 0xD800
+        ? 2
+        : 3;
+  }
+  return bytes;
 }

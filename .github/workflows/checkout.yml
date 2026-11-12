@@ -108,13 +108,25 @@ jobs:
   test-web:
     name: "Tests (Chrome: dart2js, dart2wasm)"
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    env:
+      # The shared server suite runs in the browser too (T-3): a missing
+      # server fails instead of skipping.
+      CI: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 🦀 Rust from rust-toolchain.toml
+        shell: bash
+        run: '"$GITHUB_WORKSPACE/tool/rust_toolchain.sh"'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: server
       - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
         with:
           sdk: stable
       - run: dart pub get
+      - name: 🦀 Build the test server
+        run: cd server && cargo build --release --locked
       - name: 🧪 dart2js
         run: dart test --platform chrome --reporter expanded
       - name: 🧪 dart2wasm

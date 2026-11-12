@@ -8,8 +8,10 @@ import 'dart:typed_data';
 
 import 'package:ws/src/util/sha256.dart';
 
+import 'server_handle.dart';
+
 /// The running `ws_bench_server` and its ports (server/README.md).
-final class TestServer {
+final class TestServer implements ServerHandle {
   TestServer._(this._process, Map<String, Object?> ready)
     : ws = ready['ws']! as int,
       wss = ready['wss']! as int,
@@ -90,6 +92,7 @@ final class TestServer {
     );
   }
 
+  @override
   String url(String path) => 'ws://127.0.0.1:$ws$path';
   String tls(String path, {String host = 'localhost'}) =>
       'wss://$host:$wss$path';
@@ -106,11 +109,11 @@ final class TestServer {
     }
   }
 
-  /// What connection [id] sent, once the server is done with it.
-  Future<Map<String, Object?>> log(String id) async {
+  @override
+  Future<Map<String, Object?>> log(String id, {bool done = true}) async {
     for (var i = 0; i < 200; i++) {
       final entry = await _get('/log?id=$id') as Map<String, Object?>?;
-      if (entry != null && entry['done'] == true) return entry;
+      if (entry != null && (!done || entry['done'] == true)) return entry;
       await Future<void>.delayed(const Duration(milliseconds: 25));
     }
     throw TimeoutException('no finished log entry for $id');
