@@ -1065,7 +1065,7 @@ failures were one `WebSocketConnectionException` with a string.
 - Status: **adopted**.
 
 
-### D43. One tag releases both packages
+### D43. One tag releases the packages
 
 From `docs/review/distribution.md` F6–F8, F14, F15, F19, F20.
 
@@ -1159,3 +1159,81 @@ From `docs/review/distribution.md` F6–F8, F14, F15, F19, F20.
 - Status: **adopted**. The dry-run path is verified in CI. The tag path
   (draft, attestation, OIDC publish) can only be verified by the first
   real tag.
+
+### D44. Suspend and resume; `ws_flutter` ties them to the app lifecycle
+
+From `docs/review/future_risks.md` 2.1, 2.3, 2.5, 3.2, 3.3 and 5.1
+(Top 20 #2).
+
+- **Why.** Android and iOS freeze a backgrounded app; the kernel may kill
+  its sockets, and neither side learns it until a timeout. On return, Dart
+  timers that are overdue fire together. Without help the client notices a
+  dead socket only through the heartbeat (up to 30 s idle + 10 s timeout),
+  then waits for the backoff. Meanwhile, a backgrounded app that keeps
+  reconnecting in Doze only drains the battery.
+- **`suspend({bool disconnect = false})`** (synchronous):
+  - stops the heartbeat and any reconnect wait; no attempt starts until
+    `resume()`, `connect()` or `reconnect()`;
+  - an open connection stays open, so a short trip to another app costs
+    nothing, and Android keeps delivering messages while the process runs;
+  - `disconnect: true` closes it with 1000 "Suspended" (browsers reject
+    1001 from scripts, D38) and fails pending calls;
+  - a connection that ends while suspended is not retried: the state
+    becomes the new `WebSocketState.suspended(cause:)`. Terminal failures
+    (close 1008, 4xx) still end in `disconnected`;
+  - pending `connect()` futures keep waiting; nothing happens before
+    `connect()` or after `close()`.
+- **`resume()`**:
+  - resets the backoff (`attempt` 0);
+  - open connection: one ping, the application ping when configured.
+    **Any** inbound frame answers it, not only the pong (a backlog of
+    messages proves the socket alive), and a draining upload extends the
+    wait, as for the heartbeat (D41). No answer within the heartbeat
+    timeout (10 s with the heartbeat off): dropped and replaced with a
+    zero delay. A connection lost while the check is pending is also
+    replaced at once. Then the heartbeat restarts;
+  - no ping available (browser without an application ping): the
+    connection is trusted;
+  - no connection: connects now; still connecting: waits for that attempt;
+  - completes when the connection is confirmed or open again; concurrent
+    calls share one check;
+  - the same call serves network changes (2.5): a socket bound to the old
+    interface fails the check.
+- **`connect()` and `reconnect()` end the suspension.** An explicit request
+  to be connected wins, for example a push message that wakes the app to
+  sync. `connect()` to the same URL while suspended is `resume()`.
+- **`ws_flutter`** (`flutter/`, published with the same version and tag
+  as `ws`, D43): `WebSocketLifecycle(client, {disconnectInBackground,
+  networkChanges, binding})` on `AppLifecycleListener`:
+  - `paused` → `suspend()`. Only Android and iOS report `paused`; a
+    minimized desktop window or a background tab is never suspended;
+  - `resumed` after `hidden` or `paused` → `resume()`. `inactive` alone
+    (a dialog, the notification shade) does nothing;
+  - each `networkChanges` event in the foreground → `resume()`. It is a
+    `Stream<Object?>`, so the package has no plugin dependency;
+    `connectivity_plus`' `onConnectivityChanged` fits. Events in the
+    background are ignored: they would end the suspension.
+  - CI tests it on Flutter 3.38.0 (Dart 3.10.0, the lowest bound) and
+    3.47.9. `tool/flutter_sdk.sh` downloads the official archive and
+    checks its SHA-256 against Flutter's release manifest.
+- **Measured** on loopback, 20 runs each, heartbeat timeout 600 ms
+  (`suspend()` then `resume()`):
+
+  | Transport | live peer (`/echo`) | silent peer (`/silent`) |
+  |---|---|---|
+  | pure Dart | median 0.14 ms, max 1.8 ms | median 606 ms, max 609 ms |
+  | Rust | median 0.12 ms, max 0.6 ms | median 605 ms, max 607 ms |
+
+  A dead socket is replaced about 6 ms after the timeout (new TCP and
+  handshake included), instead of interval + timeout + backoff.
+- Tests: 20 in `test/client/lifecycle_test.dart` (fake transport and
+  fake time), 3 on real sockets in the shared server suite (pure Dart and
+  Rust), 6 in `flutter/test` (lifecycle transitions, network events,
+  a real client over the fake transport).
+- Not done: monotonic clocks stop during device sleep (2.2), so
+  `stableAfter` and RPC deadlines stretch; the lifecycle event, not clock
+  arithmetic, drives the decision. A field test on devices (T-resume:
+  30 s, 5 min, 2 h in the background on iOS and Android) needs hardware.
+  Background keep-alive is impossible on both platforms (2.3); the README
+  says so and points to push messages.
+- Status: **adopted**.

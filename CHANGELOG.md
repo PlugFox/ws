@@ -17,6 +17,12 @@
   `hostname`, `expired`, `notYetValid`, `revoked`, `handshake`) and
   `.proxyStatus`. Rejected certificates are retried at the maximum
   reconnect delay; a proxy 407 stops reconnecting.
+- `suspend()` and `resume()` for the app lifecycle: no heartbeat and no
+  reconnects while suspended (an open connection stays open, or is closed
+  with `suspend(disconnect: true)`); `resume()` checks the connection with
+  one ping and replaces a dead one at once, without the backoff. Also for
+  network changes. New state `WebSocketState.suspended`. The `ws_flutter`
+  package calls them from the Flutter app lifecycle.
 - `package:ws/testing.dart`: in-memory `FakeWebSocketServer` for tests.
 - `package:ws/native.dart`: the Rust transport loaded from a file
   (`WsNativeLibrary.open(path).install()`), and `dart run ws:install` to

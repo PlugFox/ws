@@ -37,6 +37,8 @@ void main() {
       );
       write('CHANGELOG.md', '## $version\n\n- x\n\n## 1.0.0\n');
       write('native/CHANGELOG.md', '## ${nativeChangelog ?? version}\n');
+      write('flutter/pubspec.yaml', 'name: ws_flutter\nversion: $version\n');
+      write('flutter/CHANGELOG.md', '## $version\n');
     }
 
     test('this repository matches its own version', () {
@@ -54,7 +56,7 @@ void main() {
 
     test('names every mismatch', () {
       repo('2.1.0', nativeChangelog: '2.0.9');
-      expect(releaseErrors('2.1.1', tmp.path), hasLength(5));
+      expect(releaseErrors('2.1.1', tmp.path), hasLength(7));
       expect(releaseErrors('2.1.0', tmp.path), [
         'native/CHANGELOG.md: the latest entry is 2.0.9',
       ]);
@@ -66,7 +68,7 @@ void main() {
     });
 
     test('reports missing files', () {
-      expect(releaseErrors('2.1.0', tmp.path), hasLength(5));
+      expect(releaseErrors('2.1.0', tmp.path), hasLength(7));
     });
   });
 
@@ -161,4 +163,35 @@ void main() {
       Directory('build/stage_test').deleteSync(recursive: true);
     });
   });
+
+  group(
+    'stage_flutter.sh',
+    skip: Platform.isWindows ? 'bash script' : null,
+    () {
+      test('stages tracked files, ws from pub.dev', () async {
+        final out = '${tmp.path}/out';
+        final result = await Process.run('tool/stage_flutter.sh', [
+          out,
+          '2.1.0-dev.3',
+        ]);
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        final pubspec = File('$out/pubspec.yaml').readAsStringSync();
+        expect(pubspec, contains('  ws: ^2.1.0-dev.3\n'));
+        expect(pubspec, isNot(contains('publish_to')));
+        expect(pubspec, isNot(contains('path:')));
+        expect(File('$out/lib/src/lifecycle.dart').existsSync(), isTrue);
+        expect(File('$out/LICENSE').existsSync(), isTrue);
+        expect(Directory('$out/.dart_tool').existsSync(), isFalse);
+        expect(File('$out/pubspec.lock').existsSync(), isFalse);
+      });
+
+      test('refuses a directory inside the repository', () async {
+        final result = await Process.run('tool/stage_flutter.sh', [
+          'build/stage_test',
+        ]);
+        expect(result.exitCode, 2);
+        Directory('build/stage_test').deleteSync(recursive: true);
+      });
+    },
+  );
 }

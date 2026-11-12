@@ -73,3 +73,5 @@ target/
 
 # Separate package `ws_native`, published from native/.
 /native/
+# Separate package `ws_flutter`, published from flutter/.
+/flutter/

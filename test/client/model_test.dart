@@ -59,6 +59,14 @@ void main() {
         'WebSocketState.disconnecting()',
       );
 
+      const suspended = WebSocketState.suspended();
+      expect(suspended.isOpen, isFalse);
+      expect(suspended.toString(), 'WebSocketState.suspended()');
+      expect(
+        const WebSocketState.suspended(cause: cause).toString(),
+        'WebSocketState.suspended(WebSocketConnectionException: refused)',
+      );
+
       const closed = WebSocketState.closed();
       expect(closed.isClosed, isTrue);
       expect(closed.isOpen, isFalse);
@@ -72,6 +80,7 @@ void main() {
         WebSocketState$Open() => 'open',
         WebSocketState$Reconnecting() => 'reconnecting',
         WebSocketState$Disconnecting() => 'disconnecting',
+        WebSocketState$Suspended() => 'suspended',
         WebSocketState$Closed() => 'closed',
       };
       expect(name(const WebSocketState.closed()), 'closed');

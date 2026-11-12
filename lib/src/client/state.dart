@@ -12,8 +12,12 @@ import 'package:ws/src/client/exceptions.dart';
 ///      │                                                             │
 ///      └──────────────────────── disconnecting ◄──── disconnect() ───┘
 ///
+/// suspend() while reconnecting, or a connection lost while suspended
+///   ──► suspended ──► connecting on resume(), connect() or reconnect()
 /// close() from any state ──► closed (terminal)
 /// ```
+///
+/// An open connection stays [WebSocketState.open] through `suspend()`.
 @immutable
 sealed class WebSocketState {
   const WebSocketState();
@@ -48,6 +52,12 @@ sealed class WebSocketState {
   /// The closing handshake is in progress after `disconnect()`.
   const factory WebSocketState.disconnecting({int? code, String? reason}) =
       WebSocketState$Disconnecting;
+
+  /// `suspend()` was called and there is no connection: no attempt starts
+  /// until `resume()`. [cause] is why the last connection ended, if it was
+  /// not `suspend(disconnect: true)`.
+  const factory WebSocketState.suspended({WebSocketException? cause}) =
+      WebSocketState$Suspended;
 
   /// `close()` was called. Terminal: the client cannot be used again.
   const factory WebSocketState.closed() = WebSocketState$Closed;
@@ -153,6 +163,19 @@ final class WebSocketState$Disconnecting extends WebSocketState {
 
   @override
   String toString() => 'WebSocketState.disconnecting(${code ?? ''})';
+}
+
+/// See [WebSocketState.suspended].
+final class WebSocketState$Suspended extends WebSocketState {
+  /// See [WebSocketState.suspended].
+  const WebSocketState$Suspended({this.cause});
+
+  /// Why the last connection ended while suspended, if it did on its own.
+  final WebSocketException? cause;
+
+  @override
+  String toString() =>
+      'WebSocketState.suspended(${cause == null ? '' : '$cause'})';
 }
 
 /// See [WebSocketState.closed].

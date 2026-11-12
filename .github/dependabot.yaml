@@ -3,7 +3,7 @@
 version: 2
 updates:
   - package-ecosystem: "pub"
-    directories: ["/", "/native"]
+    directories: ["/", "/native", "/flutter"]
     schedule:
       interval: "monthly"
       timezone: "UTC"

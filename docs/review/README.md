@@ -37,8 +37,8 @@ file; finding ids below refer to them.
    F7, F8, F14, F15, F19, F20, F29; future_risks Top 20 #7).
 2. ~~**Liveness by default**~~ done, DECISIONS.md D41 (R3, R4, 6.7,
    10.1–10.3).
-3. **Lifecycle API** (Top 20 #2): suspend/resume in the core, a Flutter
-   companion with the lifecycle observer and a path monitor.
+3. ~~**Lifecycle API**~~ done, DECISIONS.md D44 (future_risks 2.1,
+   2.3, 2.5, 3.2, 3.3, 5.1; Top 20 #2). Field test on devices open.
 4. ~~**Error hierarchy before the API freeze**~~ done, DECISIONS.md D42
    (typed DNS/TCP/TLS/proxy reasons, frozen sealed set, names kept).
 5. **Android trust model** (R2, Top 20 #5): user CAs option, SPKI pins.

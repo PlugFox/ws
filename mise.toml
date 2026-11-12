@@ -18,10 +18,11 @@ jobs = 4
 # --- dependencies ------------------------------------------------------------
 
 [tasks.deps]
-description = "Fetch Dart packages of ws, ws_native and the benchmarks"
+description = "Fetch Dart packages of ws, ws_native, ws_flutter and the benchmarks"
 run = [
   "dart pub get",
   "dart pub get --directory=native",
+  "cd flutter && flutter pub get",
   "dart pub get --directory=benchmark",
 ]
 
@@ -30,6 +31,7 @@ description = "Show outdated Dart dependencies"
 run = [
   "dart pub outdated",
   "dart pub outdated --directory=native",
+  "cd flutter && flutter pub outdated",
 ]
 
 [tasks."deps:upgrade"]
@@ -37,6 +39,7 @@ description = "Upgrade Dart dependencies within constraints and update Cargo.loc
 run = [
   "dart pub upgrade",
   "dart pub upgrade --directory=native",
+  "cd flutter && flutter pub upgrade",
   "dart pub upgrade --directory=benchmark",
   "cd native/rust && cargo update",
   "cd server && cargo update",
@@ -47,7 +50,7 @@ run = [
 [tasks.fmt]
 description = "Format Dart and Rust code"
 run = [
-  "dart format bin lib test tool native/lib native/test native/hook",
+  "dart format bin lib test tool native/lib native/test native/hook flutter/lib flutter/test",
   "cd native/rust && cargo fmt",
   "cd server && cargo fmt",
 ]
@@ -55,7 +58,7 @@ run = [
 [tasks."fmt:check"]
 description = "Fail if anything is not formatted"
 run = [
-  "dart format --set-exit-if-changed -o none bin lib test tool native/lib native/test native/hook",
+  "dart format --set-exit-if-changed -o none bin lib test tool native/lib native/test native/hook flutter/lib flutter/test",
   "cd native/rust && cargo fmt --check",
   "cd server && cargo fmt --check",
 ]
@@ -66,6 +69,7 @@ depends = ["deps"]
 run = [
   "dart analyze --fatal-infos --fatal-warnings",
   "cd native && dart analyze --fatal-infos --fatal-warnings",
+  "cd flutter && flutter analyze --fatal-infos --fatal-warnings",
   "cd benchmark && dart analyze --fatal-warnings",
   "cd native/rust && cargo clippy --release --all-targets -- -D warnings",
   "cd server && cargo clippy --release --all-targets -- -D warnings",
@@ -88,8 +92,13 @@ depends = ["fmt:check", "analyze", "check:pubignore", "check:deny", "test"]
 # --- tests -------------------------------------------------------------------
 
 [tasks.test]
-description = "All tests: VM, Chrome (dart2js, dart2wasm), native (hook and path), Rust"
-depends = ["test:vm", "test:web", "test:native", "test:rust"]
+description = "All tests: VM, Chrome (dart2js, dart2wasm), native (hook and path), Flutter, Rust"
+depends = ["test:vm", "test:web", "test:native", "test:flutter", "test:rust"]
+
+[tasks."test:flutter"]
+description = "ws_flutter tests (app lifecycle)"
+dir = "flutter"
+run = "flutter test"
 
 [tasks."test:vm"]
 description = "Dart VM tests of ws"

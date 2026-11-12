@@ -1,0 +1,28 @@
+name: ws_flutter
+description: >
+  Flutter app lifecycle for the ws WebSocket client: suspend in the
+  background, check the connection and reconnect at once on resume and when
+  the network changes.
+version: 2.0.0-dev.1
+repository: https://github.com/plugfox/ws
+publish_to: none # until the first release
+
+topics:
+  - websocket
+  - lifecycle
+  - reconnect
+
+environment:
+  sdk: ^3.10.0
+  flutter: ">=3.38.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ws:
+    path: ..
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  lints: ^6.0.0

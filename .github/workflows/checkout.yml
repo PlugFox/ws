@@ -120,6 +120,32 @@ jobs:
       - name: 🧪 dart2wasm
         run: dart test --platform chrome --compiler dart2wasm --reporter expanded
 
+  flutter:
+    name: "ws_flutter (Flutter ${{ matrix.flutter }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The lowest supported (environment.flutter, Dart 3.10.0) and the
+        # one matching mise.toml's Dart 3.13.7.
+        flutter: [3.38.0, 3.47.9]
+    defaults:
+      run:
+        working-directory: flutter
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 🐦 Flutter (archive checked against the release manifest)
+        run: '"$GITHUB_WORKSPACE/tool/flutter_sdk.sh" "${{ matrix.flutter }}" "$RUNNER_TEMP"'
+      - run: flutter pub get
+      - name: 🔎 Format and analyzer
+        if: matrix.flutter == '3.47.9'
+        run: |
+          dart format --set-exit-if-changed -o none lib test
+          flutter analyze --fatal-infos --fatal-warnings
+      - name: 🧪 Tests
+        run: flutter test --reporter expanded
+
   server:
     name: "Test server (fmt, clippy, tests)"
     runs-on: ubuntu-latest

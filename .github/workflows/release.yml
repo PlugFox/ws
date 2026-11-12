@@ -3,15 +3,16 @@ name: Release
 # One version tag builds, verifies and publishes both packages
 # (DECISIONS.md D43, docs/DEVELOPMENT.md "Releasing"):
 #
-#   check      tag = versions in both pubspecs, native_release.dart and
-#              both CHANGELOG headings
+#   check      tag = versions in the three pubspecs, native_release.dart
+#              and the three CHANGELOG headings
 #   build      12 targets through prebuilt.yml (verified, no cache)
 #   notices    THIRD_PARTY_LICENSES of the Rust crates (cargo about)
 #   package    checksums verified, hashes generated into package:ws,
-#              ws_native staged, both publish dry runs, release assets
+#              ws_native and ws_flutter staged, publish dry runs, assets
 #   release    draft GitHub release with the assets, build provenance
-#   publish    (environment `pub.dev`, needs approval) undraft, publish ws
-#   publish-native   wait for pub.dev to serve ws, publish ws_native
+#   publish    (environment `pub.dev`, needs approval) undraft, publish ws,
+#              wait until pub.dev serves it
+#   publish-native, publish-flutter   (same environment) the other two
 #
 # A push to `rewrite` that touches the release tooling runs everything up
 # to and including the dry runs; nothing is released or published.
@@ -26,6 +27,8 @@ on:
       - "tool/native_release.dart"
       - "tool/native_checksums.dart"
       - "tool/stage_native.sh"
+      - "tool/stage_flutter.sh"
+      - "tool/flutter_sdk.sh"
       - "tool/third_party_licenses.sh"
       - "native/rust/about.*"
 
@@ -38,6 +41,7 @@ permissions:
 
 env:
   DART_VERSION: 3.13.7 # mise.toml
+  FLUTTER_VERSION: 3.47.9 # ships Dart 3.13.7
 
 jobs:
   check:
@@ -118,6 +122,10 @@ jobs:
           tool/stage_native.sh "$RUNNER_TEMP/ws_native" "$VERSION" \
             --release notices/THIRD_PARTY_LICENSES
           echo "crate notices in LICENSE: $(grep -c '^- ' "$RUNNER_TEMP/ws_native/LICENSE")"
+      - name: 🐦 Flutter, stage ws_flutter
+        run: |
+          tool/flutter_sdk.sh "$FLUTTER_VERSION" "$RUNNER_TEMP/sdk"
+          tool/stage_flutter.sh "$RUNNER_TEMP/ws_flutter" "$VERSION"
       - name: 🧪 Publish dry runs
         run: |
           # The working tree must be clean for pub: commit the generated
@@ -131,6 +139,9 @@ jobs:
           printf 'dependency_overrides:\n  ws:\n    path: %s\n' "$GITHUB_WORKSPACE" \
             > "$RUNNER_TEMP/ws_native_dry/pubspec_overrides.yaml"
           (cd "$RUNNER_TEMP/ws_native_dry" && dart pub get && dart pub publish --dry-run)
+          cp -R "$RUNNER_TEMP/ws_flutter" "$RUNNER_TEMP/ws_flutter_dry"
+          cp "$RUNNER_TEMP/ws_native_dry/pubspec_overrides.yaml" "$RUNNER_TEMP/ws_flutter_dry/"
+          (cd "$RUNNER_TEMP/ws_flutter_dry" && flutter pub get && flutter test && flutter pub publish --dry-run)
       - name: 🗂️ Release assets
         run: |
           mkdir assets
@@ -158,6 +169,11 @@ jobs:
           path: ${{ runner.temp }}/ws_native/
           if-no-files-found: error
           include-hidden-files: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ws_flutter
+          path: ${{ runner.temp }}/ws_flutter/
+          if-no-files-found: error
 
   release:
     name: "Draft GitHub release"
@@ -191,7 +207,7 @@ jobs:
     name: "Publish ws"
     needs: [check, release]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     # Required reviewers on this environment gate everything public: the
     # draft can be inspected before approving (docs/DEVELOPMENT.md).
     environment: pub.dev
@@ -222,25 +238,7 @@ jobs:
       - name: Publish the GitHub release
         run: gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false
       - run: dart pub publish --force
-
-  publish-native:
-    name: "Publish ws_native"
-    needs: [check, publish]
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    environment: pub.dev
-    permissions:
-      id-token: write # pub.dev OIDC
-    env:
-      VERSION: ${{ needs.check.outputs.version }}
-    steps:
-      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
-        with:
-          sdk: ${{ env.DART_VERSION }}
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: ws_native
-          path: ws_native
+      # ws_native and ws_flutter resolve ws from pub.dev.
       - name: Wait until pub.dev serves ws ${{ env.VERSION }}
         run: |
           for _ in $(seq 1 60); do
@@ -249,7 +247,50 @@ jobs:
           done
           echo "pub.dev does not serve ws $VERSION after 10 minutes" >&2
           exit 1
+
+  publish-native:
+    name: "Publish ws_native"
+    needs: [check, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pub.dev
+    permissions:
+      id-token: write # pub.dev OIDC
+    steps:
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ws_native
+          path: ws_native
       - working-directory: ws_native
         run: |
           dart pub get
           dart pub publish --force
+
+  publish-flutter:
+    name: "Publish ws_flutter"
+    needs: [check, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pub.dev
+    permissions:
+      contents: read
+      id-token: write # pub.dev OIDC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Requests the OIDC token and registers it with pub; Flutter's pub
+      # reads the same token store.
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: tool/flutter_sdk.sh "$FLUTTER_VERSION" "$RUNNER_TEMP/sdk"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ws_flutter
+          path: ${{ runner.temp }}/ws_flutter
+      - working-directory: ${{ runner.temp }}/ws_flutter
+        run: |
+          flutter pub get
+          flutter pub publish --force

@@ -104,6 +104,29 @@ abstract interface class WebSocketClient<T>
   /// earlier [connect].
   Future<void> reconnect();
 
+  /// Pauses the client while the app is in the background (the app was
+  /// paused, the device is going to sleep).
+  ///
+  /// The heartbeat and any reconnect wait stop, and no attempt starts until
+  /// [resume], [connect] or [reconnect]. An open connection stays open, so
+  /// a short trip to another app costs nothing; with [disconnect] it is
+  /// closed (code 1000) and the state becomes `suspended`. A connection that
+  /// ends while suspended is not retried; the state becomes `suspended`.
+  /// Pending [connect] futures keep waiting. Does nothing once closed.
+  ///
+  /// The OS may freeze the app and kill its sockets without telling either
+  /// side, so pair it with [resume] (`ws_flutter` does both).
+  void suspend({bool disconnect = false});
+
+  /// Ends [suspend] and checks the connection now, without the backoff.
+  ///
+  /// An open connection gets one ping (application-level when configured);
+  /// if nothing arrives within the heartbeat timeout it is dropped and the
+  /// client reconnects at once. Without a connection, connects at once.
+  /// Also useful when the network changes. Completes when the connection is
+  /// confirmed or open again; immediately when not connected or closed.
+  Future<void> resume();
+
   /// Closes the connection and stops reconnecting. The client can
   /// [connect] again later. Waits for the closing handshake at most
   /// `disconnectTimeout`.
@@ -133,6 +156,10 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
   Uri? _url;
   bool _wanted = false;
   bool _closed = false;
+
+  /// `suspend()` was called and neither `resume()`, `connect()` nor
+  /// `reconnect()` since.
+  bool _suspended = false;
   int _failures = 0;
   _Session<T>? _session;
   Timer? _reconnectTimer;
@@ -291,6 +318,8 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
       return Future<void>.error(StateError('The client is closed'));
     }
     final uri = _parseUrl(url);
+    if (_suspended && _wanted && _url == uri) return resume();
+    _suspended = false;
     if (_wanted &&
         _url == uri &&
         (_session != null || _reconnectTimer != null)) {
@@ -316,12 +345,55 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
         const WebSocketNotConnectedException('connect() was not called'),
       );
     }
+    _suspended = false;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     // 1000: browsers reject 1001 from scripts.
     _dropSession(1000, 'Reconnecting');
     _start();
     return _waitForOpen();
+  }
+
+  @override
+  void suspend({bool disconnect = false}) {
+    if (_closed) return;
+    _suspended = true;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    if (!_wanted) return;
+    final session = _session;
+    if (session != null && !disconnect) {
+      session.stopHeartbeat();
+      return;
+    }
+    // 1000: browsers reject 1001 from scripts.
+    _dropSession(1000, 'Suspended');
+    _setState(const WebSocketState.suspended());
+  }
+
+  @override
+  Future<void> resume() {
+    _suspended = false;
+    if (_closed || !_wanted || _url == null) return Future<void>.value();
+    _failures = 0;
+    final session = _session;
+    if (session == null) {
+      _reconnectTimer?.cancel();
+      _reconnectTimer = null;
+      _start();
+      return _waitForOpen();
+    }
+    // Still connecting: the attempt has its own timeout.
+    if (!session.transportOpen || session.openedAt == null) {
+      return _waitForOpen();
+    }
+    // Completes on the next open if the check fails (D44).
+    final waiter = Completer<void>();
+    _connectWaiters.add(waiter);
+    session.check().then((alive) {
+      if (alive && _connectWaiters.remove(waiter)) waiter.complete();
+    });
+    return waiter.future..ignore();
   }
 
   /// Detaches the current session; its events are ignored from now on.
@@ -451,11 +523,11 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     session
       ..connectTimer?.cancel()
       ..openedAt = clock.now()
-      ..stableTimer = Timer(_options.reconnect.stableAfter, () => _failures = 0)
-      ..startHeartbeat(
-        _options.heartbeat,
-        supportsPing: _transport.supportsPing,
+      ..stableTimer = Timer(
+        _options.reconnect.stableAfter,
+        () => _failures = 0,
       );
+    if (!_suspended) session.startHeartbeat();
     final waiters = _takeWaiters();
     _setState(WebSocketState.open(url: _url!, protocol: protocol));
     _complete(waiters);
@@ -506,9 +578,20 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
       _complete(waiters, cause);
       return;
     }
+    if (_suspended) {
+      _reportError(cause, StackTrace.current);
+      // onError may have called resume(), connect() or disconnect().
+      if (_suspended && _wanted && _session == null) {
+        _setState(WebSocketState.suspended(cause: cause));
+      }
+      return;
+    }
     _failures = attempt;
     _reconnectAttempts++;
-    final delay = _reconnectDelay(cause, attempt);
+    // A failed check after resume() reconnects at once (D44).
+    final delay = session.reconnectNow
+        ? Duration.zero
+        : _reconnectDelay(cause, attempt);
     final timer = _reconnectTimer = Timer(delay, () {
       _reconnectTimer = null;
       if (_wanted && !_closed && _session == null) _start();
@@ -963,6 +1046,10 @@ final class _Session<T> implements TransportListener {
   /// The failure cannot be fixed by retrying (invalid request).
   bool terminal = false;
 
+  /// The check after `resume()` is pending or failed: reconnect without a
+  /// delay.
+  bool reconnectNow = false;
+
   /// The URL the request provider returned for this attempt.
   Uri? effectiveUrl;
   WebSocketException? failure;
@@ -994,6 +1081,8 @@ final class _Session<T> implements TransportListener {
     _sinceInbound
       ..reset()
       ..start();
+    // Anything from the peer answers the check after resume().
+    if (_check != null) _checked(alive: true);
   }
 
   /// Drops the connection; `onClosed` reports [cause].
@@ -1027,6 +1116,10 @@ final class _Session<T> implements TransportListener {
       p.completeError(error);
     }
     _pings.clear();
+    if (_check case final check?) {
+      _check = null;
+      check.complete(false);
+    }
     // Nobody waits forever on a discarded session (disconnect() then
     // connect(), URL switches).
     if (!closed.isCompleted) closed.complete();
@@ -1036,13 +1129,16 @@ final class _Session<T> implements TransportListener {
 
   WebSocketHeartbeat<T>? _heartbeat;
 
-  void startHeartbeat(
-    WebSocketHeartbeat<T>? heartbeat, {
-    required bool supportsPing,
-  }) {
+  /// Whether a ping can be sent: an application ping or protocol pings.
+  bool get _canPing =>
+      _client._options.heartbeat?.ping != null ||
+      _client._transport.supportsPing;
+
+  void startHeartbeat() {
+    final heartbeat = _client._options.heartbeat;
     if (heartbeat == null) return;
     // Without pings the watchdog would kill healthy idle connections.
-    if (heartbeat.ping == null && !supportsPing) return;
+    if (!_canPing) return;
     _heartbeat = heartbeat;
     touch();
     _scheduleHeartbeat(heartbeat.interval);
@@ -1052,6 +1148,67 @@ final class _Session<T> implements TransportListener {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _heartbeat = null;
+    if (_check case final check?) {
+      _check = null;
+      check.complete(false);
+    }
+  }
+
+  /// The pending check after `resume()`: true when the peer answered.
+  Completer<bool>? _check;
+
+  /// One probe after `resume()`: the peer must send something (the pong)
+  /// within the heartbeat timeout, or the connection is dropped with
+  /// [reconnectNow]. The heartbeat restarts when it answers. Without a
+  /// way to ping, the connection is trusted.
+  Future<bool> check() {
+    if (_check case final pending?) return pending.future;
+    stopHeartbeat();
+    if (!_canPing) {
+      startHeartbeat();
+      return Future<bool>.value(true);
+    }
+    final check = _check = Completer<bool>();
+    // Lost during the check (a dead socket often fails the ping write or
+    // gets a reset): reconnect at once too.
+    reconnectNow = true;
+    _checkProbe(_client._options.heartbeat?.timeout ?? _checkTimeout);
+    return check.future;
+  }
+
+  /// The check timeout when the heartbeat is off.
+  static const Duration _checkTimeout = Duration(seconds: 10);
+
+  void _checkProbe(Duration timeout) {
+    final sending = _sendProgress();
+    if (_sendPing() != null) return _checked(alive: false);
+    _heartbeatTimer = Timer(timeout, () {
+      if (!_current || _check == null) return;
+      // An upload is still draining: wait for the pong behind it.
+      final now = _sendProgress();
+      if (sending != null && now != null) {
+        final (pushed, queued) = now;
+        if (queued < sending.$2 + (pushed - sending.$1)) {
+          return _checkProbe(timeout);
+        }
+      }
+      _checked(alive: false);
+    });
+  }
+
+  void _checked({required bool alive}) {
+    final check = _check;
+    if (check == null) return;
+    _check = null;
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    if (alive) {
+      reconnectNow = false;
+      startHeartbeat();
+    } else {
+      fail(const WebSocketTimeoutException('No answer after resume'));
+    }
+    check.complete(alive);
   }
 
   void _scheduleHeartbeat(Duration wait) {

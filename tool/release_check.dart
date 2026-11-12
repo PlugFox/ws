@@ -1,7 +1,7 @@
 // Checks that a release tag matches the sources before anything is built
-// (distribution.md F7): the version of ws and of ws_native, `wsVersion` in
-// lib/src/native/native_release.dart, and the first heading of both
-// CHANGELOG.md files must all equal the tag.
+// (distribution.md F7): the version of ws, ws_native and ws_flutter,
+// `wsVersion` in lib/src/native/native_release.dart, and the first heading
+// of the three CHANGELOG.md files must all equal the tag.
 //
 //   dart run tool/release_check.dart <tag> [repository root]
 import 'dart:io';
@@ -48,6 +48,7 @@ List<String> releaseErrors(String tag, String root) {
   final heading = RegExp(r'^## (\S+)', multiLine: true);
   expect('pubspec.yaml', version, 'version');
   expect('native/pubspec.yaml', version, 'version');
+  expect('flutter/pubspec.yaml', version, 'version');
   expect(
     'lib/src/native/native_release.dart',
     RegExp("^const String wsVersion = '([^']*)';", multiLine: true),
@@ -55,5 +56,6 @@ List<String> releaseErrors(String tag, String root) {
   );
   expect('CHANGELOG.md', heading, 'the latest entry');
   expect('native/CHANGELOG.md', heading, 'the latest entry');
+  expect('flutter/CHANGELOG.md', heading, 'the latest entry');
   return errors;
 }

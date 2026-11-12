@@ -17,6 +17,7 @@ analyzer:
     - "benchmark/**"
     - "example/**"
     - "native/**"
+    - "flutter/**"
     - "server/**"
 
   # Enable the following options to enable strong mode.

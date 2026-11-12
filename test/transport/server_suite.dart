@@ -723,6 +723,70 @@ void serverConformance(WebSocketTransport Function() create) {
         await c.close();
       });
     });
+
+    group('suspend and resume (D44)', () {
+      WebSocketClient<String> lifecycle() => WebSocketClient.text(
+        options: const WebSocketOptions(
+          disconnectTimeout: Duration(milliseconds: 500),
+          heartbeat: WebSocketHeartbeat(
+            interval: Duration(milliseconds: 200),
+            timeout: Duration(milliseconds: 600),
+          ),
+        ),
+      );
+
+      test('a live connection survives: one ping, same socket', () async {
+        final c = lifecycle();
+        await c.connect(server.url('/echo'));
+        c.suspend();
+        // Longer than interval + timeout: a running heartbeat would ping.
+        await Future<void>.delayed(const Duration(seconds: 1));
+        final watch = Stopwatch()..start();
+        await c.resume().timeout(const Duration(seconds: 5));
+        expect(watch.elapsed, lessThan(const Duration(milliseconds: 600)));
+        expect(c.metrics.connects, 1);
+        await roundTrip(c, 'after resume');
+        await c.close();
+      });
+
+      test('a silent peer is replaced at once after the timeout', () async {
+        final c = lifecycle();
+        final states = <WebSocketState>[];
+        c.states.listen(states.add);
+        // /silent never answers pings: the stand-in for a socket the OS
+        // killed while the app was frozen.
+        await c.connect(server.url('/silent'));
+        c.suspend();
+        await Future<void>.delayed(const Duration(seconds: 1));
+        expect(c.state.isOpen, isTrue);
+        final watch = Stopwatch()..start();
+        await c.resume().timeout(const Duration(seconds: 5));
+        expect(
+          watch.elapsed,
+          greaterThanOrEqualTo(const Duration(milliseconds: 600)),
+        );
+        expect(watch.elapsed, lessThan(const Duration(milliseconds: 1500)));
+        expect(c.metrics.connects, 2);
+        expect(
+          states.whereType<WebSocketState$Reconnecting>().single.delay,
+          Duration.zero,
+        );
+        await c.close();
+      });
+
+      test('disconnect: true closes; resume() connects again', () async {
+        final c = lifecycle();
+        await c.connect(server.url('/echo'));
+        c.suspend(disconnect: true);
+        expect(c.state, isA<WebSocketState$Suspended>());
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        expect(c.metrics.connects, 1);
+        await c.resume().timeout(const Duration(seconds: 5));
+        await roundTrip(c);
+        expect(c.metrics.connects, 2);
+        await c.close();
+      });
+    });
   });
 }
 

@@ -195,8 +195,10 @@ Key properties:
 - [x] Network changes (Wi-Fi ↔ cellular): detect dead connections quickly
   with heartbeats and TCP keepalive, then reconnect. Both on by default
   (DECISIONS.md D41).
-- [ ] App lifecycle: iOS suspends sockets in the background. Reconnect on
+- [x] App lifecycle: iOS suspends sockets in the background. Reconnect on
   resume. Do not drain the battery with heartbeats in the background.
+  `suspend()`/`resume()` and `ws_flutter` (DECISIONS.md D44). Still open:
+  T-resume on real devices (30 s, 5 min, 2 h in the background).
 - [ ] App Store review: plain BSD sockets are fine. Document that ATS does
   not apply, and what users must state in privacy manifests (if anything).
 

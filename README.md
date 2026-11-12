@@ -55,10 +55,11 @@ Three flavours, one core: `WebSocketClient.json()` (`Map<String, Object?>`),
 | `push(message)` | Sends. Fails fast when not connected — nothing is replayed after a reconnect. Waits when the send queue is above `sendHighWaterMark`. |
 | `rpc(request)` | Sends and waits for the matching reply (`WebSocketOptions.rpc`). |
 | `ping()` | Round trip check (protocol ping; application-level ping on the web). |
-| `reconnect()` | Reconnect now, e.g. when the app returns to the foreground. |
+| `reconnect()` | Drops the connection and connects again now. |
 | `disconnect()` | Closes; `connect` can be called again. |
 | `close()` | Closes for good and releases everything. |
-| `state` / `states` | `disconnected`, `connecting`, `open`, `reconnecting`, `disconnecting`, `closed`. |
+| `suspend()` / `resume()` | Pause for the app background; on return check the connection and reconnect at once. |
+| `state` / `states` | `disconnected`, `connecting`, `open`, `reconnecting`, `disconnecting`, `suspended`, `closed`. |
 | `messages` | Incoming messages (or `WebSocketOptions.onMessage` for the lowest overhead). |
 | `metrics` | Counters, last error, round trip, transport in use. |
 
@@ -70,6 +71,23 @@ client stops by itself when retrying cannot help: a handshake rejected with
 with `WebSocketReconnect(shouldReconnect: ...)`. Refresh tokens per attempt
 with `WebSocketOptions.request`, and authenticate before the client reports
 `open` with `onOpen`.
+
+### Background and network changes
+
+Android and iOS freeze apps in the background and kill their sockets
+without telling either side. Call `client.suspend()` when the app goes to
+the background: the heartbeat and reconnects stop, and an open connection
+stays open (`suspend(disconnect: true)` closes it). Call `client.resume()`
+when it returns, and when the network changes: one ping checks the
+connection, and a dead one is replaced at once, without the backoff. In
+Flutter, [`ws_flutter`](https://pub.dev/packages/ws_flutter) does both.
+
+No platform lets a socket live in the background for long: iOS gives
+seconds, Android cuts the network in Doze. Wake the app with a push message
+(APNs, FCM), reconnect and fetch what was missed. In browsers, hidden tabs
+keep their connection, but timers are throttled to once a minute: a
+heartbeat may come late, so prefer server pings there (the browser answers
+them itself).
 
 ### Platforms
 
