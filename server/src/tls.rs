@@ -1,7 +1,8 @@
-//! Test PKI generated at startup: a CA and two leaf certificates it signs.
+//! Test PKI generated at startup: a CA and the leaf certificates it signs.
 //!
 //! * `good`: `localhost`, `127.0.0.1`, `::1` (the `wss` port).
 //! * `badhost`: `wrong.invalid` only (the `wss_badhost` port).
+//! * `expired`: like `good`, but valid only in 2020 (the `wss_expired` port).
 //!
 //! Clients trust the CA via `ca_pem` (ready line or `GET /ca.pem`). A
 //! self-signed leaf would not do: webpki rejects an end-entity certificate
@@ -30,6 +31,7 @@ pub struct Pki {
     pub ca_der: Vec<u8>,
     pub good: TlsAcceptor,
     pub badhost: TlsAcceptor,
+    pub expired: TlsAcceptor,
 }
 
 impl Pki {
@@ -51,15 +53,25 @@ impl Pki {
         Ok(Pki {
             ca_pem: ca_cert.pem(),
             ca_der: ca_cert.der().to_vec(),
-            good: leaf(&issuer, names(&["localhost", "127.0.0.1", "::1"]))?,
-            badhost: leaf(&issuer, names(&["wrong.invalid"]))?,
+            good: leaf(&issuer, names(&["localhost", "127.0.0.1", "::1"]), false)?,
+            badhost: leaf(&issuer, names(&["wrong.invalid"]), false)?,
+            expired: leaf(&issuer, names(&["localhost", "127.0.0.1", "::1"]), true)?,
         })
     }
 }
 
 /// Issues a server certificate for `names` and builds an acceptor for it.
-fn leaf(issuer: &Issuer<'_, KeyPair>, names: Vec<String>) -> Result<TlsAcceptor, BoxError> {
+/// `expired`: valid from 2020-01-01 to 2021-01-01 only.
+fn leaf(
+    issuer: &Issuer<'_, KeyPair>,
+    names: Vec<String>,
+    expired: bool,
+) -> Result<TlsAcceptor, BoxError> {
     let mut params = CertificateParams::new(names.clone())?;
+    if expired {
+        params.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2021, 1, 1);
+    }
     params
         .distinguished_name
         .push(DnType::CommonName, names[0].clone());

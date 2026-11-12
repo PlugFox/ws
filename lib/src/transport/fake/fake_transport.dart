@@ -178,8 +178,12 @@ final class FakeWebSocketConnection {
   }
 
   /// The connection is lost without a close frame (code 1006).
-  void drop() =>
-      fail(const WebSocketConnectionException('Connection lost (fake)'));
+  void drop() => fail(
+    const WebSocketConnectionException(
+      'Connection lost (fake)',
+      failure: WebSocketConnectionFailure.lost,
+    ),
+  );
 
   /// Sends a text message to the client.
   void sendText(String text) {

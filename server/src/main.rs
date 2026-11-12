@@ -2,7 +2,8 @@
 //!
 //! Usage:
 //! `ws_bench_server [--host 127.0.0.1] [--port 9090] [--tls-port 9443]
-//!  [--badhost-port 0] [--proxy-port 0] [--proxy-auth-port 0] [--no-ipv6]
+//!  [--badhost-port 0] [--expired-port 0]
+//!  [--proxy-port 0] [--proxy-auth-port 0] [--no-ipv6]
 //!  [--ready-json] [--verbose]`
 //!
 //! With `--ready-json` the server prints exactly one JSON line to stdout
@@ -30,6 +31,7 @@ async fn main() -> Result<(), BoxError> {
         port: port("port", 9090)?,
         tls_port: port("tls-port", 9443)?,
         badhost_port: port("badhost-port", 0)?,
+        expired_port: port("expired-port", 0)?,
         proxy_port: port("proxy-port", 0)?,
         proxy_auth_port: port("proxy-auth-port", 0)?,
         ipv6: !args.contains_key("no-ipv6"),

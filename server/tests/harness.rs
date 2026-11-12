@@ -37,6 +37,7 @@ async fn ready_line_and_exit_on_stdin_eof() {
         "ws",
         "wss",
         "wss_badhost",
+        "wss_expired",
         "ws6",
         "proxy",
         "proxy_auth",
@@ -48,7 +49,14 @@ async fn ready_line_and_exit_on_stdin_eof() {
         assert!(obj.contains_key(k), "missing {k}: {line}");
     }
     let port = |k: &str| ready[k].as_u64().unwrap() as u16;
-    for k in ["ws", "wss", "wss_badhost", "proxy", "proxy_auth"] {
+    for k in [
+        "ws",
+        "wss",
+        "wss_badhost",
+        "wss_expired",
+        "proxy",
+        "proxy_auth",
+    ] {
         assert_ne!(port(k), 0, "{k}");
     }
     assert!(ready["ws6"].is_null() || ready["ws6"].as_u64().is_some());

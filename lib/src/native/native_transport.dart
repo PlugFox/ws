@@ -21,6 +21,7 @@ const int _kindBinary = 1;
 const int _kindTape = 2;
 
 const int _errNone = 0;
+const int _errConnection = 1;
 const int _errHandshake = 2;
 const int _errProtocol = 3;
 const int _errTls = 4;
@@ -175,6 +176,8 @@ final class _NativeConnection implements TransportConnection, Finalizable {
 
   static WebSocketException? _error(List<Object?> e) {
     final kind = e[3]! as int;
+    // DECISIONS.md D42; absent from libraries built before it.
+    final detail = e.length > 7 ? e[7] as int? ?? 0 : 0;
     final message = e[4] as String? ?? 'Connection failed';
     return switch (kind) {
       _errNone => null,
@@ -194,7 +197,31 @@ final class _NativeConnection implements TransportConnection, Finalizable {
         reason: e[2]! as String,
         byServer: false,
       ),
-      _errTls => WebSocketConnectionException('TLS failed: $message'),
+      _errTls => WebSocketConnectionException(
+        'TLS failed: $message',
+        failure: WebSocketConnectionFailure.tls,
+        tls: switch (detail) {
+          1 => WebSocketTlsFailure.untrusted,
+          2 => WebSocketTlsFailure.hostname,
+          3 => WebSocketTlsFailure.expired,
+          4 => WebSocketTlsFailure.notYetValid,
+          5 => WebSocketTlsFailure.revoked,
+          6 => WebSocketTlsFailure.handshake,
+          _ => WebSocketTlsFailure.other,
+        },
+      ),
+      _errConnection => WebSocketConnectionException(
+        message,
+        failure: switch (detail) {
+          1 => WebSocketConnectionFailure.dns,
+          2 => WebSocketConnectionFailure.refused,
+          3 => WebSocketConnectionFailure.unreachable,
+          4 => WebSocketConnectionFailure.proxy,
+          5 => WebSocketConnectionFailure.lost,
+          _ => WebSocketConnectionFailure.other,
+        },
+        proxyStatus: detail == 4 ? e[5] as int? : null,
+      ),
       _ => WebSocketConnectionException(message),
     };
   }

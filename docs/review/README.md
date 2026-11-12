@@ -42,9 +42,8 @@ file; finding ids below refer to them.
    10.1–10.3).
 3. **Lifecycle API** (Top 20 #2): suspend/resume in the core, a Flutter
    companion with the lifecycle observer and a path monitor.
-4. **Error hierarchy before the API freeze** (client "API design notes",
-   R8, Top 20 #3): TLS and proxy errors with reasons, sealed vs `kind`,
-   `$` state names, `WebSocketException` name clash.
+4. ~~**Error hierarchy before the API freeze**~~ done, DECISIONS.md D42
+   (typed DNS/TCP/TLS/proxy reasons, frozen sealed set, names kept).
 5. **Android trust model** (R2, Top 20 #5): user CAs option, SPKI pins.
 6. **Tests** (tests_docs §4): the browser on the shared suites (T-3),
    transport contract checker, reconnect policy on real sockets,

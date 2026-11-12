@@ -27,6 +27,31 @@ pub struct Proxy {
     pub authorization: Option<String>,
 }
 
+/// Why a TCP connection could not be opened (DECISIONS.md D42).
+#[derive(Debug)]
+pub enum ConnectError {
+    /// The host name did not resolve.
+    Dns(io::Error),
+    /// No address accepted the connection (the last attempt's error).
+    Tcp(io::Error),
+    /// The proxy was unreachable or refused the tunnel (`status` when it
+    /// answered with HTTP).
+    Proxy {
+        status: Option<u16>,
+        error: io::Error,
+    },
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dns(e) => write!(f, "host lookup failed: {e}"),
+            Self::Tcp(e) => write!(f, "{e}"),
+            Self::Proxy { error, .. } => write!(f, "proxy: {error}"),
+        }
+    }
+}
+
 /// Opens a TCP connection to `host:port`, directly or through `proxy`.
 /// With `keepalive`, TCP keepalive starts after that much idle time
 /// (see [`keep_alive`]).
@@ -35,12 +60,25 @@ pub async fn connect(
     port: u16,
     proxy: Option<&Proxy>,
     keepalive: Option<Duration>,
-) -> io::Result<TcpStream> {
+) -> Result<TcpStream, ConnectError> {
     let mut tcp = match proxy {
         None => connect_direct(host, port).await?,
         Some(proxy) => {
-            let mut tcp = connect_direct(&proxy.host, proxy.port).await?;
-            tunnel(&mut tcp, host, port, proxy.authorization.as_deref()).await?;
+            let proxy_failed = |error: io::Error| ConnectError::Proxy {
+                status: error
+                    .get_ref()
+                    .and_then(|e| e.downcast_ref::<ProxyRefused>())
+                    .and_then(|r| r.status),
+                error,
+            };
+            let mut tcp = match connect_direct(&proxy.host, proxy.port).await {
+                Ok(tcp) => tcp,
+                Err(ConnectError::Dns(e) | ConnectError::Tcp(e)) => return Err(proxy_failed(e)),
+                Err(e) => return Err(e),
+            };
+            tunnel(&mut tcp, host, port, proxy.authorization.as_deref())
+                .await
+                .map_err(proxy_failed)?;
             tcp
         }
     };
@@ -77,12 +115,23 @@ pub fn keep_alive(tcp: &mut TcpStream, idle: Duration) -> io::Result<()> {
     Ok(())
 }
 
-async fn connect_direct(host: &str, port: u16) -> io::Result<TcpStream> {
+async fn connect_direct(host: &str, port: u16) -> Result<TcpStream, ConnectError> {
     // getaddrinfo on a blocking thread: on iOS it synthesizes NAT64
     // addresses for IPv4-only names.
-    let addrs: Vec<SocketAddr> = lookup_host((host, port)).await?.collect();
-    let stream = race(interleave(addrs), ATTEMPT_DELAY, TcpStream::connect).await?;
-    stream.set_nodelay(true)?;
+    let addrs: Vec<SocketAddr> = lookup_host((host, port))
+        .await
+        .map_err(ConnectError::Dns)?
+        .collect();
+    if addrs.is_empty() {
+        return Err(ConnectError::Dns(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no addresses",
+        )));
+    }
+    let stream = race(interleave(addrs), ATTEMPT_DELAY, TcpStream::connect)
+        .await
+        .map_err(ConnectError::Tcp)?;
+    stream.set_nodelay(true).map_err(ConnectError::Tcp)?;
     Ok(stream)
 }
 
@@ -206,18 +255,71 @@ where
         .and_then(|s| s.parse::<u16>().ok());
     match status {
         Some(200..=299) => Ok(()),
-        _ => Err(proxy_error(format!("proxy refused CONNECT: {status_line}"))),
+        _ => Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            ProxyRefused {
+                status,
+                message: format!("proxy refused CONNECT: {status_line}"),
+            },
+        )),
     }
 }
 
+/// A non-2xx answer to `CONNECT` (or an unreadable one).
+#[derive(Debug)]
+pub struct ProxyRefused {
+    pub status: Option<u16>,
+    message: String,
+}
+
+impl std::fmt::Display for ProxyRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ProxyRefused {}
+
 fn proxy_error(message: String) -> io::Error {
-    io::Error::new(io::ErrorKind::ConnectionRefused, message)
+    io::Error::new(
+        io::ErrorKind::ConnectionRefused,
+        ProxyRefused {
+            status: None,
+            message,
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[tokio::test]
+    async fn failures_are_classified() {
+        let dns = connect("nonexistent.invalid", 80, None, None).await;
+        assert!(matches!(dns, Err(ConnectError::Dns(_))), "{dns:?}");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let refused = connect("127.0.0.1", port, None, None).await;
+        let Err(ConnectError::Tcp(e)) = refused else {
+            panic!("{refused:?}")
+        };
+        assert_eq!(e.kind(), io::ErrorKind::ConnectionRefused);
+
+        let proxy = Proxy {
+            host: "127.0.0.1".into(),
+            port,
+            authorization: None,
+        };
+        let dead = connect("example.com", 80, Some(&proxy), None).await;
+        assert!(
+            matches!(dead, Err(ConnectError::Proxy { status: None, .. })),
+            "{dead:?}"
+        );
+    }
 
     #[tokio::test]
     async fn keepalive_is_set() {
@@ -375,6 +477,8 @@ mod tests {
         let (r, _, _) = tunnel_with(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n").await;
         let e = r.unwrap_err();
         assert!(e.to_string().contains("407"), "{e}");
+        let refused = e.get_ref().unwrap().downcast_ref::<ProxyRefused>();
+        assert_eq!(refused.unwrap().status, Some(407));
     }
 
     #[tokio::test]

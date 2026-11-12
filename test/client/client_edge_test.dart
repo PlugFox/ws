@@ -167,6 +167,110 @@ void main() {
       });
     });
 
+    test('a rejected certificate waits maxDelay (D14, D42)', () {
+      fake((async) {
+        final server = FakeWebSocketServer(autoAccept: false);
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            reconnect: const WebSocketReconnect(
+              minDelay: Duration(milliseconds: 100),
+              maxDelay: Duration(seconds: 7),
+            ),
+          ),
+        );
+        client.connect('ws://t').ignore();
+        async.flushMicrotasks();
+        server.last.fail(
+          const WebSocketConnectionException(
+            'TLS failed',
+            failure: WebSocketConnectionFailure.tls,
+            tls: WebSocketTlsFailure.expired,
+          ),
+        );
+        async.flushMicrotasks();
+        var state = client.state as WebSocketState$Reconnecting;
+        expect(state.delay, greaterThanOrEqualTo(const Duration(seconds: 7)));
+
+        // A handshake failure (no common cipher) uses the normal backoff.
+        async.elapse(state.delay);
+        server.last.fail(
+          const WebSocketConnectionException(
+            'TLS failed',
+            failure: WebSocketConnectionFailure.tls,
+            tls: WebSocketTlsFailure.handshake,
+          ),
+        );
+        async.flushMicrotasks();
+        state = client.state as WebSocketState$Reconnecting;
+        expect(state.delay, lessThan(const Duration(seconds: 1)));
+        client.close();
+      });
+    });
+
+    test('proxy 407 is terminal, proxy 502 is retried', () {
+      fake((async) {
+        final server = FakeWebSocketServer(autoAccept: false);
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(transport: server),
+        );
+        client.connect('ws://t').ignore();
+        async.flushMicrotasks();
+        server.last.fail(
+          const WebSocketConnectionException(
+            'Proxy refused CONNECT',
+            failure: WebSocketConnectionFailure.proxy,
+            proxyStatus: 502,
+          ),
+        );
+        async.flushMicrotasks();
+        expect(client.state, isA<WebSocketState$Reconnecting>());
+        async.elapse((client.state as WebSocketState$Reconnecting).delay);
+        server.last.fail(
+          const WebSocketConnectionException(
+            'Proxy refused CONNECT',
+            failure: WebSocketConnectionFailure.proxy,
+            proxyStatus: 407,
+          ),
+        );
+        async.flushMicrotasks();
+        expect(client.state, isA<WebSocketState$Disconnected>());
+        client.close();
+      });
+    });
+
+    test('connection failures print their reason', () {
+      expect(
+        const WebSocketConnectionException(
+          'x',
+          failure: WebSocketConnectionFailure.tls,
+          tls: WebSocketTlsFailure.notYetValid,
+        ).toString(),
+        'WebSocketConnectionException(tls: notYetValid): x',
+      );
+      expect(
+        const WebSocketConnectionException(
+          'x',
+          failure: WebSocketConnectionFailure.proxy,
+          proxyStatus: 407,
+        ).toString(),
+        'WebSocketConnectionException(proxy: 407): x',
+      );
+      expect(
+        const WebSocketConnectionException(
+          'x',
+          failure: WebSocketConnectionFailure.dns,
+        ).toString(),
+        'WebSocketConnectionException(dns): x',
+      );
+      expect(
+        const WebSocketConnectionException('x').toString(),
+        'WebSocketConnectionException: x',
+      );
+      expect(WebSocketTlsFailure.revoked.isCertificate, isTrue);
+      expect(WebSocketTlsFailure.handshake.isCertificate, isFalse);
+    });
+
     test('a throwing request provider is reported and retried', () {
       fake((async) {
         final server = FakeWebSocketServer();

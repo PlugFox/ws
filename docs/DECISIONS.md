@@ -1015,3 +1015,53 @@ sat in `open` forever.
   blocks with a 100 ms interval and 200 ms timeout, both transports).
   Kernel keepalive covers the suspended app.
 - Status: **adopted**.
+
+### D42. Typed connection failures; the exception set is frozen
+
+From `docs/review/future_risks.md` R8 and the API notes in
+`docs/review/client.md`. Apps could not tell "offline" from "wrong
+certificate" from "check the device clock": DNS, TCP, TLS and proxy
+failures were one `WebSocketConnectionException` with a string.
+
+- The sealed set of `WebSocketException` subclasses stays as it is and is
+  fixed for 2.x, so exhaustive `switch`es over exception types keep
+  compiling. Finer reasons are enums inside the classes, documented as
+  "new values may be added in minor releases, switch with a default".
+- `WebSocketConnectionException.failure`: `dns`, `refused`,
+  `unreachable`, `tls`, `proxy`, `lost` (an established connection
+  dropped without a close frame), `other` (also every connect failure in
+  the browser, which hides the reason). `tls`: `untrusted`, `hostname`,
+  `expired`, `notYetValid`, `revoked`, `handshake`, `other`.
+  `proxyStatus`: the proxy's HTTP status. `toString()` shows the reason,
+  e.g. `WebSocketConnectionException(tls: expired): …`.
+- Native: `net::connect` returns a typed `ConnectError` (lookup, TCP,
+  proxy with status); rustls certificate errors map to the TLS reasons.
+  The Apple verifier reports expiry only as text ending in the OSStatus,
+  so `-67818` (`errSecCertificateExpired`) and `-67819`
+  (`errSecCertificateNotValidYet`) are mapped from it (codes checked in
+  the SDK's `SecBase.h`). The closed event gains a `detail` element
+  (index 7); Dart reads it only when present.
+- Pure Dart: `SocketException` → DNS ("Failed host lookup"), refused
+  (`ECONNREFUSED` 111/61/10061), otherwise unreachable. TLS on Apple
+  platforms is reported by `dart:io` only as "application verification
+  failure", so the transport records the certificate in
+  `onBadCertificate` and classifies by its validity dates and its
+  subjectAltName (a minimal DER reader; RFC 6125 matching with one
+  leading wildcard label); other platforms fall back to the BoringSSL
+  text.
+- Reconnect policy (D14, now implemented): certificate failures wait the
+  maximum delay plus jitter, like 1013 (captive portals and TLS
+  inspection cause them; retrying at 100 ms helps nobody); a TLS
+  handshake failure keeps the normal backoff. A proxy 407 is terminal:
+  the credentials are fixed in the options.
+- Verified end to end on both VM transports against the test server,
+  which now also serves an expired certificate (`wss_expired`): unknown
+  CA → `untrusted`, wrong host → `hostname`, expired → `expired`,
+  `nonexistent.invalid` → `dns`, port 1 → `refused`, proxy 407/502 and a
+  dead proxy → `proxy`, FIN/RST mid-connection → `lost`.
+- Names: the `WebSocket` prefix and the `$` state names stay (the
+  maintainer's convention, as in ws 1.x and spinify). The doc of
+  `WebSocketException` tells users who also import `dart:io` to import
+  this package with a prefix.
+- Status: **adopted**.
+

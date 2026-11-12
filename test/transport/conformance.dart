@@ -15,12 +15,16 @@ import 'package:ws/transport.dart';
 import 'package:ws/ws.dart';
 
 /// A dart:io WebSocket server; [onSocket] handles each connection.
+/// [onRequest] sees the request before the 101 is sent (the client may
+/// finish connecting before [onSocket] runs).
 Future<HttpServer> ioServer(
   void Function(WebSocket socket, HttpRequest request) onSocket, {
   int? rejectStatus,
+  void Function(HttpRequest request)? onRequest,
 }) async {
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   server.listen((request) async {
+    onRequest?.call(request);
     if (rejectStatus != null) {
       request.response.statusCode = rejectStatus;
       await request.response.close();
@@ -87,13 +91,16 @@ void transportConformance(WebSocketTransport Function() create) {
     final headers = <String, String?>{};
 
     setUp(() async {
-      server = await ioServer((socket, request) {
-        headers['x-token'] = request.headers.value('x-token');
-        socket.listen((m) {
-          if (m == 'close-4001') return socket.close(4001, 'bye').ignore();
-          socket.add(m);
-        });
-      });
+      server = await ioServer(
+        (socket, request) {
+          socket.listen((m) {
+            if (m == 'close-4001') return socket.close(4001, 'bye').ignore();
+            socket.add(m);
+          });
+        },
+        onRequest: (request) =>
+            headers['x-token'] = request.headers.value('x-token'),
+      );
     });
     tearDown(() => server.close(force: true));
 

@@ -1,6 +1,15 @@
 /// Every error the client reports is a [WebSocketException]. Raw
 /// `SocketException`s, browser events or native error strings never reach
 /// the user; they are kept as [WebSocketException.cause].
+///
+/// The set of subclasses is fixed for 2.x, so a `switch` over them can be
+/// exhaustive; finer reasons are enums inside them
+/// ([WebSocketConnectionFailure], [WebSocketTlsFailure],
+/// [WebSocketRpcFailure]).
+///
+/// `dart:io` also declares a `WebSocketException`; in a file that imports
+/// both, the one from this package wins silently. Import this package with
+/// a prefix there (`import 'package:ws/ws.dart' as ws;`).
 sealed class WebSocketException implements Exception {
   const WebSocketException(this.message, {this.cause});
 
@@ -40,13 +49,108 @@ final class WebSocketHandshakeException extends WebSocketException {
   String get _name => 'WebSocketHandshakeException';
 }
 
-/// DNS, TCP or TLS failure, or a connection lost without a close frame.
+/// What failed in a [WebSocketConnectionException].
+///
+/// New values may be added in minor releases: give a `switch` over it a
+/// default branch.
+enum WebSocketConnectionFailure {
+  /// The host name did not resolve (offline, wrong name, DNS blocked).
+  dns,
+
+  /// The server actively refused the TCP connection (nothing listens on
+  /// the port).
+  refused,
+
+  /// No route, no answer or another socket error while connecting.
+  unreachable,
+
+  /// TLS failed; see [WebSocketConnectionException.tls].
+  tls,
+
+  /// The HTTP proxy was unreachable or refused the tunnel; see
+  /// [WebSocketConnectionException.proxyStatus].
+  proxy,
+
+  /// An established connection was dropped without a close frame (reset,
+  /// end of stream, keepalive timeout).
+  lost,
+
+  /// Anything else, including every connect failure in the browser, which
+  /// does not say why.
+  other,
+}
+
+/// Why TLS failed. Certificate failures are retried at the maximum
+/// reconnect delay: a captive portal or a TLS-inspecting network causes
+/// them, and they rarely fix themselves quickly.
+///
+/// New values may be added in minor releases: give a `switch` over it a
+/// default branch.
+enum WebSocketTlsFailure {
+  /// The certificate chain does not lead to a trusted root (self-signed,
+  /// private CA, TLS inspection).
+  untrusted,
+
+  /// The certificate is not valid for the host name.
+  hostname,
+
+  /// The certificate has expired, or the device clock is wrong.
+  expired,
+
+  /// The certificate is not valid yet: the device clock is probably
+  /// behind.
+  notYetValid,
+
+  /// The certificate was revoked.
+  revoked,
+
+  /// The handshake itself failed: no common protocol version or cipher, an
+  /// alert from the server, or a server that does not speak TLS.
+  handshake,
+
+  /// Anything else (configuration, unclassified platform errors).
+  other;
+
+  /// Whether the server's certificate was rejected (as opposed to the
+  /// handshake failing).
+  bool get isCertificate => switch (this) {
+    untrusted || hostname || expired || notYetValid || revoked => true,
+    handshake || other => false,
+  };
+}
+
+/// DNS, TCP, TLS or proxy failure while connecting, or an established
+/// connection lost without a close frame. [failure] says which.
 final class WebSocketConnectionException extends WebSocketException {
   /// Creates the exception.
-  const WebSocketConnectionException(super.message, {super.cause});
+  const WebSocketConnectionException(
+    super.message, {
+    this.failure = WebSocketConnectionFailure.other,
+    this.tls,
+    this.proxyStatus,
+    super.cause,
+  });
+
+  /// What failed.
+  final WebSocketConnectionFailure failure;
+
+  /// Why TLS failed, when [failure] is [WebSocketConnectionFailure.tls].
+  final WebSocketTlsFailure? tls;
+
+  /// The proxy's HTTP status (for example 407: authentication required),
+  /// when [failure] is [WebSocketConnectionFailure.proxy] and the proxy
+  /// answered.
+  final int? proxyStatus;
 
   @override
-  String get _name => 'WebSocketConnectionException';
+  String get _name => switch ((failure, tls, proxyStatus)) {
+    (WebSocketConnectionFailure.tls, final tls?, _) =>
+      'WebSocketConnectionException(tls: ${tls.name})',
+    (WebSocketConnectionFailure.proxy, _, final status?) =>
+      'WebSocketConnectionException(proxy: $status)',
+    (WebSocketConnectionFailure.other, _, _) => 'WebSocketConnectionException',
+    (final failure, _, _) => 'WebSocketConnectionException(${failure.name})',
+  };
 }
 
 /// Connecting, the closing handshake or a heartbeat took too long.

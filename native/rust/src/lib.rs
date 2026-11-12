@@ -15,7 +15,9 @@
 //! Events posted to Dart (arrays, first element = event code):
 //! * `[0, protocol | null]` — open;
 //! * `[1, code | null, reason, error_kind, message | null, http_status | null,
-//!   headers_json | null]` — closed (always the last event);
+//!   headers_json | null, detail]` — closed (always the last event);
+//!   `detail` refines `error_kind` (`DETAIL_*`; for a proxy failure
+//!   `http_status` is the proxy's status);
 //! * `[3, bytes, kind, item, kind, item, ...]` — messages; kind 0 = UTF-8
 //!   text bytes, 1 = binary, 2 = JSON tape; `bytes` = payload bytes to grant
 //!   back as credits;
@@ -72,6 +74,21 @@ const ERR_HANDSHAKE: i64 = 2;
 const ERR_PROTOCOL: i64 = 3;
 const ERR_TLS: i64 = 4;
 const ERR_ABORTED: i64 = 5;
+
+// `detail` of ERR_CONNECTION (DECISIONS.md D42).
+const DETAIL_DNS: i64 = 1;
+const DETAIL_REFUSED: i64 = 2;
+const DETAIL_UNREACHABLE: i64 = 3;
+const DETAIL_PROXY: i64 = 4;
+const DETAIL_LOST: i64 = 5;
+
+// `detail` of ERR_TLS.
+const TLS_UNTRUSTED: i64 = 1;
+const TLS_HOSTNAME: i64 = 2;
+const TLS_EXPIRED: i64 = 3;
+const TLS_NOT_YET_VALID: i64 = 4;
+const TLS_REVOKED: i64 = 5;
+const TLS_HANDSHAKE: i64 = 6;
 
 const SEND_OK: u32 = 0;
 const SEND_CLOSED: u32 = 1;
@@ -436,6 +453,7 @@ struct Closed {
     message: Option<String>,
     status: Option<u16>,
     headers: Option<String>,
+    detail: i64,
 }
 
 impl Closed {
@@ -447,7 +465,39 @@ impl Closed {
             message: Some(message),
             status: None,
             headers: None,
+            detail: 0,
         }
+    }
+
+    fn with_detail(mut self, detail: i64) -> Self {
+        self.detail = detail;
+        self
+    }
+
+    /// A failed TCP connection, classified.
+    fn connect(error: net::ConnectError) -> Self {
+        let message = error.to_string();
+        match error {
+            net::ConnectError::Dns(_) => {
+                Self::error(ERR_CONNECTION, message).with_detail(DETAIL_DNS)
+            }
+            net::ConnectError::Tcp(e) => Self::error(ERR_CONNECTION, message).with_detail(
+                if e.kind() == std::io::ErrorKind::ConnectionRefused {
+                    DETAIL_REFUSED
+                } else {
+                    DETAIL_UNREACHABLE
+                },
+            ),
+            net::ConnectError::Proxy { status, .. } => Self {
+                status,
+                ..Self::error(ERR_CONNECTION, message).with_detail(DETAIL_PROXY)
+            },
+        }
+    }
+
+    /// A failed TLS handshake, classified by the certificate error.
+    fn tls(error: &std::io::Error) -> Self {
+        Self::error(ERR_TLS, error.to_string()).with_detail(tls_detail(error))
     }
 
     fn post(self, port: DartPort) {
@@ -471,6 +521,7 @@ impl Closed {
                 string_or_null(&message),
                 int_or_null(self.status),
                 string_or_null(&headers),
+                DartCObject::int(self.detail),
             ],
         );
     }
@@ -498,6 +549,7 @@ fn map_error(error: tungstenite::Error) -> Closed {
                 message: Some(format!("Unexpected HTTP status {status}")),
                 status: Some(status),
                 headers: serde_json::to_string(&headers).ok(),
+                detail: 0,
             }
         }
         E::Capacity(CapacityError::MessageTooLong { .. }) => Closed {
@@ -507,6 +559,7 @@ fn map_error(error: tungstenite::Error) -> Closed {
             message: Some("Message too big".into()),
             status: None,
             headers: None,
+            detail: 0,
         },
         E::Utf8(_) => Closed {
             code: Some(1007),
@@ -515,6 +568,7 @@ fn map_error(error: tungstenite::Error) -> Closed {
             message: Some("Invalid UTF-8".into()),
             status: None,
             headers: None,
+            detail: 0,
         },
         E::Protocol(ProtocolError::HandshakeIncomplete) | E::Url(_) | E::HttpFormat(_) => {
             Closed::error(ERR_HANDSHAKE, error.to_string())
@@ -524,7 +578,8 @@ fn map_error(error: tungstenite::Error) -> Closed {
         E::Protocol(ProtocolError::ResetWithoutClosingHandshake) => Closed::error(
             ERR_CONNECTION,
             "Connection closed without a close frame".into(),
-        ),
+        )
+        .with_detail(DETAIL_LOST),
         E::Protocol(p) => Closed {
             code: Some(1002),
             reason: "Protocol error".into(),
@@ -532,9 +587,31 @@ fn map_error(error: tungstenite::Error) -> Closed {
             message: Some(p.to_string()),
             status: None,
             headers: None,
+            detail: 0,
         },
         E::Tls(_) => Closed::error(ERR_TLS, error.to_string()),
-        other => Closed::error(ERR_CONNECTION, other.to_string()),
+        // On an open connection: reset, broken pipe, keepalive timeout.
+        other => Closed::error(ERR_CONNECTION, other.to_string()).with_detail(DETAIL_LOST),
+    }
+}
+
+/// Maps a rustls certificate error (also what the OS verifiers report) to
+/// a `TLS_*` detail; anything else in the handshake (alerts, version or
+/// cipher mismatch, a plain-text server) is `TLS_HANDSHAKE`.
+fn tls_detail(error: &std::io::Error) -> i64 {
+    use tokio_rustls::rustls::{CertificateError as C, Error as R};
+    let Some(rustls) = error.get_ref().and_then(|e| e.downcast_ref::<R>()) else {
+        return TLS_HANDSHAKE;
+    };
+    match rustls {
+        R::InvalidCertificate(cert) => match cert {
+            C::NotValidForName | C::NotValidForNameContext { .. } => TLS_HOSTNAME,
+            C::Expired | C::ExpiredContext { .. } => TLS_EXPIRED,
+            C::NotValidYet | C::NotValidYetContext { .. } => TLS_NOT_YET_VALID,
+            C::Revoked => TLS_REVOKED,
+            _ => TLS_UNTRUSTED,
+        },
+        _ => TLS_HANDSHAKE,
     }
 }
 
@@ -542,8 +619,6 @@ fn map_error(error: tungstenite::Error) -> Closed {
 
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
-
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 async fn run(
     shared: Arc<Shared>,
@@ -591,7 +666,6 @@ async fn run(
 }
 
 async fn open(config: &Config) -> Result<(WebSocketStream<Box<dyn Io>>, Option<String>), Closed> {
-    let connection = |e: BoxError| Closed::error(ERR_CONNECTION, e.to_string());
     let uri: Uri = config
         .url
         .parse()
@@ -634,7 +708,7 @@ async fn open(config: &Config) -> Result<(WebSocketStream<Box<dyn Io>>, Option<S
         config.keepalive_ms.map(Duration::from_millis),
     )
     .await
-    .map_err(|e| connection(e.into()))?;
+    .map_err(Closed::connect)?;
     let mut stream: Box<dyn Io> = if secure {
         let tls = tls::client_config(config.allow_insecure, config.roots_pem.as_deref())
             .map_err(|e| Closed::error(ERR_TLS, e.to_string()))?;
@@ -642,7 +716,7 @@ async fn open(config: &Config) -> Result<(WebSocketStream<Box<dyn Io>>, Option<S
         let stream = TlsConnector::from(tls)
             .connect(name, tcp)
             .await
-            .map_err(|e| Closed::error(ERR_TLS, e.to_string()))?;
+            .map_err(|e| Closed::tls(&e))?;
         Box::new(stream)
     } else {
         Box::new(tcp)
@@ -666,12 +740,15 @@ async fn open(config: &Config) -> Result<(WebSocketStream<Box<dyn Io>>, Option<S
                 message: Some(format!("Unexpected HTTP status {status}")),
                 status: Some(status),
                 headers: serde_json::to_string(&headers).ok(),
+                detail: 0,
             },
             handshake::Failure::Invalid(message) => Closed::error(ERR_HANDSHAKE, message),
             handshake::Failure::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 Closed::error(ERR_HANDSHAKE, e.to_string())
             }
-            handshake::Failure::Io(e) => Closed::error(ERR_CONNECTION, e.to_string()),
+            handshake::Failure::Io(e) => {
+                Closed::error(ERR_CONNECTION, e.to_string()).with_detail(DETAIL_LOST)
+            }
         })?;
     let ws_config = WebSocketConfig::default()
         .max_message_size(Some(config.max_message_size))
@@ -868,6 +945,7 @@ async fn serve(
                     message: None,
                     status: None,
                     headers: None,
+                    detail: 0,
                 };
                 // tungstenite queued the close reply; one more poll flushes
                 // it. Do not wait for the TCP close for long, and stop on

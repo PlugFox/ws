@@ -68,11 +68,14 @@ final class _WebConnection implements TransportConnection {
           close.code == 1005 ? null : close.code,
           close.reason,
           close.code == 1006
-              ? WebSocketConnectionException(
-                  _open
-                      ? 'Connection lost'
-                      : 'Could not connect (the browser hides the reason)',
-                )
+              ? _open
+                    ? const WebSocketConnectionException(
+                        'Connection lost',
+                        failure: WebSocketConnectionFailure.lost,
+                      )
+                    : const WebSocketConnectionException(
+                        'Could not connect (the browser hides the reason)',
+                      )
               : null,
         );
       }),

@@ -41,11 +41,16 @@ Future<StreamSubscription<io.RawSocketEvent>> openTunnel(
   final head = BytesBuilder(copy: false);
   late final StreamSubscription<io.RawSocketEvent> subscription;
 
-  void fail(String message, [Object? cause]) {
+  void fail(String message, [Object? cause, int? status]) {
     if (completer.isCompleted) return;
     subscription.cancel().ignore();
     completer.completeError(
-      WebSocketConnectionException(message, cause: cause),
+      WebSocketConnectionException(
+        message,
+        failure: WebSocketConnectionFailure.proxy,
+        proxyStatus: status,
+        cause: cause,
+      ),
     );
   }
 
@@ -76,7 +81,7 @@ Future<StreamSubscription<io.RawSocketEvent>> openTunnel(
             statusLine.split(' ').elementAtOrNull(1) ?? '',
           );
           if (status == null || status < 200 || status > 299) {
-            return fail('Proxy refused CONNECT: $statusLine');
+            return fail('Proxy refused CONNECT: $statusLine', null, status);
           }
           // The server speaks only after our request (WebSocket handshake
           // or TLS ClientHello), so nothing may follow the proxy's head.

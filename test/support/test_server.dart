@@ -11,6 +11,7 @@ final class TestServer {
     : ws = ready['ws']! as int,
       wss = ready['wss']! as int,
       wssBadHost = ready['wss_badhost']! as int,
+      wssExpired = ready['wss_expired']! as int,
       ws6 = ready['ws6'] as int?,
       proxy = ready['proxy']! as int,
       proxyAuth = ready['proxy_auth']! as int,
@@ -20,6 +21,7 @@ final class TestServer {
   final int ws;
   final int wss;
   final int wssBadHost;
+  final int wssExpired;
   final int? ws6;
   final int proxy;
   final int proxyAuth;

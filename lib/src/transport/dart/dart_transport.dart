@@ -9,6 +9,7 @@ import 'package:ws/src/protocol/frame.dart';
 import 'package:ws/src/protocol/frame_reader.dart';
 import 'package:ws/src/protocol/frame_writer.dart';
 import 'package:ws/src/protocol/handshake.dart';
+import 'package:ws/src/transport/dart/errors.dart';
 import 'package:ws/src/transport/dart/keep_alive.dart';
 import 'package:ws/src/transport/dart/proxy_tunnel.dart';
 import 'package:ws/src/transport/transport.dart';
@@ -98,6 +99,7 @@ final class _DartConnection implements TransportConnection, FrameHandler {
     // cancelled in _finish).
     // ignore: cancel_subscriptions
     StreamSubscription<io.RawSocketEvent>? tunnel;
+    io.X509Certificate? rejected;
     try {
       final context = !handshake.secure || tls.trustedRootsPem == null
           ? null
@@ -105,7 +107,15 @@ final class _DartConnection implements TransportConnection, FrameHandler {
               ..setTrustedCertificatesBytes(
                 Uint8List.fromList(tls.trustedRootsPem!.codeUnits),
               ));
-      final onBadCertificate = tls.allowInsecure ? (_) => true : null;
+      // Records the rejected certificate: on Apple platforms dart:io only
+      // says "application verification failure", so its dates and names
+      // classify the failure (D42).
+      bool onBadCertificate(io.X509Certificate certificate) {
+        if (tls.allowInsecure) return true;
+        rejected = certificate;
+        return false;
+      }
+
       final io.ConnectionTask<io.RawSocket> task;
       if (proxy != null) {
         task = await io.RawSocket.startConnect(proxy.host, proxy.port);
@@ -145,13 +155,15 @@ final class _DartConnection implements TransportConnection, FrameHandler {
       }
     } on Object catch (e) {
       return _fail(
-        e is io.TlsException || e is io.HandshakeException
-            ? WebSocketConnectionException('TLS handshake failed', cause: e)
-            : e is WebSocketException
+        e is WebSocketException && e is! WebSocketConnectionException
             ? e
-            : WebSocketConnectionException(
-                'Could not connect to ${proxy == null ? host : proxy.host}',
-                cause: e,
+            : connectFailure(
+                e,
+                rejected: rejected,
+                tlsHost: host,
+                host: proxy == null ? host : proxy.host,
+                // Until the tunnel is up, every socket error is the proxy's.
+                viaProxy: proxy != null && tunnel == null,
               ),
       );
     }
@@ -193,6 +205,7 @@ final class _DartConnection implements TransportConnection, FrameHandler {
             _open
                 ? const WebSocketConnectionException(
                     'Connection closed without a close frame',
+                    failure: WebSocketConnectionFailure.lost,
                   )
                 : const WebSocketHandshakeException(
                     'Connection closed during the handshake',
@@ -206,15 +219,17 @@ final class _DartConnection implements TransportConnection, FrameHandler {
         : _finish(
             null,
             '',
-            WebSocketConnectionException('Socket error', cause: e),
+            WebSocketConnectionException(
+              'Socket error',
+              failure: e is io.TlsException
+                  ? WebSocketConnectionFailure.tls
+                  : WebSocketConnectionFailure.lost,
+              tls: e is io.TlsException ? tlsFailure(e) : null,
+              cause: e,
+            ),
           );
-    void onDone() => _closeAfterFlush
-        ? _finishStored()
-        : _finish(
-            null,
-            '',
-            const WebSocketConnectionException('Connection closed'),
-          );
+    void onDone() =>
+        _closeAfterFlush ? _finishStored() : _finish(null, '', _lost);
     if (tunnel != null) {
       _subscription = tunnel
         ..onData(onEvent)
@@ -452,10 +467,12 @@ final class _DartConnection implements TransportConnection, FrameHandler {
   void _finishStored() => _finish(
     _closeCode,
     _closeReason,
-    _error ??
-        (_closeCode == null && !_closeAfterFlush
-            ? const WebSocketConnectionException('Connection closed')
-            : null),
+    _error ?? (_closeCode == null && !_closeAfterFlush ? _lost : null),
+  );
+
+  static const _lost = WebSocketConnectionException(
+    'Connection closed',
+    failure: WebSocketConnectionFailure.lost,
   );
 
   void _finish(int? code, String reason, WebSocketException? error) {

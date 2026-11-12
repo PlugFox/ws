@@ -11,6 +11,7 @@
 //! * `ws`: plain endpoints, plus `GET /ca.pem`, `/log?id=`, `/proxy-log`.
 //! * `wss`: TLS, certificate for `localhost`, `127.0.0.1`, `::1`.
 //! * `wss_badhost`: TLS, certificate for `wrong.invalid` only.
+//! * `wss_expired`: TLS, a certificate that expired in 2021.
 //! * `ws6`: plain endpoints on `[::1]`, when IPv6 is available.
 //! * `proxy` / `proxy_auth`: HTTP CONNECT proxies.
 //!
@@ -62,6 +63,7 @@ pub struct Options {
     pub port: u16,
     pub tls_port: u16,
     pub badhost_port: u16,
+    pub expired_port: u16,
     pub proxy_port: u16,
     pub proxy_auth_port: u16,
     /// Also listen on `[::1]` (same port number as `port` unless `port` is 0).
@@ -75,6 +77,7 @@ impl Default for Options {
             port: 0,
             tls_port: 0,
             badhost_port: 0,
+            expired_port: 0,
             proxy_port: 0,
             proxy_auth_port: 0,
             ipv6: true,
@@ -88,6 +91,7 @@ pub struct Ports {
     pub ws: u16,
     pub wss: u16,
     pub wss_badhost: u16,
+    pub wss_expired: u16,
     pub ws6: Option<u16>,
     pub proxy: u16,
     pub proxy_auth: u16,
@@ -108,8 +112,8 @@ impl Server {
         let p = &self.ports;
         let ws6 = p.ws6.map_or("null".into(), |v| v.to_string());
         let mut out = format!(
-            "{{\"ws\":{},\"wss\":{},\"wss_badhost\":{},\"ws6\":{ws6},\"proxy\":{},\"proxy_auth\":{},\"ca_pem\":",
-            p.ws, p.wss, p.wss_badhost, p.proxy, p.proxy_auth
+            "{{\"ws\":{},\"wss\":{},\"wss_badhost\":{},\"wss_expired\":{},\"ws6\":{ws6},\"proxy\":{},\"proxy_auth\":{},\"ca_pem\":",
+            p.ws, p.wss, p.wss_badhost, p.wss_expired, p.proxy, p.proxy_auth
         );
         http::json_str(&mut out, &self.ca_pem);
         out.push('}');
@@ -128,6 +132,7 @@ pub async fn start(opts: &Options) -> Result<Server, BoxError> {
     let plain = TcpListener::bind((host, opts.port)).await?;
     let secure = TcpListener::bind((host, opts.tls_port)).await?;
     let badhost = TcpListener::bind((host, opts.badhost_port)).await?;
+    let expired = TcpListener::bind((host, opts.expired_port)).await?;
     let proxy = TcpListener::bind((host, opts.proxy_port)).await?;
     let proxy_auth = TcpListener::bind((host, opts.proxy_auth_port)).await?;
     let ws = plain.local_addr()?.port();
@@ -140,6 +145,7 @@ pub async fn start(opts: &Options) -> Result<Server, BoxError> {
         ws,
         wss: secure.local_addr()?.port(),
         wss_badhost: badhost.local_addr()?.port(),
+        wss_expired: expired.local_addr()?.port(),
         ws6: ipv6.as_ref().map(|(_, p)| *p),
         proxy: proxy.local_addr()?.port(),
         proxy_auth: proxy_auth.local_addr()?.port(),
@@ -147,6 +153,7 @@ pub async fn start(opts: &Options) -> Result<Server, BoxError> {
     tokio::spawn(accept_loop(plain, None, shared.clone()));
     tokio::spawn(accept_loop(secure, Some(pki.good), shared.clone()));
     tokio::spawn(accept_loop(badhost, Some(pki.badhost), shared.clone()));
+    tokio::spawn(accept_loop(expired, Some(pki.expired), shared.clone()));
     if let Some((Some(l), _)) = ipv6 {
         tokio::spawn(accept_loop(l, None, shared.clone()));
     }
@@ -311,6 +318,11 @@ pub fn describe(host: &str, ports: &Ports) -> String {
         out,
         "wss (cert for wrong.invalid) on wss://{host}:{}",
         ports.wss_badhost
+    );
+    let _ = writeln!(
+        out,
+        "wss (expired cert) on wss://{host}:{}",
+        ports.wss_expired
     );
     if let Some(p) = ports.ws6 {
         let _ = writeln!(out, "ws6 listening on ws://[::1]:{p}");

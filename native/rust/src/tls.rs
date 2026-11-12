@@ -172,11 +172,12 @@ impl ServerCertVerifier for OffloadedVerifier {
         };
         let multi_thread = tokio::runtime::Handle::try_current()
             .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
-        if multi_thread {
+        let result = if multi_thread {
             tokio::task::block_in_place(verify)
         } else {
             verify()
-        }
+        };
+        result.map_err(classify)
     }
 
     fn verify_tls12_signature(
@@ -200,6 +201,28 @@ impl ServerCertVerifier for OffloadedVerifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.0.supported_verify_schemes()
     }
+}
+
+/// The Apple verifier maps only some Security.framework codes and reports
+/// the rest as text ending in `: <OSStatus>`. Validity errors matter to
+/// apps ("check the device clock"), so map them too (DECISIONS.md D42;
+/// codes from `SecBase.h`).
+#[cfg(any(target_vendor = "apple", windows))]
+fn classify(error: rustls::Error) -> rustls::Error {
+    #[cfg(target_vendor = "apple")]
+    {
+        use rustls::CertificateError as C;
+        if let rustls::Error::InvalidCertificate(C::Other(other)) = &error {
+            let text = other.to_string();
+            if text.ends_with(": -67818") {
+                return rustls::Error::InvalidCertificate(C::Expired);
+            }
+            if text.ends_with(": -67819") {
+                return rustls::Error::InvalidCertificate(C::NotValidYet);
+            }
+        }
+    }
+    error
 }
 
 /// `allowInsecure` only (development): accepts any certificate but still

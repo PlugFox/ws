@@ -526,13 +526,20 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     }
   }
 
-  /// Backoff with jitter; 1013 waits the maximum delay, `Retry-After` (429,
-  /// 503) at least what the server asked for (capped at 10 minutes).
+  /// Backoff with jitter; 1013 and rejected certificates wait the maximum
+  /// delay, `Retry-After` (429, 503) at least what the server asked for
+  /// (capped at 10 minutes).
   Duration _reconnectDelay(WebSocketException cause, int attempt) {
     final policy = _options.reconnect;
     var delay = backoffDelay(attempt - 1, policy.minDelay, policy.maxDelay);
-    if (cause case WebSocketClosedException(code: 1013)) {
-      // Try Again Later; jitter so shed clients do not return together.
+    if (cause
+        case WebSocketClosedException(code: 1013) ||
+            WebSocketConnectionException(
+              tls: WebSocketTlsFailure(isCertificate: true),
+            )) {
+      // Try Again Later; jitter so shed clients do not return together. A
+      // rejected certificate (captive portal, TLS inspection, wrong clock)
+      // does not fix itself in milliseconds either (D14).
       delay = policy.maxDelay + delay * 0.5;
     }
     if (cause case WebSocketHandshakeException(:final headers)) {
@@ -561,6 +568,8 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
       WebSocketHandshakeException(:final statusCode?)
           when statusCode >= 400 && statusCode < 500 =>
         statusCode == 408 || statusCode == 425 || statusCode == 429,
+      // Proxy credentials are fixed in the options: retrying cannot help.
+      WebSocketConnectionException(proxyStatus: 407) => false,
       WebSocketClosedException(:final code?) =>
         !policy.terminalCloseCodes.contains(code),
       _ => true,

@@ -66,6 +66,15 @@ void serverConformance(WebSocketTransport Function() create) {
       fail('connected to $url');
     }
 
+    Matcher failed(
+      WebSocketConnectionFailure failure, {
+      WebSocketTlsFailure? tls,
+      int? proxyStatus,
+    }) => isA<WebSocketConnectionException>()
+        .having((e) => e.failure, 'failure', failure)
+        .having((e) => e.tls, 'tls', tls)
+        .having((e) => e.proxyStatus, 'proxyStatus', proxyStatus);
+
     /// Connects, then waits for the connection to end on its own.
     Future<WebSocketState$Disconnected> serverEnds(String url) async {
       final c = client();
@@ -103,7 +112,25 @@ void serverConformance(WebSocketTransport Function() create) {
       test('an unknown CA is rejected', () async {
         expect(
           await connectError(server.tls('/echo')),
-          isA<WebSocketConnectionException>(),
+          failed(
+            WebSocketConnectionFailure.tls,
+            tls: WebSocketTlsFailure.untrusted,
+          ),
+        );
+      });
+
+      test('an expired certificate is rejected as expired', () async {
+        expect(
+          await connectError(
+            'wss://localhost:${server.wssExpired}/echo',
+            vm: WebSocketVmOptions(
+              tls: WebSocketTls(trustedRootsPem: server.caPem),
+            ),
+          ),
+          failed(
+            WebSocketConnectionFailure.tls,
+            tls: WebSocketTlsFailure.expired,
+          ),
         );
       });
 
@@ -115,7 +142,10 @@ void serverConformance(WebSocketTransport Function() create) {
               tls: WebSocketTls(trustedRootsPem: server.caPem),
             ),
           ),
-          isA<WebSocketConnectionException>(),
+          failed(
+            WebSocketConnectionFailure.tls,
+            tls: WebSocketTlsFailure.hostname,
+          ),
         );
       });
 
@@ -136,6 +166,7 @@ void serverConformance(WebSocketTransport Function() create) {
               tls: WebSocketTls(allowInsecure: true),
             ),
           ),
+          // The plain server waits for an HTTP head that never comes.
           isA<WebSocketException>(),
         );
         expect(
@@ -188,7 +219,10 @@ void serverConformance(WebSocketTransport Function() create) {
             ),
           ),
         );
-        expect(refused, isA<WebSocketConnectionException>());
+        expect(
+          refused,
+          failed(WebSocketConnectionFailure.proxy, proxyStatus: 407),
+        );
         expect(refused.toString(), contains('407'));
       });
 
@@ -199,6 +233,7 @@ void serverConformance(WebSocketTransport Function() create) {
           vm: WebSocketVmOptions(proxy: proxy),
         );
         expect(bad.toString(), contains('502'));
+        expect(bad, failed(WebSocketConnectionFailure.proxy, proxyStatus: 502));
         expect(
           await connectError(
             server.url('/echo'),
@@ -206,12 +241,23 @@ void serverConformance(WebSocketTransport Function() create) {
               proxy: WebSocketProxy(host: '127.0.0.1', port: 1),
             ),
           ),
-          isA<WebSocketConnectionException>(),
+          failed(WebSocketConnectionFailure.proxy),
         );
       });
     });
 
     group('addressing', () {
+      test('DNS failure and a refused port are told apart', () async {
+        expect(
+          await connectError('ws://nonexistent.invalid/echo'),
+          failed(WebSocketConnectionFailure.dns),
+        );
+        expect(
+          await connectError('ws://127.0.0.1:1/echo'),
+          failed(WebSocketConnectionFailure.refused),
+        );
+      });
+
       test('IPv6 literal and a name resolving to ::1 and 127.0.0.1', () async {
         final port = server.ws6;
         if (port == null) return markTestSkipped('no IPv6 loopback');
@@ -508,7 +554,7 @@ void serverConformance(WebSocketTransport Function() create) {
           final state = await serverEnds(server.url('/drop?mode=$mode'));
           expect(
             state.error,
-            isA<WebSocketConnectionException>(),
+            failed(WebSocketConnectionFailure.lost),
             reason: mode,
           );
         }

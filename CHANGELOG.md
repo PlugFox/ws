@@ -12,6 +12,11 @@
   10 s to answer; a draining upload extends the wait) and TCP keepalive
   (`WebSocketVmOptions.keepAlive`, 30 s; `TCP_USER_TIMEOUT` on Linux and
   Android).
+- `WebSocketConnectionException.failure` (`dns`, `refused`,
+  `unreachable`, `tls`, `proxy`, `lost`, `other`), `.tls` (`untrusted`,
+  `hostname`, `expired`, `notYetValid`, `revoked`, `handshake`) and
+  `.proxyStatus`. Rejected certificates are retried at the maximum
+  reconnect delay; a proxy 407 stops reconnecting.
 - `package:ws/testing.dart`: in-memory `FakeWebSocketServer` for tests.
 - `package:ws/native.dart`: the Rust transport loaded from a file
   (`WsNativeLibrary.open(path).install()`), and `dart run ws:install` to

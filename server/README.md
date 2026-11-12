@@ -26,7 +26,7 @@ Binds every listener (port `0` = ephemeral), then prints exactly one line to
 stdout:
 
 ```json
-{"ws":62406,"wss":62407,"wss_badhost":62408,"ws6":62411,"proxy":62409,"proxy_auth":62410,"ca_pem":"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"}
+{"ws":62406,"wss":62407,"wss_badhost":62408,"wss_expired":62412,"ws6":62411,"proxy":62409,"proxy_auth":62410,"ca_pem":"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"}
 ```
 
 | key | meaning |
@@ -34,10 +34,11 @@ stdout:
 | `ws` | plain endpoints, plus `GET /ca.pem`, `/log`, `/proxy-log` |
 | `wss` | TLS, certificate for `localhost`, `127.0.0.1`, `::1` |
 | `wss_badhost` | TLS, certificate for `wrong.invalid` only |
+| `wss_expired` | TLS, certificate for `localhost` that expired in 2021 |
 | `ws6` | plain endpoints on `[::1]`, or `null` without IPv6 |
 | `proxy` | HTTP CONNECT proxy, no auth |
 | `proxy_auth` | CONNECT proxy requiring `Proxy-Authorization: Basic dGVzdDpzZWNyZXQ=` (`test:secret`) |
-| `ca_pem` | the CA that signed both TLS certificates (generated at startup) |
+| `ca_pem` | the CA that signed the TLS certificates (generated at startup) |
 
 The process exits when stdin reaches EOF (so a dead parent leaves no
 orphan) or on ctrl-c/SIGTERM. Per-connection errors are not printed unless
