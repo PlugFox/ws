@@ -78,6 +78,12 @@ abstract interface class WebSocketClient<T>
   /// is called first. With unlimited reconnects it may wait indefinitely;
   /// add a timeout if needed. Calling it again with another URL switches
   /// to that URL.
+  ///
+  /// A malformed [url] or an unsupported scheme throws [FormatException]
+  /// or [ArgumentError] synchronously: a programming error, as everywhere
+  /// in Dart. Everything that depends on state or the network (a closed
+  /// client, a refused connection) fails the returned future
+  /// (docs/review/client.md F27).
   Future<void> connect(String url);
 
   /// Sends a message. Completes when the transport accepted it; while more
@@ -131,6 +137,10 @@ abstract interface class WebSocketClient<T>
   /// Closes the connection and stops reconnecting. The client can
   /// [connect] again later. Waits for the closing handshake at most
   /// `disconnectTimeout`.
+  ///
+  /// A [code] other than 1000 or 3000–4999, or a [reason] over 123 UTF-8
+  /// bytes, throws [ArgumentError] synchronously, like [connect]'s
+  /// argument errors (browsers accept nothing else).
   Future<void> disconnect([int? code = 1000, String? reason]);
 
   /// Disconnects and releases everything. Terminal and idempotent.
@@ -545,7 +555,13 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
       );
     if (!_suspended) session.startHeartbeat();
     final waiters = _takeWaiters();
-    _setState(WebSocketState.open(url: _url!, protocol: protocol));
+    // The URL actually used (docs/review/client.md F29).
+    _setState(
+      WebSocketState.open(
+        url: session.effectiveUrl ?? _url!,
+        protocol: protocol,
+      ),
+    );
     _complete(waiters);
   }
 
@@ -837,14 +853,14 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     }
     final call = _PendingCall<T>(
       id,
-      clock.now().add(timeout ?? _options.rpcTimeout),
+      _rpcClock.elapsed + (timeout ?? _options.rpcTimeout),
     );
     _calls[id] = call;
-    _scheduleRpcTimer();
+    _armRpcTimer(call.deadline);
     push(message).catchError((Object e, StackTrace s) {
       if (identical(_calls[id], call)) {
         _calls.remove(id);
-        _scheduleRpcTimer();
+        _disarmRpcTimerIfIdle();
         call.completer.completeError(
           // Not sent at all (encoding, full buffer): the error itself.
           e is WebSocketFormatException || e is WebSocketBufferFullException
@@ -862,33 +878,52 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     return call.completer.future;
   }
 
-  void _scheduleRpcTimer() {
-    if (_calls.isEmpty) {
-      _rpcTimer?.cancel();
-      _rpcTimer = null;
-      return;
-    }
-    var next = _calls.values.first.deadline;
-    for (final call in _calls.values) {
-      if (call.deadline.isBefore(next)) next = call.deadline;
-    }
-    if (_rpcTimer != null && _rpcDeadline == next) return;
+  /// Monotonic time for RPC deadlines: a wall-clock step (NTP, a manual
+  /// change) must not expire calls early or late (docs/review/client.md
+  /// F28). A real [Stopwatch] is monotonic; `clock.stopwatch()` reads
+  /// `clock.now()`, so it is used only where a test replaced the clock
+  /// (fake time).
+  final Stopwatch _rpcClock =
+      (identical(clock, const Clock()) ? Stopwatch() : clock.stopwatch())
+        ..start();
+
+  /// The deadline [_rpcTimer] fires at.
+  Duration? _rpcDeadline;
+
+  /// Makes the timer fire by [deadline]: O(1) per call. Replies do not
+  /// touch it; when it fires early, [_expireCalls] finds nothing due and
+  /// moves it to the earliest deadline left (docs/review/client.md F23:
+  /// recomputing the minimum on every call and reply made a burst O(n²)).
+  void _armRpcTimer(Duration deadline) {
+    final current = _rpcDeadline;
+    if (_rpcTimer != null && current != null && current <= deadline) return;
     _rpcTimer?.cancel();
-    _rpcDeadline = next;
-    final wait = next.difference(clock.now());
+    _rpcDeadline = deadline;
+    final wait = deadline - _rpcClock.elapsed;
     _rpcTimer = Timer(wait.isNegative ? Duration.zero : wait, _expireCalls);
   }
 
-  DateTime? _rpcDeadline;
+  /// No pending timer while no call waits.
+  void _disarmRpcTimerIfIdle() {
+    if (_calls.isNotEmpty) return;
+    _rpcTimer?.cancel();
+    _rpcTimer = null;
+    _rpcDeadline = null;
+  }
 
   void _expireCalls() {
     _rpcTimer = null;
     _rpcDeadline = null;
-    final now = clock.now();
-    final expired = <Object>[
-      for (final MapEntry(:key, :value) in _calls.entries)
-        if (!value.deadline.isAfter(now)) key,
-    ];
+    final now = _rpcClock.elapsed;
+    final expired = <Object>[];
+    Duration? next;
+    for (final MapEntry(:key, :value) in _calls.entries) {
+      if (value.deadline <= now) {
+        expired.add(key);
+      } else if (next == null || value.deadline < next) {
+        next = value.deadline;
+      }
+    }
     for (final id in expired) {
       _forget(id);
       _calls
@@ -902,7 +937,7 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
             ),
           );
     }
-    _scheduleRpcTimer();
+    if (next != null && _calls.isNotEmpty) _armRpcTimer(next);
   }
 
   /// Ids of calls that ended without a reply: a late reply is dropped (and
@@ -920,7 +955,7 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
     final calls = List<_PendingCall<T>>.of(_calls.values);
     _calls.keys.forEach(_forget);
     _calls.clear();
-    _scheduleRpcTimer();
+    _disarmRpcTimerIfIdle();
     for (final call in calls) {
       call.completer.completeError(
         WebSocketRpcException(
@@ -978,7 +1013,7 @@ final class WebSocketClientImpl<T> implements WebSocketClient<T> {
         return;
       }
       if (call != null) {
-        _scheduleRpcTimer();
+        _disarmRpcTimerIfIdle();
         try {
           call.completer.complete(handler.decode(message));
         } on WebSocketRpcException catch (e, s) {
@@ -1043,7 +1078,9 @@ final class _PendingCall<T> {
   _PendingCall(this.id, this.deadline);
 
   final Object id;
-  final DateTime deadline;
+
+  /// On the client's monotonic RPC clock.
+  final Duration deadline;
   final Completer<T> completer = Completer<T>();
 }
 

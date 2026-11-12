@@ -192,6 +192,89 @@ void main() {
       await client.close();
     });
 
+    test('deadlines: each call expires at its own time', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = rpcClient(server, timeout: const Duration(seconds: 5));
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        final failed = <String>[];
+        void track(String name, Future<Object?> call) =>
+            call.then((_) {}, onError: (Object _) => failed.add(name));
+        track('a 5 s', client.rpc({'n': 1}));
+        // An earlier deadline moves the timer forward.
+        track(
+          'b 1 s',
+          client.rpc({'n': 2}, timeout: const Duration(seconds: 1)),
+        );
+        track(
+          'c 3 s',
+          client.rpc({'n': 3}, timeout: const Duration(seconds: 3)),
+        );
+        async.elapse(const Duration(milliseconds: 999));
+        expect(failed, isEmpty);
+        async.elapse(const Duration(milliseconds: 2));
+        expect(failed, ['b 1 s']);
+        // A reply does not touch the timer; it fires at 3 s for c only.
+        final c = jsonDecode(server.last.received[2] as String) as Map;
+        server.last.sendJson({'id': c['id'], 'result': 0});
+        async.elapse(const Duration(seconds: 2));
+        expect(failed, ['b 1 s']);
+        async.elapse(const Duration(seconds: 2));
+        expect(failed, ['b 1 s', 'a 5 s']);
+        expect(
+          async.pendingTimers.where(
+            (t) =>
+                t.duration > Duration.zero &&
+                t.duration <= const Duration(seconds: 5),
+          ),
+          isEmpty,
+          reason: 'no RPC timer once no call waits',
+        );
+        client.close();
+      });
+    });
+
+    test('a burst of 20000 calls is linear (F23)', () async {
+      // Real time, real Stopwatch: 32000 calls took 1.9 s to issue and
+      // 2.4 s to answer when the timer was recomputed per call and reply.
+      final server = FakeWebSocketServer();
+      final client = rpcClient(server);
+      await client.connect('ws://t');
+      final watch = Stopwatch()..start();
+      final calls = [
+        for (var i = 0; i < 20000; i++) client.rpc({'n': i}),
+      ];
+      await Future<void>.delayed(Duration.zero);
+      for (final m in server.last.received) {
+        final id = (jsonDecode(m as String) as Map)['id'];
+        server.last.sendJson({'id': id, 'result': 0});
+      }
+      await Future.wait(calls);
+      expect(watch.elapsed, lessThan(const Duration(seconds: 1)));
+      await client.close();
+    });
+
+    test('a real-time timeout expires on the monotonic clock', () async {
+      final server = FakeWebSocketServer();
+      final client = rpcClient(
+        server,
+        timeout: const Duration(milliseconds: 100),
+      );
+      await client.connect('ws://t');
+      final watch = Stopwatch()..start();
+      await expectLater(
+        client.rpc({'n': 1}),
+        throwsA(isA<WebSocketRpcException>()),
+      );
+      expect(
+        watch.elapsed,
+        greaterThanOrEqualTo(const Duration(milliseconds: 95)),
+      );
+      expect(watch.elapsed, lessThan(const Duration(seconds: 1)));
+      await client.close();
+    });
+
     test('error replies, timeouts, unknown replies, disconnect', () {
       fake((async) {
         final server = FakeWebSocketServer();

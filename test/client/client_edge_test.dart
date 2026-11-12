@@ -272,6 +272,26 @@ void main() {
       expect(WebSocketTlsFailure.handshake.isCertificate, isFalse);
     });
 
+    test('open reports the URL the request provider returned (F29)', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            request: (url, attempt) => WebSocketRequest(
+              url.replace(queryParameters: {'token': 't$attempt'}),
+            ),
+          ),
+        );
+        client.connect('ws://t/feed');
+        async.flushMicrotasks();
+        final open = client.state as WebSocketState$Open;
+        expect(open.url, Uri.parse('ws://t/feed?token=t0'));
+        expect(server.last.request.url, open.url);
+        client.close();
+      });
+    });
+
     test('a throwing request provider is reported and retried', () {
       fake((async) {
         final server = FakeWebSocketServer();

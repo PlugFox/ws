@@ -105,7 +105,8 @@ final class WebSocketState$Connecting extends WebSocketState {
   final int attempt;
 
   @override
-  String toString() => 'WebSocketState.connecting($url, attempt $attempt)';
+  String toString() =>
+      'WebSocketState.connecting(${_redact(url)}, attempt $attempt)';
 }
 
 /// See [WebSocketState.open].
@@ -113,7 +114,9 @@ final class WebSocketState$Open extends WebSocketState {
   /// See [WebSocketState.open].
   const WebSocketState$Open({required this.url, this.protocol});
 
-  /// The connected URL.
+  /// The URL the connection was opened with: what the `request` provider
+  /// returned, which may carry a token. [toString] leaves out user info
+  /// and the query.
   final Uri url;
 
   /// The subprotocol selected by the server.
@@ -123,7 +126,7 @@ final class WebSocketState$Open extends WebSocketState {
   bool get isOpen => true;
 
   @override
-  String toString() => 'WebSocketState.open($url)';
+  String toString() => 'WebSocketState.open(${_redact(url)})';
 }
 
 /// See [WebSocketState.reconnecting].
@@ -189,3 +192,9 @@ final class WebSocketState$Closed extends WebSocketState {
   @override
   String toString() => 'WebSocketState.closed';
 }
+
+/// [url] for logs: no user info, and the query (tokens, often) elided.
+String _redact(Uri url) =>
+    '${url.scheme}://${url.host.contains(':') ? '[${url.host}]' : url.host}'
+    '${url.hasPort ? ':${url.port}' : ''}${url.path}'
+    '${url.hasQuery ? '?…' : ''}';

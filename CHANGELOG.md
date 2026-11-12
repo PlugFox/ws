@@ -28,6 +28,10 @@
   `WebSocketTls.trustUserCertificates` (Android: also trust user and MDM
   CAs). On Android both transports drop the system CAs the user disabled.
   TLS settings are built once per distinct value and reused.
+- `WebSocketState.open.url` is the URL the request provider returned;
+  state `toString()` no longer prints credentials or the query. RPC
+  deadlines use a monotonic clock, and a burst of calls is linear (32 000
+  calls: 1.9 s → 25 ms).
 - Closing: the client lets the server close TCP first (FIN, then up to
   1 s), so a server still sending never loses our close frame; long close
   reasons are cut at a character boundary. Handshake: `103 Early Hints`

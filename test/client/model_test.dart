@@ -37,6 +37,17 @@ void main() {
       expect((open as WebSocketState$Open).protocol, 'v1');
       expect(open.toString(), 'WebSocketState.open($url)');
 
+      // Logs never get credentials or the query (tokens).
+      final secret = Uri.parse('wss://u:p@[::1]:8443/s?token=t');
+      expect(
+        WebSocketState.open(url: secret).toString(),
+        'WebSocketState.open(wss://[::1]:8443/s?…)',
+      );
+      expect(
+        WebSocketState.connecting(url: secret, attempt: 1).toString(),
+        'WebSocketState.connecting(wss://[::1]:8443/s?…, attempt 1)',
+      );
+
       const reconnecting = WebSocketState.reconnecting(
         attempt: 2,
         delay: Duration(milliseconds: 1500),

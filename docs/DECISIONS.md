@@ -1617,3 +1617,37 @@ in D50 as native 26).
 - Found on the way: the contract checker (D47) waited for `onClosed`
   from a connection whose `connect()` had thrown; fixed.
 - Status: **adopted**.
+
+### D52. The remaining client findings
+
+docs/review/client.md F23, F27–F29 (the others were fixed in D38).
+
+- **F23, RPC timers: fixed.** A call moves the single RPC timer only
+  when its deadline is earlier than the armed one (O(1)); a reply does
+  not touch it; the timer, when it fires, expires what is due and re-arms
+  for the earliest deadline left. Before, both recomputed the minimum
+  over every pending call. Burst over the fake transport, AOT:
+
+  | Calls | Issue before / after | Answer before / after |
+  |---|---|---|
+  | 2 000 | 18 / 1–3 ms | 20 / 3–5 ms |
+  | 8 000 | 151 / 3–6 ms | 169 / 9–16 ms |
+  | 32 000 | 1902 / 24–28 ms | 2406 / 47–50 ms |
+
+  Test: 20 000 calls issued and answered under 1 s (1.68 s on the old
+  code); per-call deadlines in fake time; no RPC timer once no call
+  waits.
+- **F28, wall-clock deadlines: fixed.** Deadlines are measured on a
+  monotonic `Stopwatch`. `clock.stopwatch()` from package:clock reads
+  `clock.now()`, the wall clock, so it is used only when a test replaced
+  the clock (fake time).
+- **F27, synchronous vs future errors: kept and documented.** Malformed
+  arguments (URL, scheme, close code or reason) throw synchronously, as
+  programming errors do in Dart; everything that depends on state or the
+  network fails the future. Already pinned by tests; now in the dartdoc.
+- **F29, `open.url`: fixed.** It is the URL the `request` provider
+  returned and the transport used. Because that URL may carry a token,
+  the `toString()` of `connecting` and `open` now leaves out user info and
+  the query (`wss://host:8443/s?…`); before, it printed `user:pass@` from
+  the given URL.
+- Status: **adopted**.
