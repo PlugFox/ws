@@ -1,7 +1,9 @@
 import 'dart:math' as math;
 
-/// Exponential backoff with full jitter:
-/// `min + random(0, min(max - min, min * 2^attempt))`.
+/// Exponential backoff with jitter above a floor:
+/// `min + random(0, min(max - min, min * 2^attempt))`. Unlike AWS's "full
+/// jitter" (`random(0, min(cap, base * 2^attempt))`) the delay never drops
+/// below `min`, so a fleet of clients cannot retry at once.
 ///
 /// https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
 Duration backoffDelay(

@@ -613,11 +613,10 @@ bugs the conformance suite could not trigger. Fixed:
   made every build "File modified during build" and re-ran cargo. Only
   existing files are declared now.
 
-Open (tracked in ROADMAP): the native send queue is not bounded in bytes
-(the Dart client applies `sendHighWaterMark` backpressure, but a caller
-that ignores `push` futures can grow native memory); small zero-copy
-payloads pin tungstenite's 128 KiB read chunks (copy payloads under a
-threshold — measure first); Happy Eyeballs for IPv6; TLS `close_notify`;
+Open (tracked in ROADMAP): ~~the native send queue is not bounded in
+bytes~~ (closed by D36, `sendBufferLimit`); ~~small zero-copy payloads pin
+tungstenite's 128 KiB read chunks~~ (not reproduced with a sound measure,
+D50); ~~Happy Eyeballs for IPv6~~ (adopted in D34); TLS `close_notify`;
 a port probe on `init`.
 
 ### D30. Sharing the FFI layer between `ws` (path) and `ws_native` (hook)
@@ -756,8 +755,8 @@ a port probe on `init`.
   tools and tasks live in one file (`mise.toml`).
   - mise also pins Rust (through rustup, with rustfmt and clippy), `gh`,
     `actionlint` and `shellcheck`.
-  - Task dependencies run in parallel. `mise run check` (format,
-    analyzers, all tests) took 16 s on an M-series Mac.
+  - Task dependencies run in parallel, so `mise run check` (format,
+    analyzers, all tests) takes about as long as its slowest suite.
   - `make` needs `.PHONY` boilerplate and is awkward on Windows. `just`
     would be one more tool that pins nothing.
   - The `Makefile` was removed; its targets are tasks now.
@@ -859,8 +858,8 @@ a port probe on `init`.
   in the client before encoding, so all transports share it, and the
   queue may exceed the limit by one message. This closes the D29 item
   "the native send queue is not bounded in bytes".
-- Status: **adopted**. End-to-end proxy tests wait for the test server
-  (`server/`, TEST_PLAN §3).
+- Status: **adopted**. End-to-end proxy tests run against the test server
+  (`server_suite.dart`, group `proxy`; D48 adds the reconnect decisions).
 
 ### D37. Behaviour fixed by the new tests
 

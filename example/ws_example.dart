@@ -4,7 +4,7 @@ import 'dart:async';
 import 'package:ws/ws.dart';
 
 /// Connects to an echo server, sends a few messages, measures a round trip
-/// and closes. Run against the repository's server: `make server`, then
+/// and closes. Run against the repository's server: `mise run server`, then
 /// `dart run example/ws_example.dart ws://127.0.0.1:9090/echo`.
 Future<void> main(List<String> args) async {
   final url = args.isNotEmpty ? args.first : 'ws://127.0.0.1:9090/echo';

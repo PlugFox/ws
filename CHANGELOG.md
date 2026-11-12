@@ -6,7 +6,8 @@
   with `vm`/`js` parts.
 - New pure-Dart RFC 6455 transport on `RawSocket` (no `dart:io`
   `WebSocket`), browser transport on `package:web` (dart2js and dart2wasm).
-- Reconnect with full-jitter backoff and terminal-failure detection,
+- Reconnect with exponential backoff (jitter above a floor) and
+  terminal-failure detection,
   heartbeat, request/response correlation, metrics.
 - Dead connections are detected by default: heartbeat on (30 s idle,
   10 s to answer; a draining upload extends the wait) and TCP keepalive
@@ -53,6 +54,24 @@
   notices are. Flutter and `dart build cli` apps use the
   `ws_native` package instead, which bundles the library through a build
   hook.
+
+### Removed or changed from 1.x
+
+- `WebSocketClient([options])` and `WebSocketClient.connect(url)` are
+  replaced by `WebSocketClient.text()`, `.binary()` and `.json()` (one
+  codec per client); `add(data)` by `push(data)`.
+- Interceptors (`WSInterceptor`) are gone; a codec or `onMessage`
+  covers them.
+- `WebSocketOptions.common(...)`, `.vm(...)`, `.js(...)` and the platform
+  option classes are one plain-data `WebSocketOptions` with `vm` and `js`
+  parts.
+- `ConnectionManager` and its metrics are gone; `client.metrics` replaces
+  them.
+- The fake client (`ws_client_fake.dart`) is `FakeWebSocketServer` in
+  `package:ws/testing.dart`, a transport rather than a client.
+- New, not in 1.x: `rpc()`, an HTTP `CONNECT` proxy
+  (`WebSocketVmOptions.proxy`), TLS options (`WebSocketTls`: extra roots,
+  pins, user CAs, `allowInsecure`) and a send limit (`sendBufferLimit`).
 
 ## 1.1.0-dev.1
 

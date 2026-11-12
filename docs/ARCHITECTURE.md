@@ -115,7 +115,7 @@ number of messages / `onPong` / `onDrain`, then exactly one `onClosed`.
 | text | `onTextBytes` (zero-copy view) | `onTextString` | `onJson` (tape) or `onTextBytes` | `onTextBytes` |
 | binary | `onBinary` | `onBinary` (ArrayBuffer view) | `onBinary` (external typed data) | `onBinary` |
 | pong | protocol | — (no browser API) | protocol, handled in Rust | `autoPong` |
-| drain | write queue emptied | polled `bufferedAmount` | credit / queue event | — |
+| drain | write queue emptied | polled `bufferedAmount` | credit / queue event | `drain()` |
 | handshake failure | `WebSocketHandshakeException` with status | `WebSocketConnectionException` (browser hides it) | with status | `reject(status)` |
 
 Text validation: fragmented text is validated incrementally by the frame

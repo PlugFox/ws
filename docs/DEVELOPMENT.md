@@ -5,11 +5,17 @@ Tools and tasks are defined in `mise.toml`.
 ```bash
 mise install        # Dart, Rust (+ rustfmt, clippy), gh, actionlint, shellcheck
 mise tasks          # list the tasks
-mise run check      # what CI checks: format, analyzers, .pubignore, all tests
+mise run check      # a superset of CI: format, analyzers, .pubignore, all tests
 ```
 
 Things the task list does not show:
 
+- The VM, browser and native suites run against the Rust test server
+  (`server/`). `test:vm`, `test:web` and `test:native` build it first
+  (`mise run server:build`); a plain `dart test` skips those tests when
+  the binary is missing, except on CI (`CI=true`), where they fail.
+  `WS_TEST_SERVER` points at another binary. The browser starts it in a
+  hybrid isolate (`test/support/server_hybrid.dart`).
 - `test:native` runs the shared conformance suite twice. The first run uses
   the library that the `ws_native` hook bundles. The second loads
   `native/rust/target/release` by path through `package:ws/native.dart`

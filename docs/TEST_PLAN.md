@@ -2,8 +2,8 @@
 
 A list of test scenarios taken from other WebSocket test suites and mapped onto
 `ws` 2.0's layers. Each scenario is marked covered, partial or missing, and lists
-the server behaviour it needs. This file does not contain code. Coverage baseline: VM line
-coverage 63.6% (`coverage/lcov.info`, 2026-11-12). Where a scenario would
+the server behaviour it needs. This file does not contain code. Coverage: VM line coverage 95.3%
+(`mise run coverage`, 2026-11-13; 63.6% when this plan was written). Where a scenario would
 reach uncovered lines, they are named as `file:line`.
 
 ## 1. Sources examined
@@ -11,7 +11,7 @@ reach uncovered lines, they are named as `file:line`.
 | Key | Source | What was used |
 |---|---|---|
 | WS1 | `_lib/test` (ws 1.x) | `client/client_test.dart`, `model/*_test.dart`, `metrics/metrics_test.dart`, `connection_manager_test.dart` |
-| SPN | `/Users/fox/git/spinify/test` | `unit/spinify_test.dart` (state, reconnect, ping, RPC), `smoke/smoke_test.dart`, `unit/model_test.dart` |
+| SPN | [spinify `test/`](https://github.com/PlugFox/spinify/tree/master/test) | `unit/spinify_test.dart` (state, reconnect, ping, RPC), `smoke/smoke_test.dart`, `unit/model_test.dart` |
 | SDK | dart-lang/sdk `tests/standalone/io/web_socket*_test.dart` | `web_socket_test`, `_protocol_test`, `_ping_test`, `_error_test`, `_abnormal_close_test`, `_compression_test`, `_protocol_processor_test` |
 | CT | dart-lang/http `pkgs/web_socket_conformance_tests/lib/src` | all 8 groups (34 tests); details in section 4 |
 | NODE | websockets/ws `test/websocket.test.js` (W), `receiver.test.js` (R), `sender.test.js` (S) | client-relevant cases |
@@ -42,92 +42,92 @@ endpoint is also how the web transport gets the scenario.
 
 | ID | Scenario | Source | Server | Status |
 |---|---|---|---|---|
-| P1 | RSV2 / RSV3 set → 1002 (only RSV1 is tested today) | NODE R "RSV2 is on / RSV3 is on"; PY P test_bad_reserved_bits | — | ◐ |
-| P2 | RSV1 on a control frame and on a continuation frame → 1002 | NODE R "control frame has RSV1", "RSV1 on and opcode is 0" | — | ❌ |
-| P3 | New text/binary frame in the middle of a fragmented message → 1002 (`frame_reader.dart:199`) | NODE R "opcode 1/2 in the middle of a fragmented message"; OK Reader twoFrameNotContinuation | — | ❌ |
-| P4 | Fragmented text: the final fragment ends mid-codepoint, or the bad byte is only in a later fragment → 1007 (`frame_reader.dart:205,229,233`) | NODE R "invalid UTF-8 (2/2)"; TG; Autobahn 6.x | — | ❌ |
-| P5 | Single-frame text ending mid-codepoint (`81 01 E2`) → 1007 through the decoder path | Autobahn 6.3; NODE R "invalid UTF-8 (1/2)" | — | ◐ (validator only) |
-| P6 | Close codes on the wire: 0, 999, 1004, 1006, 1015, 1016–2999, ≥5000 → 1002; 1000–1003, 1007–1014, 3000–4999 accepted | NODE R "invalid close code"; OK Reader closeOutOfRangeThrows; Autobahn 7.9.x | — | ◐ (1005 only) |
-| P7 | 64-bit length: all bits set, and 2^32+5 (no wrap at 32 bits on dart2js), against the limit | TG frame::parse_overflow, length_above_usize_max_rejected; GO C TestReadLimit overflow | — | ◐ (MSB only) |
-| P8 | Non-minimal length encoding (`7E 00 05`): decide the policy (NODE, GO and TG all accept it), then pin it | RFC 6455 §5.2; agent finding | — | ❌ |
-| P9 | Many zero-length continuations (fragment-count DoS) are bounded | NODE R "too many message fragments", "too many buffered chunks" | — | ❌ |
-| P10 | Thousands of tiny frames in one chunk; frame sizes 0/1/125/126/127/65535/65536 across read chunk sizes | NODE R "thousands of frames"; GO C TestFraming | — | ◐ |
-| P11 | Message exactly at `maxMessageSize` with an interleaved ping passes; +1 byte fails | GO C TestReadLimit "is enforced" | — | ◐ |
-| P12 | Control payload exactly 125 passes; empty ping/pong/close passes | GO C TestControl | — | ◐ (126 tested) |
-| P13 | Unsolicited pong is reported and the data stream is unaffected; ping/pong/text/binary keep their order | TG protocol::receive_messages | — | ❌ |
-| P14 | Handshake validation (`handshake.dart:160–192`): missing `Upgrade`, missing `Connection`, a token list (`Upgrade: foo, websocket`, `Connection: keep-alive, Upgrade`), mixed-case header names, missing vs duplicated `Sec-WebSocket-Accept`, an unoffered extension, an unknown subprotocol, a protocol when none was offered | OK H missing/wrong Connection, Upgrade, MagicHeader; NODE W subprotocol/extension cases; GO CS TestDialExtraTokensInRespHeaders; SDK testBadUpgradeResponse | — | ◐ (bad Accept, 401) |
-| P15 | `user:pass@host` URL → `Authorization: Basic` with percent-decoding (`handshake.dart:77–79`); IPv6 literal → `Host: [::1]:port` | NODE W "authorization header if url has userinfo"; SDK testBasicAuthentication | — | ❌ |
-| P16 | Junk or partial head: `headEnd` returns -1 (`:122`); a non-HTTP status line → `FormatException`; `HandshakeError.toString` (`:218`) | PY C test_junk_handshake_response | — | ❌ |
-| P17 | Writer: close reason of exactly 123 bytes, and a multibyte char straddling 123 | OK H closeReasonMaximumLength; CT "too long close reason" | — | ❌ |
+| P1 | RSV2 / RSV3 set → 1002 (only RSV1 is tested today) | NODE R "RSV2 is on / RSV3 is on"; PY P test_bad_reserved_bits | — | ✅ unit tests (tests_docs §4) |
+| P2 | RSV1 on a control frame and on a continuation frame → 1002 | NODE R "control frame has RSV1", "RSV1 on and opcode is 0" | — | ✅ unit tests (tests_docs §4) |
+| P3 | New text/binary frame in the middle of a fragmented message → 1002 (`frame_reader.dart:199`) | NODE R "opcode 1/2 in the middle of a fragmented message"; OK Reader twoFrameNotContinuation | — | ✅ unit tests (tests_docs §4) |
+| P4 | Fragmented text: the final fragment ends mid-codepoint, or the bad byte is only in a later fragment → 1007 (`frame_reader.dart:205,229,233`) | NODE R "invalid UTF-8 (2/2)"; TG; Autobahn 6.x | — | ✅ unit tests (tests_docs §4) |
+| P5 | Single-frame text ending mid-codepoint (`81 01 E2`) → 1007 through the decoder path | Autobahn 6.3; NODE R "invalid UTF-8 (1/2)" | — | ✅ unit tests (tests_docs §4) |
+| P6 | Close codes on the wire: 0, 999, 1004, 1006, 1015, 1016–2999, ≥5000 → 1002; 1000–1003, 1007–1014, 3000–4999 accepted | NODE R "invalid close code"; OK Reader closeOutOfRangeThrows; Autobahn 7.9.x | — | ✅ unit tests (tests_docs §4) |
+| P7 | 64-bit length: all bits set, and 2^32+5 (no wrap at 32 bits on dart2js), against the limit | TG frame::parse_overflow, length_above_usize_max_rejected; GO C TestReadLimit overflow | — | ✅ unit tests (tests_docs §4) |
+| P8 | Non-minimal length encoding (`7E 00 05`): decide the policy (NODE, GO and TG all accept it), then pin it | RFC 6455 §5.2; agent finding | — | ✅ unit tests (tests_docs §4) |
+| P9 | Many zero-length continuations (fragment-count DoS) are bounded | NODE R "too many message fragments", "too many buffered chunks" | — | ✅ unit tests (tests_docs §4) |
+| P10 | Thousands of tiny frames in one chunk; frame sizes 0/1/125/126/127/65535/65536 across read chunk sizes | NODE R "thousands of frames"; GO C TestFraming | — | ✅ unit tests (tests_docs §4) |
+| P11 | Message exactly at `maxMessageSize` with an interleaved ping passes; +1 byte fails | GO C TestReadLimit "is enforced" | — | ✅ unit tests (tests_docs §4) |
+| P12 | Control payload exactly 125 passes; empty ping/pong/close passes | GO C TestControl | — | ✅ unit tests (tests_docs §4) |
+| P13 | Unsolicited pong is reported and the data stream is unaffected; ping/pong/text/binary keep their order | TG protocol::receive_messages | — | ✅ unit tests (tests_docs §4) |
+| P14 | Handshake validation (`handshake.dart:160–192`): missing `Upgrade`, missing `Connection`, a token list (`Upgrade: foo, websocket`, `Connection: keep-alive, Upgrade`), mixed-case header names, missing vs duplicated `Sec-WebSocket-Accept`, an unoffered extension, an unknown subprotocol, a protocol when none was offered | OK H missing/wrong Connection, Upgrade, MagicHeader; NODE W subprotocol/extension cases; GO CS TestDialExtraTokensInRespHeaders; SDK testBadUpgradeResponse | — | ✅ unit tests (tests_docs §4) |
+| P15 | `user:pass@host` URL → `Authorization: Basic` with percent-decoding (`handshake.dart:77–79`); IPv6 literal → `Host: [::1]:port` | NODE W "authorization header if url has userinfo"; SDK testBasicAuthentication | — | ✅ unit tests (tests_docs §4) |
+| P16 | Junk or partial head: `headEnd` returns -1 (`:122`); a non-HTTP status line → `FormatException`; `HandshakeError.toString` (`:218`) | PY C test_junk_handshake_response | — | ✅ unit tests (tests_docs §4) |
+| P17 | Writer: close reason of exactly 123 bytes, and a multibyte char straddling 123 | OK H closeReasonMaximumLength; CT "too long close reason" | — | ✅ unit tests (tests_docs §4) |
 
 ### 2.2 Client core (C), fake transport
 
 | ID | Scenario | Source | Server | Status |
 |---|---|---|---|---|
-| C1 | `toString` and fields of every state, exception and `WebSocketMetrics` (`state.dart` 40%, `exceptions.dart` 47%, `metrics.dart` 17%) | WS1 model/state_test, websocket_exception_test, metrics_test; SPN model_test Metric ToString | — | ❌ |
+| C1 | `toString` and fields of every state, exception and `WebSocketMetrics` (`state.dart` 40%, `exceptions.dart` 47%, `metrics.dart` 17%) | WS1 model/state_test, websocket_exception_test, metrics_test; SPN model_test Metric ToString | — | ✅ unit tests (tests_docs §4) |
 | C2 | Metrics over a lifecycle: `connects`, `reconnectAttempts`, `bytesSent/Received`, `lastError`, `openedAt`, `pendingRpc`, `bufferedAmount` | SPN Metrics; WS1 metrics "from client" | — | ◐ |
 | C3 | Full sequence connect→disconnect→connect→disconnect→close emits states in order; `states`/`messages` are done after close | SPN Change_client_states, Closed_after_close | — | ◐ |
-| C4 | Idempotence: disconnect ×10 on a disconnected client; close() twice; disconnect after close | SPN Disconnect_disconnected; CT "close after close"; PY K test_close_idempotency; SDK testDoubleCloseClient | — | ❌ |
-| C5 | Using a closed client: push/rpc/ping/reconnect/disconnect error with typed errors (`client.dart:288,291`) | WS1 "Closed client" group, "try use closed client" | — | ◐ (connect only) |
+| C4 | Idempotence: disconnect ×10 on a disconnected client; close() twice; disconnect after close | SPN Disconnect_disconnected; CT "close after close"; PY K test_close_idempotency; SDK testDoubleCloseClient | — | ✅ unit tests (tests_docs §4) |
+| C5 | Using a closed client: push/rpc/ping/reconnect/disconnect error with typed errors (`client.dart:288,291`) | WS1 "Closed client" group, "try use closed client" | — | ✅ unit tests (tests_docs §4) |
 | C6 | connect() repeated while connecting to the same URL is joined, not restarted (`client.dart:272`); several URLs in a row | SPN Few_connects_in_a_row; WS1 "connect to different URLs" | — | ◐ |
 | C7 | close() (terminal) while connecting / during the handshake / during the reconnect wait | NODE W "#close while connecting (1/3–3/3)", "#terminate while connecting"; OK H closeWithoutSuccessfulConnect | — | ◐ (disconnect only) |
-| C8 | Close 1013 → the next delay is `maxDelay` (`client.dart:446`) | NODE W "allows close code 1013" | — | ❌ |
-| C9 | Request provider throws → `WebSocketConnectionException`, retried (`client.dart:333–339`) | PY C test_reconnect (token refresh variants) | — | ❌ |
-| C10 | `onOpen` hook throws → connection dropped, cause reported (`client.dart:371–374`) | WS1 "first message after connect" (inverse) | — | ❌ |
-| C11 | `shouldReconnect` throws → reported, treated as no (`client.dart:465`) | PY C test_reconnect_with_custom_process_exception (raising variant) | — | ❌ |
-| C12 | Mixed failure sequence: stall (timeout) → drop → 503 → ok (stable) → drop → 402 terminal; check attempts, delays, final state | PY C test_reconnect | — | ◐ (pieces only) |
+| C8 | Close 1013 → the next delay is `maxDelay` (`client.dart:446`) | NODE W "allows close code 1013" | — | ✅ unit tests (tests_docs §4) |
+| C9 | Request provider throws → `WebSocketConnectionException`, retried (`client.dart:333–339`) | PY C test_reconnect (token refresh variants) | — | ✅ unit tests (tests_docs §4) |
+| C10 | `onOpen` hook throws → connection dropped, cause reported (`client.dart:371–374`) | WS1 "first message after connect" (inverse) | — | ✅ unit tests (tests_docs §4) |
+| C11 | `shouldReconnect` throws → reported, treated as no (`client.dart:465`) | PY C test_reconnect_with_custom_process_exception (raising variant) | — | ✅ unit tests (tests_docs §4) |
+| C12 | Mixed failure sequence: stall (timeout) → drop → 503 → ok (stable) → drop → 402 terminal; check attempts, delays, final state | PY C test_reconnect | — | ◐ policy per failure on real sockets (D48); mixed sequences in the random runs (D49) |
 | C13 | Late events from a replaced session (old fake connection sends or closes after a URL switch or reconnect) are ignored (the `identical(_session, …)` guards) | ARCHITECTURE "session identity"; SPN Reconnect_after_disconnected_transport | — | ✅ `client_edge_test.dart` "events of a replaced connection are ignored" (D47) |
-| C14 | After a local disconnect nothing more reaches `messages`; messages already delivered before close stay delivered | CT "peer writes after close are ignored"; PY K test_close_preserves_queued_messages | — | ❌ |
-| C15 | push of an unencodable value (JSON cyclic or unsupported) → `WebSocketFormatException`, connection stays open (`client.dart:572`, `codec.dart:161`) | WS1 "emit unsupported data type" | — | ❌ |
-| C16 | Codec branches: binary client receives text, json client receives binary, invalid JSON in binary (`codec.dart:72–91,129–137`) | WS1 message_stream_test | — | ◐ |
-| C17 | RPC: 100 concurrent calls with shuffled replies; not connected (`:592`); `encode` throws (`:601`); `match` throws (`:723`); `decode` throws → `remote` (`:737`); the send fails after registration (`:610`) | SPN RPC_many_requests, smoke RPC Concurrency | — | ◐ |
-| C18 | Manual `ping()`: not connected (`:691`), timeout (`:938`), two concurrent pings resolved by one pong | PY K test_acknowledge_previous_ping; OK R afterSocketClosedPingFailsWebSocket | — | ❌ |
-| C19 | Heartbeat `ping` builder throws (`:913`); `isPong` throws (`:713`) | — (callback guarding rule) | — | ❌ |
-| C20 | Heartbeat stops on disconnect/close: no pending timers left (`fake_async.pendingTimers`) | PY K test_keepalive_terminates_*; SDK web_socket_ping_test testPingCancelledOnClose | — | ❌ |
+| C14 | After a local disconnect nothing more reaches `messages`; messages already delivered before close stay delivered | CT "peer writes after close are ignored"; PY K test_close_preserves_queued_messages | — | ✅ unit tests (tests_docs §4) |
+| C15 | push of an unencodable value (JSON cyclic or unsupported) → `WebSocketFormatException`, connection stays open (`client.dart:572`, `codec.dart:161`) | WS1 "emit unsupported data type" | — | ✅ unit tests (tests_docs §4) |
+| C16 | Codec branches: binary client receives text, json client receives binary, invalid JSON in binary (`codec.dart:72–91,129–137`) | WS1 message_stream_test | — | ✅ unit tests (tests_docs §4) |
+| C17 | RPC: 100 concurrent calls with shuffled replies; not connected (`:592`); `encode` throws (`:601`); `match` throws (`:723`); `decode` throws → `remote` (`:737`); the send fails after registration (`:610`) | SPN RPC_many_requests, smoke RPC Concurrency | — | ✅ unit tests (tests_docs §4) |
+| C18 | Manual `ping()`: not connected (`:691`), timeout (`:938`), two concurrent pings resolved by one pong | PY K test_acknowledge_previous_ping; OK R afterSocketClosedPingFailsWebSocket | — | ✅ unit tests (tests_docs §4) |
+| C19 | Heartbeat `ping` builder throws (`:913`); `isPong` throws (`:713`) | — (callback guarding rule) | — | ✅ unit tests (tests_docs §4) |
+| C20 | Heartbeat stops on disconnect/close: no pending timers left (`fake_async.pendingTimers`) | PY K test_keepalive_terminates_*; SDK web_socket_ping_test testPingCancelledOnClose | — | ✅ unit tests (tests_docs §4) |
 | C21 | Any inbound traffic defers the idle ping; a long-lived chatty connection never pings; unsolicited pongs count as liveness (document this: OK treats them as not acknowledging) | SPN Missing_pings, Emulate_long_lifespan; OK R unexpectedPongsDoNotInterfereWithFailureDetection | — | ◐ |
 | C22 | Re-entrancy: `onStateChange`/listeners call `disconnect()`, `connect()`, `close()` synchronously for each state (D22) | — (rule from ARCHITECTURE) | — | ✅ `reentrancy_test.dart`, 9 operations × 6 states (D49) |
 | C23 | Races: `connect`+`close`, `disconnect`+server close, `reconnect()`+`disconnect()` in the same microtask; pushes awaiting drain when the connection drops | NODE W "calls the callback if the socket is forcibly closed"; GO C TestConcurrencyWriteControl | — | ◐ |
 | C24 | Randomized operation sequences (seeded) over the fake, checking invariants: one terminal state, no event after `closed`, waiters always complete | ROADMAP §6; SPN Change_client_states | — | ✅ `reentrancy_test.dart`, 300 seeds × 60 steps (D49) |
-| C25 | No `onError`: errors go to the zone handler (`client.dart:225`) | — | — | ❌ |
-| C26 | `close`/`disconnect` validation: codes 0, 999, 1004–1006, 2999, 5000 rejected; 3000 and 4999 accepted; reason of exactly 123 bytes accepted | CT close_local "reserved close code …"; OK R clientCloseWith0Fails | — | ◐ |
+| C25 | No `onError`: errors go to the zone handler (`client.dart:225`) | — | — | ✅ unit tests (tests_docs §4) |
+| C26 | `close`/`disconnect` validation: codes 0, 999, 1004–1006, 2999, 5000 rejected; 3000 and 4999 accepted; reason of exactly 123 bytes accepted | CT close_local "reserved close code …"; OK R clientCloseWith0Fails | — | ✅ unit tests (tests_docs §4) |
 | C27 | Backoff: `maxDelay` cap, jitter bounds, `minDelay ≥ maxDelay` | WS1 connection_manager "backoffDelay", "minDelay >= maxDelay"; SPN util Backoff | — | ◐ |
 
 ### 2.3 Transport conformance (T): dart:io, native, and web where marked
 
 | ID | Scenario | Source | Server | Web? | Status |
 |---|---|---|---|---|---|
-| T1 | Server drops TCP right after 101 (FIN, then RST variant), no close frame → `onClosed(null, …, ConnectionException)`, client reconnects (`dart_transport.dart:146–151`) | NODE W "close event raised when server closes"; SDK abnormal_close, testForceCloseServerEnd; CT disconnect_after_upgrade | raw / `/drop` | yes | ❌ |
-| T2 | Server closes during the handshake (after reading the request) → `HandshakeException('closed during the handshake')`, retried | PY C test_connection_closed_during_handshake | raw / `/eof-handshake` | yes | ❌ |
-| T3 | TCP accepted, no response → `connectTimeout` on real transports, retried | PY C test_timeout_during_handshake; NODE W "opening handshake timeout"; GO CS TestHandshakeTimeout; OK H callTimeoutAppliesToSetup | raw / `/hang` | yes | ◐ (fake only) |
-| T4 | Junk (non-HTTP) response, and an oversized response head → handshake errors (`dart_transport.dart:136,191`) | PY C test_junk_handshake_response | raw / `/junk`, `/big-head` | no (browser hides) | ❌ |
-| T5 | Invalid 101 variants end to end (as in P14), plus whether each is terminal or retried | OK H *Header tests; NODE W Accept/Upgrade/subprotocol/extension; TG handshake.rs | raw / `/bad-101` | no | ❌ |
-| T6 | Status matrix: 200 without upgrade, 400/401/403/404 terminal, 408/425/429 retried, 500/503 retried, `Retry-After` exposed in `headers` | OK H notFound, non101RetainsBody; CT no_upgrade; SDK testNoUpgrade; PY C test_reconnect | `/status` | yes | ✅ with reconnect on, real sockets, pure Dart and native (D48) |
-| T7 | Redirect 301/302/307/308: decide the policy (browsers fail; PY follows with a limit and strips credentials cross-origin) and pin it | NODE W followRedirects/maxRedirects; PY C test_redirect*, test_redirect_limit, test_redirect_to_insecure_uri | `/redirect` | yes | ❌ |
-| T8 | Close-handshake timeout: server ignores our close frame → abort after `disconnectTimeout`, state reaches disconnected | OK R clientCloseCancelsConnectionAfterTimeout; OK H clientCancelsIfCloseIsNotAcknowledged; PY K test_close_timeout_waiting_for_close_frame; NODE W closeTimeout | `/ignore-close` | yes | ◐ (fake only) |
+| T1 | Server drops TCP right after 101 (FIN, then RST variant), no close frame → `onClosed(null, …, ConnectionException)`, client reconnects (`dart_transport.dart:146–151`) | NODE W "close event raised when server closes"; SDK abnormal_close, testForceCloseServerEnd; CT disconnect_after_upgrade | raw / `/drop` | yes | ✅ server suite, every transport (D46) |
+| T2 | Server closes during the handshake (after reading the request) → `HandshakeException('closed during the handshake')`, retried | PY C test_connection_closed_during_handshake | raw / `/eof-handshake` | yes | ✅ server suite, every transport (D46) |
+| T3 | TCP accepted, no response → `connectTimeout` on real transports, retried | PY C test_timeout_during_handshake; NODE W "opening handshake timeout"; GO CS TestHandshakeTimeout; OK H callTimeoutAppliesToSetup | raw / `/hang` | yes | ✅ server suite, every transport (D46) |
+| T4 | Junk (non-HTTP) response, and an oversized response head → handshake errors (`dart_transport.dart:136,191`) | PY C test_junk_handshake_response | raw / `/junk`, `/big-head` | no (browser hides) | ✅ server suite, every transport (D46) |
+| T5 | Invalid 101 variants end to end (as in P14), plus whether each is terminal or retried | OK H *Header tests; NODE W Accept/Upgrade/subprotocol/extension; TG handshake.rs | raw / `/bad-101` | no | ✅ server suite, every transport (D46) |
+| T6 | Status matrix: 200 without upgrade, 400/401/403/404 terminal, 408/425/429 retried, 500/503 retried, `Retry-After` exposed in `headers` | OK H notFound, non101RetainsBody; CT no_upgrade; SDK testNoUpgrade; PY C test_reconnect | `/status` | yes | ✅ with reconnect on (D48) |
+| T7 | Redirect 301/302/307/308: decide the policy (browsers fail; PY follows with a limit and strips credentials cross-origin) and pin it | NODE W followRedirects/maxRedirects; PY C test_redirect*, test_redirect_limit, test_redirect_to_insecure_uri | `/redirect` | yes | ✅ server suite, every transport (D46) |
+| T8 | Close-handshake timeout: server ignores our close frame → abort after `disconnectTimeout`, state reaches disconnected | OK R clientCloseCancelsConnectionAfterTimeout; OK H clientCancelsIfCloseIsNotAcknowledged; PY K test_close_timeout_waiting_for_close_frame; NODE W closeTimeout | `/ignore-close` | yes | ✅ server suite, every transport (D46) |
 | T9 | Server answers our close but keeps TCP open → the client closes TCP itself in bounded time | PY K test_close_timeout_waiting_for_connection_closed | `/close?then=hold` | yes | ❌ |
-| T10 | Server sends close, then RST at once (no wait for our reply) → still a clean close with its code | TG connection_reset::test_evil_server_close; PY P test_client_receives_close_then_eof; OK R serverCloseBreaksReadMessageLoop | `/close?then=rst` | yes | ❌ |
-| T11 | Server close codes 1000/1001/1011/1012/1013/1014/3000/4999 with reasons (including a multibyte one at 123 bytes); an empty close → `code == null` (1005) | NODE W 1013/1014; CT close_remote; OK R emptyCloseInitiatesShutdown | `/close` | yes | ◐ (4001) |
+| T10 | Server sends close, then RST at once (no wait for our reply) → still a clean close with its code | TG connection_reset::test_evil_server_close; PY P test_client_receives_close_then_eof; OK R serverCloseBreaksReadMessageLoop | `/close?then=rst` | yes | ✅ server suite, every transport (D46) |
+| T11 | Server close codes 1000/1001/1011/1012/1013/1014/3000/4999 with reasons (including a multibyte one at 123 bytes); an empty close → `code == null` (1005) | NODE W 1013/1014; CT close_remote; OK R emptyCloseInitiatesShutdown | `/close` | yes | ✅ server suite, every transport (D46) |
 | T12 | Simultaneous close (both sides send close in the same instant) → one `onClosed` | OK R clientAndServerCloseClosesConnection, serverCloseThenClientClose; NODE W "closes cleanly after simultaneous errors" | `/close?after_ms=` | yes | ❌ |
 | T13 | Data frames arriving after we sent close (before the ack) are dropped (CT) or delivered (TG); decide and pin | TG receive_after_init_close; CT "peer writes after close are ignored" | `/flood` + disconnect | yes | ❌ |
 | T14 | Malformed frame after our close / inside the close reply → still terminates with one `onClosed` | OK R protocolErrorInCloseResponseClosesConnection, protocolErrorAfterCloseDoesNotSendClose | `/raw` | no | ❌ |
-| T15 | EOF inside a frame header, inside a payload, and between fragments → connection error, never a partial message | GO C TestEOFWithinFrame, TestEOFBeforeFinalFrame; PY P EOFTests; OK R socketClosedDuringMessageKillsWebSocket | raw / `/raw?end=fin` | no | ❌ |
-| T16 | Garbage or protocol violation after 101 → we send close 1002 and the client reports 1002; variants with a pending write | CT peer_protocol_errors "bad data after upgrade (with write)"; NODE W "emits error if an error occurs" | raw / `/raw` | no | ◐ (masked frame) |
+| T15 | EOF inside a frame header, inside a payload, and between fragments → connection error, never a partial message | GO C TestEOFWithinFrame, TestEOFBeforeFinalFrame; PY P EOFTests; OK R socketClosedDuringMessageKillsWebSocket | raw / `/raw?end=fin` | no | ✅ server suite, every transport (D46) |
+| T16 | Garbage or protocol violation after 101 → we send close 1002 and the client reports 1002; variants with a pending write | CT peer_protocol_errors "bad data after upgrade (with write)"; NODE W "emits error if an error occurs" | raw / `/raw` | no | ✅ server suite, every transport (D46) |
 | T17 | Close frame arriving between non-final fragments → close wins, partial message discarded | GO C TestCloseFrameBeforeFinalMessageFrame | raw / `/raw` | no | ❌ |
-| T18 | Invalid UTF-8 (single and fragmented) end to end → 1007, not retried; on native both the `raw` and `json` text modes | PY K test_recv_non_utf8_text; NODE R invalid UTF-8 | raw / `/raw` | no | ◐ (fake only) |
-| T19 | Server ping with payload → pong with the same payload; ping during a fragmented message; unsolicited pong → `onPong` and nothing else | NODE W "pong called automatically"; PY P test_client_receives_ping*; TG receive_messages | `/ping`, `/pong` | n/a | ◐ (ping not asserted) |
+| T18 | Invalid UTF-8 (single and fragmented) end to end → 1007, not retried; on native both the `raw` and `json` text modes | PY K test_recv_non_utf8_text; NODE R invalid UTF-8 | raw / `/raw` | no | ✅ server suite, every transport (D46) |
+| T19 | Server ping with payload → pong with the same payload; ping during a fragmented message; unsolicited pong → `onPong` and nothing else | NODE W "pong called automatically"; PY P test_client_receives_ping*; TG receive_messages | `/ping`, `/pong` | n/a | ✅ server suite, every transport (D46) |
 | T20 | Auto-pong still goes out while the app is busy and the socket write would block | TG auto_pong_flush | `/ping` + `/slow-read` | n/a | ❌ |
 | T21 | Slow reader: `bufferedAmount` grows, `requestDrain` → `onDrain`, push awaits above the high-water mark, close waits for queued data (`dart_transport.dart:262–324`) | NODE W bufferedAmount tests; NODE S "consume all data before closing"; OK H overflowOutgoingQueue; PY K test_write_limit | `/slow-read` | yes | ❌ |
 | T22 | Stall in the middle of a frame (header plus half the payload, then silence) → heartbeat or idle timeout fires | OK H readTimeoutAppliesWithinFrames | `/stall` | yes | ❌ |
 | T23 | Half-open TCP (peer silent, no FIN) → heartbeat timeout reconnects | OK H unacknowledgedPingFailsConnection; PY K test_keepalive_times_out; SPN Ping_without_pong | raw / `/silent` | yes (app ping) | ✅ (dart, native) |
 | T24 | Burst: 10k small messages each way keep their order; server floods right after 101 | CT "peer writes after close"; NODE R thousands of frames; WS1 "Dublicate send and receive" | `/flood` (≈ `/stream?rate=0`) | yes | ◐ in order from the server, every transport (D49); client-to-server order open |
 | T25 | Sizes: empty text, empty binary, exactly `maxMessageSize`, 16 MiB, 64-bit length path | CT payload_transfer "empty string/binary", "large string/binary"; GO C TestFraming; SDK testMessageLength | `/echo` | yes | ◐ (no empties) |
-| T26 | Send / ping / close after `onClosed` are no-ops or typed errors, with nothing on the wire | CT "sendText/sendBytes after close"; NODE W "#send … readyState 2 or 3"; TG no_send_after_close | `/close` | yes | ◐ |
+| T26 | Send / ping / close after `onClosed` are no-ops or typed errors, with nothing on the wire | CT "sendText/sendBytes after close"; NODE W "#send … readyState 2 or 3"; TG no_send_after_close | `/close` | yes | ✅ every transport alike (D50): sends and pings throw `WebSocketNotConnectedException`, close and abort do nothing |
 | T27 | `abort()` while TCP connecting, during TLS, during the handshake → exactly one `onClosed`, no socket leak | NODE W "#terminate while connecting"; OK H closeWithoutSuccessfulConnect | `/hang` | yes | ❌ |
 | T28 | Contract checker: wrap every listener in the suite with an assertion decorator (`onOpen` ≤1, one `onClosed` last, nothing synchronous from connection methods) | ARCHITECTURE "Transport contract" | — | yes | ✅ `test/support/checked_transport.dart` on every transport (D47) |
-| T29 | TLS: `allowInsecure` against self-signed; `trustedRootsPem` with the server's cert; unknown CA rejected; hostname mismatch rejected; `wss://` against a plain port and `ws://` against a TLS port (`dart_transport.dart:85–113`) | PY C(Secure) test_reject_invalid_server_certificate/_hostname; NODE W "cannot connect to secure server via ws://"; TG wss_fails_when_no_tls | `/ca.pem`, TLS ports | no | ❌ |
-| T30 | IPv6: `ws://[::1]:port` connects and sends the right `Host` | — (requested) | `/headers` on `::1` | yes | ❌ |
-| T31 | Request headers seen by the server: custom headers, userinfo auth, protocols, no forbidden headers overridden | SDK testAdditionalHeaders; PY C test_additional_headers; OK H clientIncludesForbiddenHeader | `/headers` | partial | ◐ |
-| T32 | Server picks a protocol we did not offer / none when offered → typed error (CT expects the connect to throw) | CT protocol_tests "protocol mismatch"; TG handshake.rs | `/bad-101?protocol=` | no | ❌ |
+| T29 | TLS: `allowInsecure` against self-signed; `trustedRootsPem` with the server's cert; unknown CA rejected; hostname mismatch rejected; `wss://` against a plain port and `ws://` against a TLS port (`dart_transport.dart:85–113`) | PY C(Secure) test_reject_invalid_server_certificate/_hostname; NODE W "cannot connect to secure server via ws://"; TG wss_fails_when_no_tls | `/ca.pem`, TLS ports | no | ✅ server suite, every transport (D46) |
+| T30 | IPv6: `ws://[::1]:port` connects and sends the right `Host` | — (requested) | `/headers` on `::1` | yes | ✅ server suite, every transport (D46) |
+| T31 | Request headers seen by the server: custom headers, userinfo auth, protocols, no forbidden headers overridden | SDK testAdditionalHeaders; PY C test_additional_headers; OK H clientIncludesForbiddenHeader | `/headers` | partial | ✅ server suite, every transport (D46) |
+| T32 | Server picks a protocol we did not offer / none when offered → typed error (CT expects the connect to throw) | CT protocol_tests "protocol mismatch"; TG handshake.rs | `/bad-101?protocol=` | no | ✅ server suite, every transport (D46) |
 | T33 | Connect timeout does not apply after open (an idle connection longer than `connectTimeout` survives) | OK H callTimeoutDoesNotApplyOnceConnected | `/echo` | yes | ❌ |
 
 ### 2.4 Native only (N) and web only (W)
@@ -138,18 +138,20 @@ endpoint is also how the web transport gets the scenario.
 | N2 | 100 clients on one native library at once; open/close loops; process exit with open connections | ROADMAP §6 soak; SPN Create_and_close_multiple_clients | `/echo` | ❌ |
 | N3 | Drop or close from Dart while Rust is delivering a large stream (credit and drain events, no use-after-free) | — | `/stream?rate=0` | ❌ |
 | N4 | Rust answers server pings while Dart is blocked (busy isolate) | TG auto_pong_flush | `/ping` | ❌ |
-| W1 | 1006 abnormal close maps to an error and reconnects (`web_transport.dart:70`) | SDK abnormal_close; CT disconnect_after_upgrade | `/drop` | ❌ |
-| W2 | Empty close (1005) → `code == null` (`web_transport.dart:68`) | CT close_local "close" | `/close-empty` | ❌ |
-| W3 | `bufferedAmount` polling drain under a slow reader | NODE W bufferedAmount | `/slow-read` | ❌ |
-| W4 | Application-level heartbeat against a silent server reconnects (no protocol ping in the browser) | SPN Ping_without_pong | `/silent` | ❌ |
-| W5 | Handshake failure of any kind is a retried `ConnectionException` (no status) | OUR web test | `/status`, `/bad-101` | ◐ |
+| W1 | 1006 abnormal close maps to an error and reconnects (`web_transport.dart:70`) | SDK abnormal_close; CT disconnect_after_upgrade | `/drop` | ✅ shared server suite in the browser (D46) |
+| W2 | Empty close (1005) → `code == null` (`web_transport.dart:68`) | CT close_local "close" | `/close-empty` | ✅ shared server suite in the browser (D46) |
+| W3 | `bufferedAmount` polling drain under a slow reader | NODE W bufferedAmount | `/slow-read` | ✅ shared server suite in the browser (D46) |
+| W4 | Application-level heartbeat against a silent server reconnects (no protocol ping in the browser) | SPN Ping_without_pong | `/silent` | ✅ shared server suite in the browser (D46) |
+| W5 | Handshake failure of any kind is a retried `ConnectionException` (no status) | OUR web test | `/status`, `/bad-101` | ✅ shared server suite and web_transport_test (D46) |
 
-## 3. Proposed fault endpoints (Rust test server)
+## 3. Fault endpoints (Rust test server)
 
-The current `server/src/lib.rs` hands every TCP stream to
-`accept_hdr_async_with_config` before routing, so tungstenite answers every
-handshake, auto-pongs, and validates frames. Fault endpoints need their own
-front end:
+Implemented: `server/README.md` lists every endpoint as it exists now
+(including later additions such as `/early-hints`). This section is the
+original proposal, kept for the reasoning. At the time, the server handed
+every TCP stream to `accept_hdr_async_with_config` before routing, so
+tungstenite answered every handshake, auto-ponged and validated frames.
+Fault endpoints needed their own front end:
 
 1. Read the HTTP head yourself (cap: 16 KiB) and route on the path.
 2. HTTP-level faults answer directly.

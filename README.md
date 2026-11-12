@@ -65,10 +65,14 @@ Three flavours, one core: `WebSocketClient.json()` (`Map<String, Object?>`),
 
 ### Reconnects
 
-Full-jitter exponential backoff between `minDelay` and `maxDelay`. The
-client stops by itself when retrying cannot help: a handshake rejected with
-4xx (except 408, 425, 429), or close codes 1002, 1003, 1007–1010. Override
-with `WebSocketReconnect(shouldReconnect: ...)`. Refresh tokens per attempt
+Exponential backoff with jitter above a `minDelay` floor, capped at
+`maxDelay`. The client stops by itself when retrying cannot help: a
+handshake rejected with 4xx (except 408, 425, 429), a proxy 407, or close
+codes 1002, 1003, 1007–1010. After close 1013 (try again later) and a
+rejected certificate it waits `maxDelay`, after `Retry-After` (429, 503)
+at least what the server asked. Redirects (3xx) are reported, not
+followed, and retried. Override with
+`WebSocketReconnect(shouldReconnect: ...)`. Refresh tokens per attempt
 with `WebSocketOptions.request`, and authenticate before the client reports
 `open` with `onOpen`.
 

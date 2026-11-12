@@ -10,7 +10,7 @@ cargo run --release -- [--host 127.0.0.1] [--port 9090] [--tls-port 9443] \
   [--badhost-port 0] [--proxy-port 0] [--proxy-auth-port 0] [--no-ipv6] \
   [--tls-cert chain.pem --tls-key key.pem] [--ready-json] [--verbose]
 # or from the repository root
-make server
+mise run server
 ```
 
 Without `--ready-json` it prints the listeners to stderr and runs until

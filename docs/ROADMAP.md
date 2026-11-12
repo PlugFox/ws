@@ -50,10 +50,10 @@ This is the current shape. The boxes are swappable, and the experiments in
 ```
                          ┌────────────────────── public API (Dart) ───────────────────────┐
                          │ WebSocketClient · state stream · messages · send · close        │
-                         │ reconnect · heartbeat · metrics · interceptors · decoders       │
+                         │ push · rpc · codecs · reconnect · heartbeat · metrics           │
                          └──────────────┬───────────────────────┬───────────────────┬─────┘
                                         │                       │                   │
-                     native (FFI, default)          pure Dart (fallback)      web (browser)
+                  native (FFI, opt-in: ws_native)   pure Dart (VM default)     web (browser)
                ┌────────────────────────────┐   ┌──────────────────────┐   ┌──────────────────┐
                │ Rust cdylib: tokio runtime │   │ RFC 6455 codec on    │   │ JS WebSocket via │
                │ tungstenite · rustls       │   │ RawSocket /          │   │ extension types  │
@@ -67,8 +67,9 @@ This is the current shape. The boxes are swappable, and the experiments in
 
 Key properties:
 
-- The transport is picked at runtime: native, then pure Dart, then web, with
-  a way to force one (for tests and debugging).
+- The transport is the platform's: pure Dart on the VM, the browser's on
+  the web. `WsNative.install()` (package `ws_native`) or
+  `WebSocketTransports.use` switches new clients to native (D8).
 - All transports behave the same way: same states, events, close codes,
   errors and metrics. A shared conformance test suite enforces this (§6.2).
 - Messages come in batches, once per socket read. Bytes and tapes are
@@ -79,58 +80,39 @@ Key properties:
 
 ### 4.1 Public API
 
-- [ ] **The API must not depend on how things are done inside.** Transport,
-  delivery path and data structures stay internal behind small interfaces,
-  so an experiment (§5) can replace one without breaking users. The public
-  types are message, decoder result and `Map` / `List` views, never the
-  tape or the FFI layout.
+As shipped (README, DECISIONS.md D11–D13, D22); the earlier plan of
+`sendText`/`sendBytes`/`sendJson`, per-connection decoders and
+interceptors was dropped (see "Not in 2.0" below).
 
-- [ ] Typed messages: text, binary, and decoded (JSON tape view or user
-  model). Avoid `Object`-typed streams in the hot path.
-- [ ] A **decoder** abstraction chosen per connection:
-  - `raw`: text as `String`, or as UTF-8 bytes without making a `String`;
-    binary as `Uint8List`.
-  - `jsonTape` (default for JSON): lazy `Map<String, Object?>` /
-    `List<Object?>` views over the tape, mapped with ordinary
-    `fromJson(Map)`.
-  - `isolate<T>(T Function(Object? json))`: mapping runs in a Dart worker
-    isolate and models come to main ready to use. For very heavy models.
-  - Custom binary decoders (protobuf, MessagePack, FlatBuffers) that run in
-    the worker.
-- [ ] Send API: `sendText(String)`, `sendBytes(Uint8List)`,
-  `sendJson(Object?)`. Optionally encode JSON off main for large payloads.
-  The send path should be zero-copy where the buffer can be handed over or
-  pinned.
-- [ ] Futures and streams that work with `async`/`await` and cancellation:
-  `connect()`, `close(code, reason)`, `done`. No unawaited work left behind.
-- [ ] Connection state as a sealed class hierarchy (`connecting`, `open`,
-  `closing`, `closed(code, reason)`, `reconnecting(attempt, delay)`), with
-  the current value plus a stream.
-- [ ] Errors as a sealed hierarchy: handshake (HTTP status, headers), TLS,
-  DNS/connect, protocol violation, message too big, closed by the peer,
-  flow-control overflow. Never throw raw `SocketException` or Rust strings
-  at the user.
-- [ ] Options: headers, subprotocols, connect/handshake timeouts, max message
-  size, compression, TLS settings (§4.5), proxy (§4.6), heartbeat,
-  reconnect policy, flow-control window, decoder.
-- [ ] Testability: a fake transport and an in-memory server, so app code is
-  testable without sockets (1.x had `ws_client_fake.dart`).
-- [?] Single connection object vs. a client that manages several connections
-  (the old `ConnectionManager`). Proposal: one connection per object; a
-  separate optional manager.
-- [?] Naming: keep the `ws` package name and `WebSocketClient`, or rename to
-  avoid clashing with `dart:io` `WebSocket`.
+- [x] **The API does not depend on how things are done inside.**
+  Transports sit behind `WebSocketTransport`; the tape and the FFI layout
+  never reach users (JSON arrives as `Map`/`List` views).
+- [x] One client type with three codecs: `WebSocketClient.text()`,
+  `.binary()`, `.json()`; `push`, `rpc` (with `WebSocketRpc`), `ping`,
+  `connect`, `reconnect`, `disconnect`, `close`, `suspend`, `resume`.
+- [x] State as a sealed hierarchy with the current value and a stream
+  (D22); errors as a sealed, frozen hierarchy with typed connection
+  failures (D42).
+- [x] Options as plain data: headers, subprotocols, timeouts, max message
+  size, TLS (§4.5), proxy (§4.6), heartbeat, reconnect, send limits.
+- [x] Testability: `FakeWebSocketServer` in `package:ws/testing.dart`.
+- [x] Naming: the `ws` package and `WebSocketClient` stay (maintainer's
+  choice).
+- Not in 2.0: per-connection decoders (`isolate<T>`, protobuf),
+  interceptors/middleware, a `done` future, `permessage-deflate`, a
+  connection manager. A codec or `onMessage` covers the decoder cases.
 
 ### 4.2 Threading and isolates
 
-- [ ] One tokio runtime per process, shared by all isolates and connections.
-  Default 2 worker threads, configurable. Measure 1 vs 2 vs N on mobile.
+- [x] One tokio runtime per process, shared by all isolates and connections.
+  Default 2 worker threads, configurable (`install(threads:)`). Measure 1 vs 2 vs N on mobile.
 - [ ] Messages can be delivered to a `SendPort` of any isolate. Rust posts
   straight to the worker when the worker decoder is used, and does not go
   through main.
-- [ ] Leaf FFI calls (`@Native(isLeaf: true)`) only for non-blocking work:
-  enqueue a send, set credits, close. Never block the Dart thread in Rust.
-- [ ] Flutter **hot restart**: the native runtime and its connections outlive
+- [x] Leaf FFI calls only for non-blocking work that never calls back into
+  the VM (`requestDrain` is not one, D50). Never block the Dart thread in
+  Rust.
+- [x] Flutter **hot restart** (liveness probe and `NativeFinalizer`, D27): the native runtime and its connections outlive
   the Dart isolate. Connections must be detected and closed when their
   `ReceivePort` dies (`Dart_PostCObject` returns `false`), and with a
   `NativeFinalizer` on the connection handle.
@@ -140,10 +122,10 @@ Key properties:
 
 ### 4.3 Flow control (backpressure)
 
-- [ ] Credit-based: Dart grants N messages or N bytes. Rust stops reading the
+- [x] Credit-based (D24, per-message overhead D41): Dart grants N messages or N bytes. Rust stops reading the
   socket when credits run out, and TCP backpressure slows the server.
-- [ ] Credits are granted back automatically after the listener has handled a
-  batch. Applies to `Stream` pause/resume too.
+- [x] Credits are granted back automatically after the listener has handled a
+  batch, even when it throws (D50). Applies to `Stream` pause/resume too.
 - [x] Bound on the send queue: `sendBufferLimit` fails `push()` with
   `WebSocketBufferFullException` (DECISIONS.md D36).
 - [ ] Same semantics in the pure-Dart transport: pause the
@@ -153,17 +135,18 @@ Key properties:
 
 ### 4.4 Protocol coverage (RFC 6455 and friends)
 
-- [ ] Fragmentation, control frames between fragments, ping/pong, close
+- [x] Fragmentation, control frames between fragments, ping/pong, close
   handshake with codes and reasons, UTF-8 validation of text messages and
-  close reasons.
+  close reasons (Autobahn, D28; server suite on every transport, D46).
 - [ ] `permessage-deflate` (RFC 7692). tungstenite has limited or no
   support, so check the current status or a fork. `dart:io` supports it. Be
   careful about CPU and memory on mobile (context takeover).
-- [ ] Subprotocol negotiation (`Sec-WebSocket-Protocol`), custom handshake
-  headers, cookies; give access to the handshake response headers.
-- [ ] Max frame and message sizes with a clear error.
-- [ ] Redirects during the handshake (3xx): decide on and document the
-  behaviour.
+- [x] Subprotocol negotiation (`Sec-WebSocket-Protocol`), custom handshake
+  headers; response headers of a refused handshake in
+  `WebSocketHandshakeException.headers`.
+- [x] Max message size with a clear error (1009, every transport, D46).
+- [x] Redirects during the handshake (3xx): reported, not followed, and
+  retried (README "Reconnects", D48).
 - [ ] HTTP/2 WebSockets (RFC 8441) — probably not needed. Note it and leave
   it out.
 
@@ -180,8 +163,8 @@ Key properties:
 - [ ] ALPN, SNI, TLS 1.2/1.3 support. Crypto provider: `ring` (as now) or
   `aws-lc-rs` — compare build complexity and binary size for mobile
   targets.
-- [ ] Pure-Dart transport: `SecureSocket` with `SecurityContext` options
-  mapped from the same API.
+- [x] Pure-Dart transport: `SecureSocket` with `SecurityContext` options
+  mapped from the same API (D35, D45).
 
 ### 4.6 Networking on mobile
 
@@ -200,8 +183,9 @@ Key properties:
   resume. Do not drain the battery with heartbeats in the background.
   `suspend()`/`resume()` and `ws_flutter` (DECISIONS.md D44). Still open:
   T-resume on real devices (30 s, 5 min, 2 h in the background).
-- [ ] App Store review: plain BSD sockets are fine. Document that ATS does
-  not apply, and what users must state in privacy manifests (if anything).
+- [x] App Store review: plain BSD sockets are fine; ATS does not apply
+  (docs/SECURITY.md); the privacy-manifest entry for the iOS library is in
+  the `ws_native` README (D53).
 
 ### 4.7 Distribution (native library)
 
@@ -214,48 +198,53 @@ Key properties:
 - [x] Apps built with `dart compile exe`: `dart run ws:install` and
   `WsNativeLibrary.open(path)` (D30, D32).
 - [ ] Per-OS maps in the hook's user-defines, as `sqlite3` 3.6+ has (D31).
-- [ ] Targets: Android (arm64-v8a, armeabi-v7a, x86_64), iOS (device +
-  simulator arm64/x64), macOS (arm64/x64), Linux (x64/arm64, glibc; musl?),
-  Windows (x64/arm64).
-- [ ] Android **16 KB page size** alignment (required for new apps on Google
-  Play); verify the produced `.so`.
-- [ ] Binary size budget. Today: ~1.7 MB stripped per ABI (~0.9 MB
-  gzipped). Try `opt-level="z"` for cold code, fewer dependencies, a smaller
-  TLS provider, and dropping the embedded benchmark server from the library.
-- [ ] If the native library is missing or does not load, fall back to the
-  pure-Dart transport. Log it, and make it visible through metrics.
+- [x] Targets: Android (arm64-v8a, armeabi-v7a, x86_64), iOS (device +
+  simulator arm64/x64), macOS (arm64/x64), Linux (x64/arm64, glibc 2.17),
+  Windows (x64/arm64): the 12 prebuilt targets (D40, D43). musl: no.
+- [x] Android **16 KB page size** alignment (required for new apps on Google
+  Play): `rust/build.rs`, checked by `tool/verify_native.sh` (DEVELOPMENT.md).
+- [ ] Binary size budget. Today: about 2.1–2.3 MB stripped per ABI
+  (macOS arm64 2,078,640 bytes, 1.06 MB gzipped; Android arm64 2,331,304
+  in D35), after trimming crate features in D50. Try `opt-level="z"` for
+  cold code, fewer dependencies, and a smaller TLS provider.
+- [x] If the native library is missing or does not load, fall back to the
+  pure-Dart transport: `install()` returns `false`, `unavailableReason`
+  says why, `metrics.transport` shows the one in use (D10, D53).
 - [x] ~~`dart compile exe` does not run hooks~~ — wrong: it **fails** for
   any app whose dependency graph contains a package with a hook (verified
   on 3.13.7; the check covers only entrypoints under `bin/`). Hence the
   split into `ws` + `ws_native` (DECISIONS.md D8), confirmed by the
   maintainer.
-- [ ] License notices for the Rust dependencies (tokio, rustls, ring, …).
+- [x] License notices for the Rust dependencies, in `ws_native`'s LICENSE
+  and as `THIRD_PARTY_LICENSES` on the release (D43).
 
 ### 4.8 Web
 
-- [ ] An implementation over `package:web` `WebSocket` (JS interop, extension
-  types). Text and binary (`arraybuffer`); JSON decoding with `JSON.parse`
+- [x] An implementation over `package:web` `WebSocket` (JS interop, extension
+  types), dart2js and dart2wasm, on the shared server suite (D46). Text and binary (`arraybuffer`); JSON decoding with `JSON.parse`
   through interop or `dart:convert`. Measure which is faster under dart2js
   and dart2wasm.
-- [ ] Same state machine, reconnect and heartbeat logic, shared through a
+- [x] Same state machine, reconnect and heartbeat logic, shared through a
   common Dart core.
-- [ ] Browser limits: no custom headers, no ping/pong access (heartbeat must
-  be at the application level), `bufferedAmount` for send backpressure.
+- [x] Browser limits: no custom headers, no ping/pong access (heartbeat must
+  be at the application level), `bufferedAmount` for send backpressure
+  (D15).
 - [ ] spinify measurements showed browser slowdowns above ~15 KB; recheck.
 - [?] `WebSocketStream` (Streams API with backpressure) where available.
 
 ### 4.9 Reliability features (from 1.x and beyond)
 
-- [ ] Reconnect with exponential backoff and jitter, max attempts, and a
-  manual `reconnect()`.
+- [x] Reconnect with exponential backoff and jitter, max attempts, and a
+  manual `reconnect()`; the policy is tested on real sockets (D48).
 - [x] Heartbeat: protocol ping/pong on native, an application-level hook on
   web. Timeouts close the connection and trigger a reconnect. On by
   default; a draining send queue extends the wait (D41).
-- [ ] Metrics: bytes and messages in/out, reconnects, last error, round
-  trip, transport in use, queue sizes and flow-control stalls.
-- [ ] Interceptors / middleware for outgoing and incoming messages (1.x had
-  `ws_interceptor.dart`). They must not force a decode in the hot path.
-- [ ] Logging hook without a logging-package dependency.
+- [x] Metrics: bytes and messages in/out, reconnects, last error, round
+  trip, transport in use, queue size (`WebSocketMetrics`).
+- Not in 2.0: interceptors / middleware (1.x had `ws_interceptor.dart`);
+  a codec or `onMessage` covers them without a decode in the hot path.
+- [x] Logging hooks without a logging-package dependency: `onError`,
+  `onStateChange`.
 
 ## 5. Exploration: transport and structures
 
@@ -358,8 +347,10 @@ here, including the ones that fail.
 
 ### 6.2 Correctness
 
-- [x] **Autobahn TestSuite** (fuzzingserver) for native and pure Dart: 0
-  failures (DECISIONS.md D28). [ ] Web through the browser; [ ] in CI.
+- [x] **Autobahn TestSuite** (fuzzingserver) for native and pure Dart, at
+  the transport level (not through `WebSocketClient`): 0 failures
+  (DECISIONS.md D28, re-run in D53; reports in
+  `benchmark/results/autobahn/`). [ ] Web through the browser; [ ] in CI.
 - [~] A shared conformance suite run against every transport:
   `test/transport/conformance.dart` (pure Dart and native) and the Rust
   server suite, whose platform-neutral half (`server_shared.dart`) also
@@ -369,7 +360,8 @@ here, including the ones that fail.
   tape reader (malformed JSON, deep nesting, huge numbers, invalid UTF-8,
   surrogate escapes).
 - [ ] Tape compatibility: Rust and Dart tape builders must produce identical
-  tapes (`test/tape_test.dart` already compares against `jsonDecode`).
+  tapes (`test/native/tape_test.dart` and `benchmark/test/tape_test.dart`
+  already compare against `jsonDecode`).
 - [ ] Integer and double semantics match `jsonDecode`: integers beyond
   64 bits, `-0`, exponents, and the `1.0` vs `1` distinction.
 
@@ -439,7 +431,7 @@ here, including the ones that fail.
 - **Two (three) transports diverge** in behaviour. Mitigation: shared
   suites on every transport (§6.2, D46); the first browser run found four
   divergences.
-- **App size**: ~1–2 MB per ABI may matter for some apps. Mitigation:
+- **App size**: about 2.1–2.3 MB per ABI may matter for some apps. Mitigation:
   document it; the pure-Dart transport works on its own.
 - **Settling on a local optimum**: the current transport and tape were the
   first design that won. Mitigation: the exploration track (§5), with

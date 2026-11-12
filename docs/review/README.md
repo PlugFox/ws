@@ -54,5 +54,14 @@ file; finding ids below refer to them.
    after close, T-12, went with D50).
 7. **Remaining medium/low items**: ~~native 5–10, 12–30~~ done, D50;
    ~~protocol F10–F12, F14–F18~~ done, D51; ~~client F23, F27–F29~~
-   done, D52; ~~distribution F21–F30~~ done, D53; doc corrections in
-   tests_docs.md.
+   done, D52; ~~distribution F21–F30~~ done, D53; ~~doc corrections in
+   tests_docs.md (D-1–D-20)~~ done: ROADMAP §4 rewritten to the shipped
+   API and ticked with pointers, removed-from-1.x list in the CHANGELOG,
+   TEST_PLAN statuses and coverage (95.3 %), backoff wording, Autobahn
+   reports committed (`benchmark/results/autobahn/`), stale numbers and
+   paths fixed.
+
+Open after the plan: the T-resume field test on devices (30 s, 5 min, 2 h
+in the background); the rest of tests_docs §4 (exact backpressure T-7,
+close variants, Rust/Dart tape equivalence, stalls, native lifecycle);
+the manual pub.dev steps before the first tag.

@@ -21,7 +21,9 @@ final class WebSocketRequest {
   final Map<String, String> headers;
 }
 
-/// Reconnect policy. Delays use exponential backoff with full jitter.
+/// Reconnect policy. Delays use exponential backoff with jitter above the
+/// [minDelay] floor: `minDelay + random(0, min(maxDelay - minDelay,
+/// minDelay * 2^attempt))`.
 @immutable
 final class WebSocketReconnect {
   /// Reconnects forever with delays between [minDelay] and [maxDelay].
@@ -75,7 +77,7 @@ final class WebSocketReconnect {
   /// See [defaultTerminalCloseCodes].
   final Set<int> terminalCloseCodes;
 
-  /// Overrides the decision for every failure. [attempt] is the number of
+  /// Overrides the decision for every failure. `attempt` is the number of
   /// the next attempt. Return `false` to stop reconnecting.
   final bool Function(WebSocketException cause, int attempt)? shouldReconnect;
 }
