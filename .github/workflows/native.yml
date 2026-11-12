@@ -1,0 +1,77 @@
+name: Native
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["master", "develop", "rewrite"]
+    paths:
+      - "native/**"
+      - "lib/**"
+      - "test/transport/**"
+      - "test/native/**"
+      - ".github/workflows/native.yml"
+  pull_request:
+    branches: ["master", "develop", "rewrite"]
+    paths:
+      - "native/**"
+      - "lib/**"
+      - "test/transport/**"
+      - "test/native/**"
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: "Rust (fmt, clippy, tests)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: native/rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/rust
+      - run: cargo fmt --check
+      - run: cargo clippy --release -- -D warnings
+      - run: cargo test --release
+
+  conformance:
+    name: "Conformance (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/rust
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - name: 👷 Install dependencies
+        working-directory: native
+        run: dart pub get
+      - name: 📈 Analyze
+        working-directory: native
+        run: dart analyze --fatal-infos --fatal-warnings
+      - name: 🧪 Shared transport conformance suite (hook builds with cargo)
+        working-directory: native
+        run: dart test --reporter expanded
+      - name: 🧪 Same suite, library loaded by path from package:ws (no hook)
+        shell: bash
+        run: |
+          dart pub get
+          lib=$(find native/.dart_tool/hooks_runner/shared/ws_native/build/cargo -path '*/release/libws_native.*' \( -name '*.so' -o -name '*.dylib' \) | head -1)
+          echo "library: $lib"
+          WS_NATIVE_LIBRARY="$PWD/$lib" dart test test/native --reporter expanded

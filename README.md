@@ -2,154 +2,145 @@
 
 [![Pub](https://img.shields.io/pub/v/ws.svg)](https://pub.dev/packages/ws)
 [![Actions Status](https://github.com/PlugFox/ws/actions/workflows/checkout.yml/badge.svg)](https://github.com/PlugFox/ws/actions)
-[![Coverage](https://codecov.io/gh/PlugFox/ws/branch/master/graph/badge.svg)](https://codecov.io/gh/PlugFox/ws)
 [![License: MIT](https://img.shields.io/badge/license-MIT-purple.svg)](https://opensource.org/licenses/MIT)
-[![Linter](https://img.shields.io/badge/style-linter-40c4ff.svg)](https://pub.dev/packages/linter)
 [![GitHub stars](https://img.shields.io/github/stars/plugfox/ws?style=social)](https://github.com/plugfox/ws/)
 
-The `ws` package provides a cross-platform WebSocket client for both Dart and Flutter applications. It allows you to connect to a WebSocket server, send and receive messages, and handle the connection state changes.
+A WebSocket client for Dart and Flutter on every platform, built for
+reliability: reconnects with backoff, heartbeats, request/response calls,
+typed states and errors, and a fake server for your tests.
 
----
+> **2.0 is a rewrite** (branch `rewrite`, `2.0.0-dev`). The design, the
+> measurements behind it and the plan are in [`docs/`](docs/).
 
-## Installation
-
-Add the following dependency to your `pubspec.yaml` file:
+## Install
 
 ```yaml
 dependencies:
-  ws: <version>
+  ws: ^2.0.0-dev.1
+  # Optional, for mobile/desktop: the Rust transport (TLS, framing and
+  # JSON parsing off the Dart thread; 4–21× faster on phones).
+  ws_native: ^2.0.0-dev.1
 ```
 
-## Properties
+## Use
 
-- `reconnectTimeout`: A read-only property that returns the reconnect timeout. The default value is 5 seconds.
-- `state`: A read-only property that returns the current WebSocket connection state.
-- `stateChanges`: A read-only property that returns a stream of WebSocket connection state changes.
-- `stream`: A read-only property that returns a stream of message events handled by the WebSocket.
-- `metrics`: A read-only property that returns a `WebSocketMetrics` object with metrics about the WebSocket connection.
+```dart
+import 'package:ws/ws.dart';
 
-## Methods
+Future<void> main() async {
+  final client = WebSocketClient.json(
+    options: WebSocketOptions(
+      rpc: const WebSocketJsonRpc(), // {"id": n, ...} correlation
+      heartbeat: const WebSocketHeartbeat(),
+      onStateChange: print,
+    ),
+  );
 
-- `connect(String url)`: Connects to the WebSocket server specified by the URL argument.
-- `disconnect([int? code = 1000, String? reason = 'NORMAL_CLOSURE'])`: Closes the WebSocket connection. You can optionally pass a numeric code and a reason string to the method to send close information to the remote peer.
-- `add(Object data)`: Sends data on the WebSocket connection. The data can be either a String or a List of integers holding bytes.
-- `close([int? code = 1000, String? reason = 'NORMAL_CLOSURE'])`: Permanently stops the WebSocket connection and frees all resources. After calling this method, the WebSocket client is no longer usable.
+  client.messages.listen((message) => print('push: $message'));
+  await client.connect('wss://example.com/ws');
 
-## Options
+  await client.push({'type': 'subscribe', 'channel': 'news'});
+  final reply = await client.rpc({'method': 'time'});
+  print('reply: $reply');
 
-The `WebSocketOptions` class provides a configurable set of options for setting up a WebSocket connection on both VM (Virtual Machine) and JS (JavaScript) platforms. This class supports a variety of settings including connection retry strategies, subprotocols, timeouts, message interceptors, and platform-specific configurations.
-
-To use `WebSocketOptions`, instantiate it directly with the desired configuration for your platform. Use the `.vm()` factory for VM platform settings and `.js()` factory for JS platform settings. The `.selector()` factory can be used to construct options depending on the current platform, allowing for flexible configuration across different environments.
-
-### Common Options
-
-Common configuration options applicable across VM and JS platforms:
-
-| Option                    | Description                                                                                                                                                                                                                                                     |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `connectionRetryInterval` | Specifies the [Backoff full jitter strategy](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) for reconnecting. Allows tweaks for the reconnect backoff algorithm (min delay, max delay). If not specified, reconnecting is disabled. |
-| `protocols`               | Specifies the subprotocols the client is willing to speak.                                                                                                                                                                                                      |
-| `timeout`                 | Specifies the maximum time to wait for the connection to be established. Defaults to 30 seconds if not specified.                                                                                                                                               |
-| `afterConnect`            | Specifies the callback function to be called after the connection is established, but before the client is allowed to send user messages.                                                                                                                       |
-| `interceptors`            | Specifies the interceptors for WebSocket messages.                                                                                                                                                                                                              |
-
-### VM Platform Options
-
-Specific to VM (Mobile, Desktop, Server, Console) platform. Not to be used on the web platform.
-
-- Includes all common options.
-- `headers`: Specifies additional HTTP headers for setting up the connection. Certain headers are controlled by the WebSocket connection process and will be ignored if passed.
-- `compression`: If provided, configures the WebSocket to negotiate with the specified `CompressionOptions`.
-- `customClient`: Allows specifying a custom `HttpClient`.
-- `userAgent`: Allows specifying a custom `UserAgent`.
-
-### JS Platform Options
-
-Specific to JS (Browser) platform. Not to be used on the VM platform.
-
-- Includes all common options.
-- `useBlobForBinary`: Specifies if `Uint8List` should be sent as `Blob` or as typed data. Defaults to sending as typed data.
-
-## Example
-
-![](example.png)
-[Example of using the ws library](https://pub.dev/packages/ws/example) to connect to a WebSocket server
-
-## Reconnection
-
-The `ws` package provides a cross-platform WebSocket client that supports automatic reconnection in case of connection loss. The client automatically tries to reconnect to the server when the connection is lost. To handle reconnection-related events, you can register listeners for the `stateChanges` stream, which notifies you about changes in the connection state. When the connection is closed, the client tries to reconnect with a delay, which increases exponentially with each unsuccessful attempt to prevent overloading the server.
-
-## Metrics
-
-The `ws` package provides a cross-platform WebSocket client that supports metrics. The client automatically collects metrics about the number of sent and received messages, as well as the number of sent and received bytes. To get the metrics, you can use the `metrics` property, which returns a `WebSocketMetrics` object. The metrics are updated on demand, so you can get the latest values at any time.
-
-## JSON
-
-The `ws` package provides a cross-platform WebSocket client that supports JSON. The client automatically decodes incoming messages from JSON to Dart objects. To get the decoded messages, you can use the `client.stream.json` property, which returns a `Stream<Map<String, Object?>>` of decoded messages.
-
-## Features and Roadmap
-
-- ✅ Cross-platform WebSocket client for Dart and Flutter
-- ✅ Support for secure WebSocket connections `wss://`
-- ✅ Specifying custom protocols
-- ✅ Connection state changes
-- ✅ Reconnection to new URL
-- ✅ Concurrency
-- ✅ Backoff [full jitter strategy](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) for reconnection attempts
-- ✅ Handy stream of messages with automatic JSON decoding
-- ✅ Metrics & TX/RX bytes and counters
-- ✅ Platform-specific options
-- ✅ Connection timeout
-- ✅ Creating Web Socket client from custom implementation
-- ✅ Fake client for testing
-- ✅ Custom exceptions
-- ✅ 90% test coverage
-- ✅ First message after connection/reconnection
-- ✅ Interceptors (middlewares)
-
-<!--
-- ❌ Reusing client between isolates
-- ❌ Automatic ping/pong for keep-alive & connection health check
-- ❌ RPC support
--->
-
-## More resources
-
-- [RFC 6455: The WebSocket Protocol](https://tools.ietf.org/html/rfc6455)
-- [WebSocket API on MDN](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API)
-- [Dart HTML WebSocket library](https://api.dart.dev/stable/dart-html/WebSocket-class.html)
-- [Dart IO WebSocket library](https://api.dart.dev/stable/dart-io/WebSocket-class.html)
-
-## Coverage
-
-[![](https://codecov.io/gh/PlugFox/ws/branch/master/graphs/sunburst.svg)](https://codecov.io/gh/PlugFox/ws/branch/master)
-
-## Changelog
-
-Refer to the [Changelog](https://github.com/PlugFox/ws/blob/master/CHANGELOG.md) to get all release notes.
-
-## Maintainers
-
-[Matiunin Mikhail aka Plague Fox](https://plugfox.dev)
-
-## Funding
-
-If you want to support the development of our library, there are several ways you can do it:
-
-- [Buy me a coffee](https://www.buymeacoffee.com/plugfox)
-- [Support on Patreon](https://www.patreon.com/plugfox)
-- [Subscribe through Boosty](https://boosty.to/plugfox)
-
-We appreciate any form of support, whether it's a financial donation or just a star on GitHub. It helps us to continue developing and improving our library. Thank you for your support!
-
-## License
-
-[MIT](https://opensource.org/licenses/MIT)
-
-## Tags
-
-web, socket, ws, wss, WebSocket, cross, platform
-
+  await client.close();
+}
 ```
 
+Three flavours, one core: `WebSocketClient.json()` (`Map<String, Object?>`),
+`.text()` (`String`) and `.binary()` (`Uint8List`).
+
+| | |
+|---|---|
+| `connect(url)` | Connects and keeps the connection up. Completes when open. |
+| `push(message)` | Sends. Fails fast when not connected — nothing is replayed after a reconnect. Waits when the send queue is above `sendHighWaterMark`. |
+| `rpc(request)` | Sends and waits for the matching reply (`WebSocketOptions.rpc`). |
+| `ping()` | Round trip check (protocol ping; application-level ping on the web). |
+| `reconnect()` | Reconnect now, e.g. when the app returns to the foreground. |
+| `disconnect()` | Closes; `connect` can be called again. |
+| `close()` | Closes for good and releases everything. |
+| `state` / `states` | `disconnected`, `connecting`, `open`, `reconnecting`, `disconnecting`, `closed`. |
+| `messages` | Incoming messages (or `WebSocketOptions.onMessage` for the lowest overhead). |
+| `metrics` | Counters, last error, round trip, transport in use. |
+
+### Reconnects
+
+Full-jitter exponential backoff between `minDelay` and `maxDelay`. The
+client stops by itself when retrying cannot help: a handshake rejected with
+4xx (except 408, 425, 429), or close codes 1002, 1003, 1007–1010. Override
+with `WebSocketReconnect(shouldReconnect: ...)`. Refresh tokens per attempt
+with `WebSocketOptions.request`, and authenticate before the client reports
+`open` with `onOpen`.
+
+### Platforms
+
+| Platform | Transport |
+|---|---|
+| Android, iOS, macOS, Windows, Linux | pure Dart (RFC 6455 on raw sockets), or Rust with `ws_native` |
+| Web (dart2js, dart2wasm) | the browser's `WebSocket` |
+
+**Flutter, `dart build cli`:** add `ws_native`. Its build hook bundles the
+library for each target, and the libraries ship inside the package, so no
+Rust toolchain or network is needed at build time.
+
+```dart
+import 'package:ws_native/ws_native.dart';
+
+void main() {
+  WsNative.install(); // returns false (pure Dart is used) if unavailable
+  runApp(const App());
+}
 ```
+
+Opt out per app:
+
+```yaml
+hooks:
+  user_defines:
+    ws_native:
+      source: none # none | build | prebuilt
+```
+
+**`dart compile exe` (servers, Docker):** `dart compile exe` refuses
+packages with build hooks, so don't add `ws_native`. Download the library
+of the same `ws` release instead, with its SHA-256 checked, and load it by
+path:
+
+```dockerfile
+RUN dart pub get
+RUN dart run ws:install --target linux-x64 --out /app/lib
+RUN dart compile exe bin/server.dart -o /app/server
+```
+
+```dart
+import 'package:ws/native.dart';
+
+void main() {
+  WsNativeLibrary.open('/app/lib/libws_native.so').install();
+  // ...
+}
+```
+
+### Testing your code
+
+```dart
+import 'package:ws/testing.dart';
+
+final server = FakeWebSocketServer();
+final client = WebSocketClient.text(
+  options: WebSocketOptions(transport: server),
+);
+await client.connect('ws://test');
+server.last.sendText('hello');   // to the client
+print(server.last.received);    // from the client
+server.last.drop();             // simulate a lost connection
+```
+
+## Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — layers and the rules per layer
+- [docs/DECISIONS.md](docs/DECISIONS.md) — every compared alternative, with numbers
+- [docs/ROADMAP.md](docs/ROADMAP.md) — plan, open checks, milestones
+- [docs/NATIVE_DISTRIBUTION.md](docs/NATIVE_DISTRIBUTION.md) — how Dart packages ship native code
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — tools and tasks (`mise run check`), releasing
+- [benchmark/RESULTS.md](benchmark/RESULTS.md) — transport measurements

@@ -1,3 +1,6 @@
+# Temp files
+/.temp/
+
 # Don’t commit the following directories created by pub.
 .buildlog
 .dart_tool/
@@ -83,3 +86,7 @@ target/
 
 # Example: planning notes (not distributed)
 /example/docs/
+
+# Native: build output and prebuilt libraries produced by CI.
+# Prebuilt libraries are not committed but ARE published (see .pubignore).
+/native/prebuilt/

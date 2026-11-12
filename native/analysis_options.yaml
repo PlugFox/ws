@@ -1,0 +1,20 @@
+# Standalone (not `include: ../analysis_options.yaml`): the package is
+# published from a staged copy outside the repository (DECISIONS.md D25).
+include: package:lints/recommended.yaml
+
+analyzer:
+  exclude:
+    - "rust/**"
+    - "prebuilt/**"
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+
+linter:
+  rules:
+    always_use_package_imports: true
+    lines_longer_than_80_chars: true
+    prefer_final_locals: true
+    public_member_api_docs: true
+    unawaited_futures: true

@@ -9,6 +9,10 @@ dependencies:
   code_assets: ^2.1.0
   crypto: ^3.0.6
   hooks: ^2.2.0
+  ws:
+    path: ..
+  ws_native:
+    path: ../native
 
 dev_dependencies:
   lints: ^6.0.0

@@ -11,6 +11,11 @@ analyzer:
     - ".test_coverage.dart"
     # Assets
     - "assets/**"
+    # Old 1.x implementation, kept for reference until it is deleted
+    - "_lib/**"
+    # Separate packages
+    - "benchmark/**"
+    - "example/**"
 
   # Enable the following options to enable strong mode.
   language:
@@ -26,7 +31,6 @@ analyzer:
     always_declare_return_types: info
 
     # Warning
-    unsafe_html: warning
     no_logic_in_create_state: warning
     empty_catches: warning
 
@@ -118,7 +122,6 @@ linter:
     unnecessary_statements: true
     unnecessary_string_escapes: true
     unnecessary_string_interpolations: true
-    unsafe_html: true
     use_full_hex_values_for_flutter_colors: true
     use_raw_strings: true
     use_string_buffers: true
@@ -174,7 +177,6 @@ linter:
     non_constant_identifier_names: true
     constant_identifier_names: true
     directives_ordering: true
-    package_api_docs: true
     implementation_imports: true
     prefer_interpolation_to_compose_strings: true
     unnecessary_brace_in_string_interps: true

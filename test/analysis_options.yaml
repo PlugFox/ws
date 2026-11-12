@@ -1,0 +1,11 @@
+include: ../analysis_options.yaml
+
+linter:
+  rules:
+    # Tests read better as statements than as cascades.
+    cascade_invocations: false
+    use_raw_strings: false
+    public_member_api_docs: false
+    # Test servers live until the test ends.
+    close_sinks: false
+    cancel_subscriptions: false

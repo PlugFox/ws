@@ -127,6 +127,7 @@ Future<Map<String, Object?>> _stream(
   final cpu0 = _cpuMicros();
   final client = await BenchClient.connect(
     variant,
+    format: uri.queryParameters['format'] ?? 'json',
     uri,
     onMessage: (message) {
       final (seq, ts) = _consume(message);
@@ -215,6 +216,7 @@ Future<Map<String, Object?>> _echo(
   final cpu0 = _cpuMicros();
   final client = await BenchClient.connect(
     variant,
+    format: format,
     uri,
     onMessage: (message) {
       final (_, ts) = _consume(message);
@@ -294,6 +296,7 @@ Future<Map<String, Object?>> _pingPong(
   final cpu0 = _cpuMicros();
   client = await BenchClient.connect(
     variant,
+    format: format,
     uri,
     onMessage: (message) {
       final (seq, ts) = _consume(message);

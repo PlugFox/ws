@@ -1,2 +1,184 @@
+# Project tools and tasks. `mise install` gets the tools, `mise tasks`
+# lists the tasks, `mise run <task>` runs one (`mise run check` = what CI
+# checks). Tasks run from the repository root.
+
 [tools]
 dart = { version = "3.13.7", checksum_url = "https://storage.googleapis.com/dart-archive/channels/stable/release/{{ version }}/sdk/dartsdk-{{ os() }}-{{ arch() }}-release.zip.sha256sum", url = "https://storage.googleapis.com/dart-archive/channels/stable/release/{{ version }}/sdk/dartsdk-{{ os() }}-{{ arch() }}-release.zip", version_date_expr = 'map(flatten(map(bodies, { fromJSON(#).items })), { [split(#.name, "/")[3], #.timeCreated] })', version_date_next_expr = 'fromJSON(body).nextPageToken != nil ? split(url, "&pageToken=")[0] + "&pageToken=" + fromJSON(body).nextPageToken : nil', version_date_url = "https://storage.googleapis.com/storage/v1/b/dart-archive/o?prefix=channels/stable/release/&matchGlob=**/VERSION&fields=items(name,timeCreated),nextPageToken", version_expr = 'fromJSON(body).prefixes | filter({ # matches "^channels/stable/release/(\\d+\\.\\d+\\.\\d+)/$" }) | map({split(#, "/")[3]}) | sortVersions()', version_list_url = "https://storage.googleapis.com/storage/v1/b/dart-archive/o?prefix=channels/stable/release/&delimiter=/" }
+rust = { version = "1.99.0", components = "rustfmt,clippy" }
+gh = "2"
+actionlint = "1"
+shellcheck = "0.11"
+
+[settings]
+# Run a task's dependencies in parallel where they are independent.
+jobs = 4
+
+# --- dependencies ------------------------------------------------------------
+
+[tasks.deps]
+description = "Fetch Dart packages of ws, ws_native and the benchmarks"
+run = [
+  "dart pub get",
+  "dart pub get --directory=native",
+  "dart pub get --directory=benchmark",
+]
+
+[tasks."deps:outdated"]
+description = "Show outdated Dart dependencies"
+run = [
+  "dart pub outdated",
+  "dart pub outdated --directory=native",
+]
+
+[tasks."deps:upgrade"]
+description = "Upgrade Dart dependencies within constraints and update Cargo.lock files"
+run = [
+  "dart pub upgrade",
+  "dart pub upgrade --directory=native",
+  "dart pub upgrade --directory=benchmark",
+  "cd native/rust && cargo update",
+  "cd server && cargo update",
+]
+
+# --- code quality ------------------------------------------------------------
+
+[tasks.fmt]
+description = "Format Dart and Rust code"
+run = [
+  "dart format bin lib test tool native/lib native/test native/hook",
+  "cd native/rust && cargo fmt",
+]
+
+[tasks."fmt:check"]
+description = "Fail if anything is not formatted"
+run = [
+  "dart format --set-exit-if-changed -o none bin lib test tool native/lib native/test native/hook",
+  "cd native/rust && cargo fmt --check",
+]
+
+[tasks.analyze]
+description = "Dart analyzer (all packages), clippy, actionlint, shellcheck"
+depends = ["deps"]
+run = [
+  "dart analyze --fatal-infos --fatal-warnings",
+  "cd native && dart analyze --fatal-infos --fatal-warnings",
+  "cd benchmark && dart analyze --fatal-warnings",
+  "cd native/rust && cargo clippy --release -- -D warnings",
+  "actionlint",
+  "shellcheck tool/*.sh",
+]
+
+[tasks."check:pubignore"]
+description = ".pubignore must cover .gitignore"
+run = "dart run tool/check_pubignore.dart"
+
+[tasks."check:publish"]
+description = "pub publish dry runs of ws and of the staged ws_native"
+run = "tool/check_publish.sh"
+
+[tasks.check]
+description = "Everything CI checks: format, analyzers, .pubignore, all tests"
+depends = ["fmt:check", "analyze", "check:pubignore", "test"]
+
+# --- tests -------------------------------------------------------------------
+
+[tasks.test]
+description = "All tests: VM, Chrome (dart2js, dart2wasm), native (hook and path), Rust"
+depends = ["test:vm", "test:web", "test:native", "test:rust"]
+
+[tasks."test:vm"]
+description = "Dart VM tests of ws"
+depends = ["deps"]
+run = "dart test --platform vm"
+
+[tasks."test:web"]
+description = "Browser tests of ws in Chrome, dart2js and dart2wasm"
+depends = ["deps"]
+run = [
+  "dart test --platform chrome",
+  "dart test --platform chrome --compiler dart2wasm",
+]
+
+[tasks."test:native"]
+description = "Conformance suite on the Rust transport: bundled by the hook, and loaded by path"
+depends = ["deps", "native:build"]
+run = [
+  "cd native && dart test",
+  """
+  case "$(uname -s)" in Darwin) ext=dylib ;; Linux) ext=so ;; *) ext=dll ;; esac
+  file=native/rust/target/release/libws_native.$ext
+  [ "$ext" = dll ] && file=native/rust/target/release/ws_native.dll
+  WS_NATIVE_LIBRARY="$PWD/$file" dart test test/native
+  """,
+]
+
+[tasks."test:rust"]
+description = "Rust unit tests of the native library"
+run = "cd native/rust && cargo test --release"
+
+[tasks.coverage]
+description = "VM test coverage of ws as lcov (coverage/lcov.info)"
+depends = ["deps"]
+run = "dart test --platform vm --coverage-path=coverage/lcov.info"
+
+# --- native library ----------------------------------------------------------
+
+[tasks."native:build"]
+description = "Build the Rust library for this machine (native/rust/target/release)"
+run = "cd native/rust && cargo build --release --locked"
+
+[tasks."native:prebuilt"]
+description = "Build libraries this machine can build into native/prebuilt/ + checksums.json (args: targets)"
+run = "tool/prebuilt.sh"
+
+[tasks."native:stage"]
+description = "Stage ws_native for publishing (args: <dir outside the repo> [ws version constraint])"
+run = "tool/stage_native.sh"
+
+[tasks."release:hashes"]
+description = "Write native/prebuilt/checksums.json into package:ws (dart run ws:install)"
+run = [
+  "dart run tool/native_checksums.dart native/prebuilt",
+  "dart run tool/native_release.dart",
+]
+
+# --- remote (GitHub Actions; needs `gh auth login` and a pushed branch) ------
+
+[tasks."ci:prebuilt"]
+description = "Build every target on GitHub Actions and download them into native/prebuilt/ (arg: run id to only download)"
+run = "tool/ci_prebuilt.sh"
+
+[tasks."ci:status"]
+description = "Recent workflow runs of the current branch"
+run = 'gh run list --branch "$(git branch --show-current)" --limit 15'
+
+[tasks."ci:watch"]
+description = "Follow a running workflow"
+run = "gh run watch"
+
+# --- benchmarks and conformance ----------------------------------------------
+
+[tasks.server]
+description = "Rust WebSocket server for tests, benchmarks and examples"
+run = "cd server && cargo run --release"
+
+[tasks."bench:build"]
+hide = true
+run = [
+  "cd server && cargo build --release",
+  "cd benchmark && dart pub get && dart build cli -t bin/bench.dart -o build/cli",
+]
+
+[tasks.bench]
+description = "Full benchmark matrix (AOT, 3 repeats, ~25 min); results in benchmark/build/"
+depends = ["bench:build"]
+run = "cd benchmark && dart run bin/matrix.dart --repeat=3 --server=../server/target/release/ws_bench_server --out=build/results.jsonl | tee build/matrix.md"
+
+[tasks."bench:quick"]
+description = "Quick benchmark matrix (1 repeat); pass e.g. --filter=echo --variants=ws-native"
+depends = ["bench:build"]
+run = "cd benchmark && dart run bin/matrix.dart --quick --server=../server/target/release/ws_bench_server"
+
+[tasks.autobahn]
+description = "Autobahn TestSuite in Docker (arg: dart | native)"
+run = "tool/autobahn.sh"

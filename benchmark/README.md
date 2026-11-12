@@ -4,8 +4,8 @@ Benchmarks of WebSocket client transports for the `ws` package, run against
 the Rust server in [`../server`](../server).
 
 ```bash
-make bench        # from the repo root: full matrix, 3 repeats (~25 min)
-make bench-quick  # shorter runs, 1 repeat
+mise run bench        # from anywhere in the repo: full matrix, 3 repeats (~25 min)
+mise run bench:quick  # shorter runs, 1 repeat
 ```
 
 Single case. `dart build cli` runs the build hook, which compiles the Rust
@@ -90,3 +90,20 @@ Peak RSS is not meaningful here, because every case runs in one process.
 The build hook builds the Rust crate for Android with the NDK clang that
 Flutter passes to it. Release `print` output on iOS goes to os_log, not to
 the console, so read the results file from the app container.
+
+## Library variants and Autobahn
+
+- `--variant=ws-dart` / `ws-native`: the `ws` package itself through its
+  public API (pure-Dart transport / `ws_native`).
+- Protocol conformance with the Autobahn TestSuite:
+
+  ```bash
+  mkdir -p build/autobahn
+  docker run -d --rm -p 9001:9001 -v $PWD/autobahn:/config \
+    -v $PWD/build/autobahn:/reports --name fuzzingserver \
+    crossbario/autobahn-testsuite \
+    wstest -m fuzzingserver -s /config/fuzzingserver.json
+  dart run bin/autobahn.dart --transport=dart     # or native
+  python3 autobahn/summary.py                     # build/autobahn/index.html
+  docker stop fuzzingserver
+  ```

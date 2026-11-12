@@ -37,7 +37,7 @@ option can be swapped in at any time.
 | JSON decoding in Rust (simd-json) into a **tape**, read in Dart through lazy `Map` / `List` views | [~] best so far, format open | On mobile `d-tape` costs main as little as a Dart worker that builds models, with half the CPU |
 | `Dart_CObject` trees for JSON | [x] rejected | Slowest variant everywhere: the VM rebuilds the tree on main |
 | Map-building decoding in a Dart worker isolate (`c-worker*`) | [~] optional mode only | Frees main, but on Android it costs about 2× the CPU of decoding on main. Worth keeping as a decoder option for heavy model mapping |
-| Binaries shipped with Dart **build hooks** (`package:hooks`, `code_assets`) | [x] works (built locally with cargo) | `benchmark/hook/build.dart` builds for macOS, Android and iOS. Prebuilt downloads are still to do (M7) |
+| Binaries shipped with Dart **build hooks** (`package:hooks`, `code_assets`) | [x] works (built locally with cargo) | `benchmark/hook/build.dart` builds for macOS, Android and iOS. Prebuilt libraries bundled in the archive (D9). The hook lives in a separate package `ws_native` (D8) |
 | Web: separate implementation over the browser `WebSocket` (`package:web` / JS interop) | [x] accepted | No sockets in the browser. Rust/WASM would not help with the browser's WebSocket |
 | Flow control between Rust and Dart | [x] required | Without it RSS grew to 500–900 MB in flood tests |
 | WebTransport | [?] optional, after 2.0 | Only practical through the Rust side (QUIC) |
@@ -201,10 +201,15 @@ Key properties:
 
 ### 4.7 Distribution (native library)
 
-- [ ] Prebuilt binaries for every target, published on GitHub Releases. The
-  build hook downloads the one for the target and checks its SHA-256 against
-  checksums stored in the package. With a Rust toolchain (or a local
-  override) it builds from source instead.
+- [ ] Release workflow: build every target in CI, put the libraries into
+  `native/prebuilt/` with `checksums.json`, create the GitHub release (tag
+  = version, assets `<target>-<file>`), run `tool/native_release.dart`,
+  then publish `ws` and the staged `ws_native`. The libraries are bundled
+  in the `ws_native` archive, not downloaded by the hook (D31). The same
+  files on the GitHub release serve `dart run ws:install` (D32).
+- [x] Apps built with `dart compile exe`: `dart run ws:install` and
+  `WsNativeLibrary.open(path)` (D30, D32).
+- [ ] Per-OS maps in the hook's user-defines, as `sqlite3` 3.6+ has (D31).
 - [ ] Targets: Android (arm64-v8a, armeabi-v7a, x86_64), iOS (device +
   simulator arm64/x64), macOS (arm64/x64), Linux (x64/arm64, glibc; musl?),
   Windows (x64/arm64).
@@ -215,8 +220,11 @@ Key properties:
   TLS provider, and dropping the embedded benchmark server from the library.
 - [ ] If the native library is missing or does not load, fall back to the
   pure-Dart transport. Log it, and make it visible through metrics.
-- [ ] `dart compile exe` does **not** run hooks; `dart build cli` does.
-  Document it for server users.
+- [x] ~~`dart compile exe` does not run hooks~~ — wrong: it **fails** for
+  any app whose dependency graph contains a package with a hook (verified
+  on 3.13.7; the check covers only entrypoints under `bin/`). Hence the
+  split into `ws` + `ws_native` (DECISIONS.md D8), confirmed by the
+  maintainer.
 - [ ] License notices for the Rust dependencies (tokio, rustls, ring, …).
 
 ### 4.8 Web
@@ -345,10 +353,12 @@ here, including the ones that fail.
 
 ### 6.2 Correctness
 
-- [ ] **Autobahn TestSuite** (fuzzingserver) for every transport: native,
-  pure Dart, and web through the browser.
-- [ ] A shared conformance suite run against every transport: states, close
-  codes, errors, reconnect, heartbeat, flow control, large messages, unicode.
+- [x] **Autobahn TestSuite** (fuzzingserver) for native and pure Dart: 0
+  failures (DECISIONS.md D28). [ ] Web through the browser; [ ] in CI.
+- [~] A shared conformance suite run against every transport
+  (`test/transport/conformance.dart`): pure Dart and native pass; web has
+  its own browser test. Flow control and reconnect-under-load cases still
+  to add.
 - [ ] Fuzzing: the frame parser (pure Dart), the tape builder and the Dart
   tape reader (malformed JSON, deep nesting, huge numbers, invalid UTF-8,
   surrogate escapes).
@@ -399,11 +409,11 @@ here, including the ones that fail.
 |---|---|---|---|
 | M0 | Benchmarks and the transport decision | Rust server, transport variants, tape, model mapping, mobile runs | [x] |
 | M1a | Exploration | §5 experiments as benchmark variants; adopt or reject each with recorded numbers. Runs alongside M1–M4, because the internals are swappable | [ ] |
-| M1 | API design | §4.1 API sketch, transport interface, decoder and flow-control contracts, state/error types; review before coding | [ ] |
-| M2 | Core and pure-Dart transport | State machine, reconnect, heartbeat, metrics; RFC 6455 codec from `benchmark/lib/src/codec.dart` hardened; Autobahn green | [ ] |
-| M3 | Native transport | Rust crate as a library (`native/` at the repo root): connections, credits, errors, TLS with the platform verifier, proxy; Autobahn green | [ ] |
+| M1 | API design | §4.1 API sketch, transport interface, decoder and flow-control contracts, state/error types; review before coding | [x] expert-reviewed, DECISIONS.md D11–D18, ARCHITECTURE.md |
+| M2 | Core and pure-Dart transport | State machine, reconnect, heartbeat, metrics; RFC 6455 codec from `benchmark/lib/src/codec.dart` hardened; Autobahn green | [~] core, protocol layer, pure-Dart transport and fake done with tests; Autobahn pending |
+| M3 | Native transport | Rust crate as a library (`native/` at the repo root): connections, credits, errors, TLS with the platform verifier, proxy; Autobahn green | [~] package `ws_native` (`native/`): Rust crate with credits, drain on request, liveness probe, `catch_unwind`, hook with prebuilt/cargo/none; passes the shared conformance suite. TLS uses webpki-roots for now (platform verifier open, §4.5); proxy and Autobahn pending |
 | M4 | Decoders | Tape (Rust and Dart builders), worker decoder, custom binary decoders; tape speedups (§5.3) | [ ] |
-| M5 | Web transport | `package:web` implementation, shared conformance suite in the browser | [ ] |
+| M5 | Web transport | `package:web` implementation, shared conformance suite in the browser | [~] implemented, tested on dart2js and dart2wasm |
 | M6 | Robustness | §6.3 soak, faults, lifecycle, hot restart | [ ] |
 | M7 | Distribution | Prebuilt binaries, CI for every target, checksums, size budget, 16 KB pages, store validation | [ ] |
 | M8 | Example and docs | Dart example in `example/` (scope to be described by the maintainer), Rust server in `server/`, migration guide from 1.x, README, API docs | [ ] |
@@ -432,6 +442,9 @@ here, including the ones that fail.
 
 ## 9. References
 
+- Decision log (every compared alternative, with numbers):
+  `docs/DECISIONS.md`
+- How the code is layered and the rules per layer: `docs/ARCHITECTURE.md`
 - Benchmarks and methodology: `benchmark/README.md`
 - Results (macOS, Galaxy S25 Ultra, iPad Pro M2): `benchmark/RESULTS.md`,
   raw runs in `benchmark/results/`

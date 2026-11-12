@@ -1,3 +1,21 @@
+## 2.0.0-dev.1
+
+- **BREAKING**: complete rewrite. New API: `WebSocketClient.binary()`,
+  `.json()`, `.text()` with `push`, `rpc`, `ping`, `connect`, `reconnect`,
+  `disconnect`, `close`; sealed states and exceptions; plain-data options
+  with `vm`/`js` parts.
+- New pure-Dart RFC 6455 transport on `RawSocket` (no `dart:io`
+  `WebSocket`), browser transport on `package:web` (dart2js and dart2wasm).
+- Reconnect with full-jitter backoff and terminal-failure detection,
+  heartbeat, request/response correlation, metrics.
+- `package:ws/testing.dart`: in-memory `FakeWebSocketServer` for tests.
+- `package:ws/native.dart`: the Rust transport loaded from a file
+  (`WsNativeLibrary.open(path).install()`), and `dart run ws:install` to
+  download the released library with a SHA-256 check, for executables built
+  with `dart compile exe`. Flutter and `dart build cli` apps use the
+  `ws_native` package instead, which bundles the library through a build
+  hook.
+
 ## 1.1.0-dev.1
 
 - Migration from 'dart:html' to 'package:web'

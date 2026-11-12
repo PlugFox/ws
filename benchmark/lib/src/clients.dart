@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'codec.dart';
 import 'model.dart';
+import 'library.dart';
 import 'native.dart';
 import 'tape.dart';
 
@@ -51,7 +52,14 @@ enum Variant {
   dTape('d-tape', 'Rust transport + simd-json tape, lazy views on main'),
 
   /// Rust transport, simd-json → Dart_CObject tree rebuilt by the VM on main.
-  dCobject('d-cobject', 'Rust transport + simd-json, Dart_CObject tree');
+  dCobject('d-cobject', 'Rust transport + simd-json, Dart_CObject tree'),
+
+  /// The library (`package:ws` 2.0) through its public API, pure-Dart
+  /// transport.
+  wsDart('ws-dart', 'package:ws WebSocketClient, pure-Dart transport'),
+
+  /// The library through its public API with `ws_native` installed.
+  wsNative('ws-native', 'package:ws WebSocketClient, ws_native transport');
 
   const Variant(this.id, this.description);
 
@@ -80,8 +88,11 @@ abstract interface class BenchClient {
     Variant variant,
     Uri uri, {
     required void Function(Object message) onMessage,
+    String format = 'json',
   }) =>
       switch (variant) {
+        Variant.wsDart => LibraryClient.connect(uri, onMessage, format, native: false),
+        Variant.wsNative => LibraryClient.connect(uri, onMessage, format, native: true),
         Variant.a => _IoClient.connect(uri, onMessage),
         Variant.c => _CodecClient.connect(uri, onMessage),
         Variant.cTape => _CodecClient.connect(uri, onMessage, tape: true),

@@ -375,3 +375,16 @@ Caveats:
 | wss json 1KB → model | 242.7 | 235.0 | 154.1 | 154.2 | 71.1 | 68.7 |
 | wss json 14KB → model | 662.7 | 574.7 | 473.0 | 456.3 | 283.5 | 234.5 |
 | wss json 60KB → model | 2569.6 | 2167.1 | 1881.5 | 1751.3 | 930.1 | 791.6 |
+
+## The library vs. the prototypes (macOS)
+
+Variants `ws-dart` and `ws-native` run `package:ws` 2.0 through its public
+API (`WebSocketClient.json()` / `.binary()`; `ws_native` installed for the
+latter) next to the prototypes they were built from: `c` (own Dart codec)
+and `d-tape` (Rust + simd-json tape). Quick matrix, one run per cell; raw
+data: `results/library-vs-prototypes-macos.jsonl`. The library adds no
+measurable cost, and receive credits lower the native flood RSS. Details
+and the selected rows: `docs/DECISIONS.md` D27.
+
+Protocol conformance (Autobahn TestSuite, `bin/autobahn.dart`): 0 failures
+on both transports; see D28.

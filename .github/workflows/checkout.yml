@@ -6,79 +6,79 @@ on:
     branches:
       - "master"
       - "develop"
+      - "rewrite"
       - "feature/**"
       - "bugfix/**"
       - "hotfix/**"
       - "support/**"
-    paths:
-      - "lib/**.dart"
-      - "test/**.dart"
-      - "example/**.dart"
-      - "pubspec.yaml"
   pull_request:
     branches:
       - "master"
       - "develop"
-      - "feature/**"
-      - "bugfix/**"
-      - "hotfix/**"
-      - "support/**"
-    paths:
-      - "lib/**.dart"
-      - "test/**.dart"
-      - "example/**.dart"
-      - "pubspec.yaml"
+      - "rewrite"
+
+concurrency:
+  group: checkout-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  checkout:
-    name: "Checkout"
+  package:
+    name: "Package (format, analyze, publish layout)"
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./
-    container:
-      image: dart:beta
     timeout-minutes: 10
     steps:
       - name: 🚂 Get latest code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: 🚃 Cache pub modules
-        uses: actions/cache@v2
-        env:
-          cache-name: cache-ws-package
+      - name: 🎯 Set up Dart
+        uses: dart-lang/setup-dart@v1
         with:
-          path: |
-            $PWD/.pub_cache/
-          key: ${{ runner.os }}-ws-${{ env.cache-name }}-${{ hashFiles('**/pubspec.yaml') }}
+          sdk: stable
 
-      - name: 🗄️ Export pub cache directory
-        run: export PUB_CACHE=$PWD/.pub_cache/
+      - name: 👷 Install dependencies
+        run: dart pub get
 
-      - name: 👷 Install Dependencies
-        timeout-minutes: 1
-        run: |
-          dart pub get
+      - name: 🙈 .pubignore covers .gitignore
+        run: dart run tool/check_pubignore.dart
 
       - name: 🔎 Check format
-        timeout-minutes: 1
-        run: dart format --set-exit-if-changed -l 80 -o none lib/
+        run: dart format --set-exit-if-changed -o none bin/ lib/ test/ tool/
 
       - name: 📈 Check analyzer
-        timeout-minutes: 1
-        run: dart analyze --fatal-infos --fatal-warnings lib/
+        run: dart analyze --fatal-infos --fatal-warnings
 
-      #- name: 🌐 Setup Chrome
-      #  uses: browser-actions/setup-chrome@latest
+      - name: 📦 Publish dry run
+        run: dart pub publish --dry-run
 
-      - name: 🧪 Run tests
-        timeout-minutes: 2
-        run: |
-          dart run coverage:test_with_coverage -fb -o coverage -- \
-            --concurrency=6 --platform vm --coverage=./coverage --reporter=expanded test/ws_test.dart
-
-      - name: 📥 Upload coverage to Codecov
-        timeout-minutes: 1
-        uses: codecov/codecov-action@v3
+  test-vm:
+    name: "Tests (VM)"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
         with:
-          token: ${{ secrets.CODECOV_TOKEN }} # not required for public repos
+          sdk: stable
+      - run: dart pub get
+      - name: 🧪 Run tests
+        run: dart test --platform vm --reporter expanded
+
+  test-web:
+    name: "Tests (Chrome: dart2js, dart2wasm)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - uses: browser-actions/setup-chrome@v1
+      - run: dart pub get
+      - name: 🧪 dart2js
+        run: dart test --platform chrome --reporter expanded
+      - name: 🧪 dart2wasm
+        run: dart test --platform chrome --compiler dart2wasm --reporter expanded

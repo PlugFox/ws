@@ -1,0 +1,74 @@
+# .pubignore replaces .gitignore for `dart pub publish`, so it must repeat
+# every .gitignore pattern. tool/check_pubignore.dart enforces that in CI.
+#
+# Explicit exceptions: gitignored paths that ARE published. Declare each one
+# with a `# publish:` line, otherwise the check fails.
+# publish: /native/prebuilt/
+
+# --- Mirrored from .gitignore ---
+/.temp/
+.buildlog
+.dart_tool/
+.pub/
+build/
+packages
+*.packages
+.idea/
+doc
+*.dart.js
+*.js_
+*.js.deps
+*.js.map
+pubspec.lock
+coverage*
+*.g.dart
+l/
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+*.iml
+*.ipr
+*.iws
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+/build/
+lib/generated_plugin_registrant.dart
+app.*.symbols
+app.*.map.json
+/android/app/debug
+/android/app/profile
+/android/app/release
+log.pana.json
+.coverage/
+/test/**/*.json
+/test/.test_coverage.dart
+target/
+/benchmark/build/
+/example/docs/
+
+# --- Not published (tracked in git, but not part of the package) ---
+/_lib/
+/.github/
+/.vscode/
+/benchmark/
+/server/
+/example/assets/
+/example/game/
+/tool/
+# Design docs live in the repository (pub expects `doc/`, and they are for
+# contributors, not for package users).
+/docs/
+/mise.toml
+
+# Separate package `ws_native`, published from native/.
+/native/

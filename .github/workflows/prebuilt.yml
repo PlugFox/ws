@@ -1,0 +1,82 @@
+name: Prebuilt
+
+# Builds libws_native for every target and uploads one artifact, `prebuilt`,
+# laid out as native/prebuilt/ (with checksums.json). Run it from a
+# workstation with `mise run ci:prebuilt`, which also downloads the result.
+# The release workflow will reuse it (workflow_call).
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  push:
+    branches: ["master", "develop", "rewrite"]
+    paths:
+      - "native/rust/**"
+      - "tool/build_native.sh"
+      - ".github/workflows/prebuilt.yml"
+
+concurrency:
+  group: prebuilt-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: "${{ matrix.target }}"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: macos-arm64, os: macos-latest }
+          - { target: macos-x64, os: macos-latest }
+          - { target: ios-arm64, os: macos-latest }
+          - { target: ios-arm64-sim, os: macos-latest }
+          - { target: ios-x64-sim, os: macos-latest }
+          - { target: android-arm64, os: ubuntu-latest }
+          - { target: android-arm, os: ubuntu-latest }
+          - { target: android-x64, os: ubuntu-latest }
+          # Oldest available runners: the library links against their glibc
+          # (sqlite3 shipped binaries needing glibc 2.38, sqlite3.dart#405).
+          - { target: linux-x64, os: ubuntu-22.04 }
+          - { target: linux-arm64, os: ubuntu-22.04-arm }
+          - { target: windows-x64, os: windows-latest }
+          - { target: windows-arm64, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/rust
+          key: ${{ matrix.target }}
+      - name: Build
+        shell: bash
+        run: tool/build_native.sh ${{ matrix.target }} out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lib-${{ matrix.target }}
+          path: out/
+          if-no-files-found: error
+
+  checksums:
+    name: "checksums.json"
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lib-*
+          path: prebuilt
+          merge-multiple: true
+      - run: dart pub get
+      - run: dart run tool/native_checksums.dart prebuilt
+      - run: cat prebuilt/checksums.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt
+          path: prebuilt/
+          if-no-files-found: error
