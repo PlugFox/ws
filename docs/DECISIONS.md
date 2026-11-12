@@ -1213,7 +1213,8 @@ From `docs/review/future_risks.md` 2.1, 2.3, 2.5, 3.2, 3.3 and 5.1
     `Stream<Object?>`, so the package has no plugin dependency;
     `connectivity_plus`' `onConnectivityChanged` fits. Events in the
     background are ignored: they would end the suspension.
-  - CI tests it on Flutter 3.38.0 (Dart 3.10.0, the lowest bound) and
+  - CI tests it on Flutter 3.38.1 (the first with Dart 3.10.0; 3.38.0 ships a 3.10.0
+    beta that `^3.10.0` rejects) and
     3.47.9. `tool/flutter_sdk.sh` downloads the official archive and
     checks its SHA-256 against Flutter's release manifest.
 - **Measured** on loopback, 20 runs each, heartbeat timeout 600 ms

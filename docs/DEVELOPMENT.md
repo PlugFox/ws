@@ -67,7 +67,7 @@ Things the task list does not show:
   `flutter analyze`, `flutter test` there (`mise run test:flutter`). CI
   installs Flutter with `tool/flutter_sdk.sh`, which checks the archive
   against Flutter's release manifest, and tests the lowest supported
-  Flutter (3.38.0, Dart 3.10.0) and 3.47.9.
+  Flutter (3.38.1, Dart 3.10.0) and 3.47.9.
 - `ws_native` and `ws_flutter` cannot be published from their
   directories. Pub applies the
   repository's ignore files, which hide it (DECISIONS.md D25), so it is
