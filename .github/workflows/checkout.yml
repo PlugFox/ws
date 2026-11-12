@@ -155,6 +155,8 @@ jobs:
           dart pub downgrade
           dart analyze --fatal-warnings lib bin
       - name: 🧪 Tests on the lowest SDK (pure Dart; server suites skip)
+        env:
+          CI: "false" # test/support/test_server.dart skips without a server
         run: |
           dart pub upgrade
           dart test --platform vm --reporter expanded

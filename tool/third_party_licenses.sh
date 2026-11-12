@@ -9,6 +9,7 @@ set -euo pipefail
 out="${1:?usage: tool/third_party_licenses.sh <out-file>}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+mkdir -p "$(dirname "$out")"
 cd "$root/native/rust"
 cargo about generate --locked --fail about.hbs -o "$out"
 echo "$(grep -c '^- ' "$out") crate licences in $out"
