@@ -14,6 +14,8 @@ import 'package:ws/ws.dart';
 
 import '../support/server_handle.dart';
 
+const bool _isWasm = bool.fromEnvironment('dart.tool.dart2wasm');
+
 /// Registers the shared tests; [server] is valid once `setUpAll` ran.
 /// When [unavailable] returns a reason, each test is skipped with it (the
 /// browser learns whether the server was built only at run time).
@@ -727,8 +729,12 @@ void sharedServerConformance(
 
     serverTest('JSON documents of 1 MiB and 17 MiB decode', () async {
       // The native transport parses up to 16 MiB into a tape off the Dart
-      // thread and hands larger texts to Dart (DECISIONS.md D50).
-      for (final size in [1 << 20, 17 << 20]) {
+      // thread and hands larger texts to Dart (DECISIONS.md D50). Not
+      // 17 MiB under dart2wasm: with asserts on, as in tests, its
+      // json.decode is quadratic in nested containers (an O(n) assert per
+      // container start), about 25 s here; release builds decode 13 MiB
+      // in 0.1 s (DECISIONS.md D55).
+      for (final size in [1 << 20, if (!_isWasm) 17 << 20]) {
         final c = WebSocketClient.json(
           options: const WebSocketOptions(
             reconnect: WebSocketReconnect.disabled(),

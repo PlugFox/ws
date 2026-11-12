@@ -1737,3 +1737,32 @@ heartbeat ping builder) fails only its own call. A new test pins
 nothing, and the connection stays open.
 
 - Status: **adopted**.
+
+### D55. dart2wasm `json.decode` is quadratic only with asserts
+
+The browser suite's "JSON documents of 1 MiB and 17 MiB" test took 28 s
+under dart2wasm on CI (30 s limit) and then timed out; dart2js took
+under 1 s. Measured in Chrome with `dart test` (Dart 3.13.7): 6.6 MB of
+small objects 21 s, doubling the input quadrupled the time; flat lists,
+one large map and long strings were linear. The cause is in the SDK's
+wasm JSON listener: each container start wraps the parent's elements in
+`GrowableList.withDataAndLength`, whose constructor asserts the type of
+every element, so a list of n containers costs O(n²) with asserts on.
+
+Compiled with `dart compile wasm -O2` and run in Node 26, the same
+decode is linear and fast:
+
+| Input | asserts off | asserts on |
+|---|---|---|
+| 100k two-element lists (1.3 MB) | 11 ms | 10.7 s |
+| 200k small objects (13 MiB) | 108 ms | 43 s |
+
+`JSON.parse` plus `dartify` was 0.2 s for 15 MiB, so a JS-backed decoder
+would not pay off in release builds, and it would lose the int/double
+distinction (`1.0`). No library change: release builds are not
+affected. Under dart2wasm the test drops the 17 MiB case, which exists
+for the native transport's 16 MiB tape limit (D50). Debug (asserts on)
+Flutter web builds with dart2wasm will be slow on large nested JSON;
+worth reporting to dart-lang/sdk.
+
+- Status: **adopted**.
