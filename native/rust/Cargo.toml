@@ -13,10 +13,12 @@ crate-type = ["cdylib"]
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.154"
-simd-json = "0.19.0"
+# serde_impl is not used (tape.rs reads the tape directly).
+simd-json = { version = "0.19.0", default-features = false, features = ["swar-number-parsing", "runtime-detection"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util"] }
-tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
-tokio-tungstenite = "0.30"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+# Own sockets (net.rs, D34): no `connect`; `handshake` for the key helpers.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 socket2 = { version = "0.6", features = ["all"] }
 # Already linked through rustls (crypto provider); used for pin digests.
 ring = "0.17.14"

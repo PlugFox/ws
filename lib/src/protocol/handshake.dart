@@ -74,7 +74,7 @@ final class HandshakeRequest {
     if (protocols.isNotEmpty) {
       b.write('Sec-WebSocket-Protocol: ${protocols.join(', ')}\r\n');
     }
-    if (basicAuthorization(uri) case final authorization?) {
+    if (urlAuthorization(uri, headers) case final authorization?) {
       b.write('Authorization: $authorization\r\n');
     }
     validateHeaders(headers);
@@ -84,6 +84,13 @@ final class HandshakeRequest {
     b.write('\r\n');
     return latin1.encode(b.toString());
   }
+
+  /// [basicAuthorization] unless [headers] already set `Authorization`
+  /// (any case): an explicit header wins, and only one is sent.
+  static String? urlAuthorization(Uri uri, Map<String, String> headers) =>
+      headers.keys.any((k) => k.toLowerCase() == 'authorization')
+      ? null
+      : basicAuthorization(uri);
 
   /// `Basic` credentials from the URL's user info (UTF-8, RFC 7617), or
   /// `null`. Every transport sends them, as browsers do.

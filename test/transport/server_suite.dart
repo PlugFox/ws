@@ -478,6 +478,22 @@ void serverConformance(WebSocketTransport Function() create) {
         );
         await c.close();
       });
+
+      test('an Authorization header wins over URL user info', () async {
+        final c = client(
+          vm: const WebSocketVmOptions(headers: {'authorization': 'Bearer t'}),
+        );
+        final first = c.messages.first;
+        await c.connect('ws://u:p@127.0.0.1:${server.ws}/headers');
+        final request = jsonDecode(await first) as Map<String, Object?>;
+        final values = [
+          for (final h in request['headers']! as List<Object?>)
+            if (((h! as List)[0] as String).toLowerCase() == 'authorization')
+              (h as List)[1],
+        ];
+        expect(values, ['Bearer t']);
+        await c.close();
+      });
     });
 
     test('invalid subprotocols and user info fail the attempt', () async {

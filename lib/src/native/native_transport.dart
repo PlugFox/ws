@@ -64,7 +64,13 @@ final class _NativeConnection implements TransportConnection, Finalizable {
     this._listener,
     int window,
   ) {
-    _port = RawReceivePort(_onEvent, 'ws_native');
+    // Events run in the zone of connect(), like the socket callbacks of
+    // the pure-Dart transport; a port handler would otherwise run in the
+    // root zone, where an uncaught error ends the isolate.
+    _port = RawReceivePort(
+      _zone.bindUnaryCallbackGuarded(_onEvent),
+      'ws_native',
+    );
     final tls = request.tls;
     // tungstenite ignores user info; send it like the other transports.
     final url = request.url;
@@ -72,7 +78,7 @@ final class _NativeConnection implements TransportConnection, Finalizable {
     try {
       HandshakeRequest.validateHeaders(request.headers);
       HandshakeRequest.validateProtocols(request.protocols);
-      authorization = HandshakeRequest.basicAuthorization(url);
+      authorization = HandshakeRequest.urlAuthorization(url, request.headers);
     } on Object catch (e) {
       // Same error as the pure-Dart transport.
       _id = 0;
@@ -84,7 +90,7 @@ final class _NativeConnection implements TransportConnection, Finalizable {
     final headers = {...request.headers, 'Authorization': ?authorization};
     final config = utf8.encode(
       jsonEncode(<String, Object?>{
-        'url': _wireUrl(url, stripUserInfo: authorization != null),
+        'url': _wireUrl(url, stripUserInfo: url.userInfo.isNotEmpty),
         'headers': [
           for (final MapEntry(:key, :value) in headers.entries) [key, value],
         ],
@@ -124,6 +130,9 @@ final class _NativeConnection implements TransportConnection, Finalizable {
       );
       return;
     }
+    // The id doubles as the finalizer token. On 32-bit Android a pointer
+    // holds the low 32 bits only; ids are sequential, so this is safe until
+    // 2^32 connections in one process.
     _lib.finalizer.attach(this, Pointer<Void>.fromAddress(_id), detach: this);
   }
 
@@ -136,6 +145,7 @@ final class _NativeConnection implements TransportConnection, Finalizable {
 
   final WsNativeLibrary _lib;
   final TransportListener _listener;
+  final Zone _zone = Zone.current;
   late final RawReceivePort _port;
   late final int _id;
   bool _finished = false;
@@ -152,18 +162,24 @@ final class _NativeConnection implements TransportConnection, Finalizable {
         try {
           for (var i = 2; i < e.length && !_finished && !_aborted; i += 2) {
             final item = e[i + 1]! as Uint8List;
-            switch (e[i]) {
-              case _kindText:
-                _listener.onTextBytes(item);
-              case _kindBinary:
-                _listener.onBinary(item);
-              case _kindTape:
-                _listener.onJson(TapeDocument(item).root);
+            // A throwing listener loses neither the rest of the batch nor
+            // the error (docs/review/native.md finding 17).
+            try {
+              switch (e[i]) {
+                case _kindText:
+                  _listener.onTextBytes(item);
+                case _kindBinary:
+                  _listener.onBinary(item);
+                case _kindTape:
+                  _listener.onJson(TapeDocument(item).root);
+              }
+            } on Object catch (error, stack) {
+              _zone.handleUncaughtError(error, stack);
             }
           }
         } finally {
-          // Credits go back after the batch was handled, even if a listener
-          // threw: otherwise the reader would stall for good.
+          // Credits go back after the batch was handled: otherwise the
+          // reader would stall for good.
           if (!_finished) _lib.grant(_id, e[1]! as int);
         }
       case _evOpen:
@@ -236,7 +252,7 @@ final class _NativeConnection implements TransportConnection, Finalizable {
   }
 
   void _send(Uint8List bytes, {required bool binary}) {
-    if (_finished) {
+    if (_finished || _closing) {
       throw const WebSocketNotConnectedException('The connection is closed');
     }
     switch (_lib.send(_id, _lib.copy(bytes), bytes.length, binary)) {
@@ -260,12 +276,20 @@ final class _NativeConnection implements TransportConnection, Finalizable {
 
   @override
   void ping() {
-    if (!_finished) _lib.ping(_id);
+    if (_finished || _closing) {
+      throw const WebSocketNotConnectedException('The connection is closing');
+    }
+    _lib.ping(_id);
   }
+
+  /// `close()` was called: like the pure-Dart transport, nothing more is
+  /// sent (docs/review/native.md finding 15).
+  bool _closing = false;
 
   @override
   void close(int? code, String? reason) {
-    if (_finished) return;
+    if (_finished || _closing) return;
+    _closing = true;
     final bytes = utf8.encode(reason ?? '');
     _lib.close(_id, code ?? -1, _lib.copy(bytes), bytes.length);
   }

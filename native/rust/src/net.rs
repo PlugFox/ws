@@ -159,16 +159,22 @@ pub fn interleave(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
 /// Connects to the first address that answers. A new attempt starts when the
 /// previous one fails or after `delay`, whichever comes first; the first
 /// success wins and the other attempts are dropped (closing their sockets).
-/// Returns the last error if every attempt fails.
+/// If every attempt fails, returns the error of the first address (the
+/// preferred one), like `dart:io`, not whichever failed last
+/// (docs/review/native.md finding 22).
 pub async fn race<A, T, F, Fut>(addrs: Vec<A>, delay: Duration, mut connect: F) -> io::Result<T>
 where
     F: FnMut(A) -> Fut,
     Fut: Future<Output = io::Result<T>>,
 {
-    let mut addrs = addrs.into_iter();
+    let mut addrs = addrs.into_iter().enumerate();
     let mut attempts = FuturesUnordered::new();
+    let mut start = |(i, addr): (usize, A)| {
+        let attempt = connect(addr);
+        async move { (i, attempt.await) }
+    };
     match addrs.next() {
-        Some(addr) => attempts.push(connect(addr)),
+        Some(first) => attempts.push(start(first)),
         None => {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -176,23 +182,27 @@ where
             ));
         }
     }
+    let mut first_error: Option<(usize, io::Error)> = None;
     loop {
         let more = addrs.len() > 0;
         tokio::select! {
             biased;
             result = attempts.next(), if !attempts.is_empty() => match result {
-                Some(Ok(stream)) => return Ok(stream),
-                Some(Err(e)) => {
-                    if let Some(addr) = addrs.next() {
-                        attempts.push(connect(addr));
+                Some((_, Ok(stream))) => return Ok(stream),
+                Some((i, Err(e))) => {
+                    if first_error.as_ref().is_none_or(|(j, _)| i < *j) {
+                        first_error = Some((i, e));
+                    }
+                    if let Some(next) = addrs.next() {
+                        attempts.push(start(next));
                     } else if attempts.is_empty() {
-                        return Err(e);
+                        return Err(first_error.expect("set above").1);
                     }
                 }
                 None => unreachable!("guarded by is_empty"),
             },
             () = tokio::time::sleep(delay), if more => {
-                attempts.push(connect(addrs.next().expect("more")));
+                attempts.push(start(addrs.next().expect("more")));
             }
         }
     }
@@ -228,7 +238,9 @@ where
     stream.flush().await?;
 
     // Read byte by byte up to the blank line: whatever follows belongs to
-    // the tunnelled connection and must stay in the socket.
+    // the tunnelled connection and must stay in the socket. About 100
+    // reads once per connection, well under a millisecond: kept simple
+    // (docs/review/native.md finding 21).
     let mut head = Vec::with_capacity(256);
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
@@ -250,8 +262,9 @@ where
         .unwrap_or_default()
         .into_owned();
     let status = status_line
-        .split(' ')
-        .nth(1)
+        .starts_with("HTTP/")
+        .then(|| status_line.split(' ').nth(1))
+        .flatten()
         .and_then(|s| s.parse::<u16>().ok());
     match status {
         Some(200..=299) => Ok(()),
@@ -417,11 +430,15 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn all_failing_returns_last_error() {
+    async fn all_failing_returns_the_first_address_error() {
         let (r, started) = run(vec![(300, false), (100, false)]).await;
         let e = r.unwrap_err();
-        // 0 fails at 300 ms, 1 (started at 250) at 350 ms: the last one is reported.
-        assert_eq!(e.to_string(), "attempt 1 failed");
+        // 0 fails at 300 ms, 1 (started at 250) at 350 ms: 0 is reported.
+        assert_eq!(e.to_string(), "attempt 0 failed");
+        assert_eq!(started.len(), 2);
+        // The same when the first address fails last.
+        let (r, _) = run(vec![(400, false), (100, false)]).await;
+        assert_eq!(r.unwrap_err().to_string(), "attempt 0 failed");
         assert_eq!(started.len(), 2);
     }
 
@@ -470,6 +487,12 @@ mod tests {
              Proxy-Authorization: Basic dTpw\r\n\r\n"
         );
         assert_eq!(rest, b"HELLO");
+    }
+
+    #[tokio::test]
+    async fn tunnel_needs_an_http_status_line() {
+        let (r, _, _) = tunnel_with(b"FOO 200 OK\r\n\r\n").await;
+        assert!(r.is_err());
     }
 
     #[tokio::test]

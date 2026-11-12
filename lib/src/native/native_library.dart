@@ -28,7 +28,9 @@ final class WsNativeLibrary {
       abort = s.abort.asFunction(isLeaf: true),
       grant = s.grant.asFunction(isLeaf: true),
       buffered = s.buffered.asFunction(isLeaf: true),
-      requestDrain = s.requestDrain.asFunction(isLeaf: true),
+      // Not a leaf call: it may post the drain event (Dart_PostCObject)
+      // from inside the call (docs/review/native.md finding 19).
+      requestDrain = s.requestDrain.asFunction(),
       finalizer = NativeFinalizer(s.finalize);
 
   /// Wraps symbols resolved by someone else (`ws_native` takes them from

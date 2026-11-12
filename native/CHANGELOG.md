@@ -4,6 +4,10 @@
   bundled through a build hook.
 - TLS: the system trust store (OS verifier on Apple and Windows), pins,
   user CAs on Android on request, disabled system CAs honoured.
+- `abort()` and the connect timeout work while the OS verifies a
+  certificate (Apple, Windows). Large JSON documents no longer stall
+  other connections; above 16 MiB they are decoded by Dart. A throwing
+  listener no longer ends the isolate. Smaller library (−3 %).
 - An invalid close code from the server (999, 1005) is reported as a
   protocol violation (1002 sent by the client), not as the server
   closing with 1002.

@@ -10,7 +10,7 @@ What `ws` checks, and which platform policies do **not** apply to it.
 | iOS, macOS | Rust | Security.framework: system, MDM and user-trusted CAs, the user's trust settings |
 | Windows | Rust | CryptoAPI, the same as other apps |
 | Android | Rust and pure Dart | Conscrypt's system CAs (APEX on Android 14+), minus the ones the user disabled; plus user/MDM CAs with `trustUserCertificates` |
-| Linux | Rust | system CA files (`SSL_CERT_FILE`, `SSL_CERT_DIR`); bundled Mozilla roots if there are none |
+| Linux | Rust | system CA files (`SSL_CERT_FILE`, `SSL_CERT_DIR`); bundled Mozilla roots if none can be read, which includes an `SSL_CERT_FILE` that points nowhere (so a broken override trusts the public roots instead of failing) |
 | any VM | pure Dart | `dart:io` (BoringSSL with the system roots) |
 
 `trustedRootsPem` adds roots everywhere except the web. `allowInsecure`

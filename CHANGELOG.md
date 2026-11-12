@@ -28,6 +28,9 @@
   `WebSocketTls.trustUserCertificates` (Android: also trust user and MDM
   CAs). On Android both transports drop the system CAs the user disabled.
   TLS settings are built once per distinct value and reused.
+- After `close()` every transport refuses sends and pings the same way.
+  An explicit `Authorization` header wins over URL user info (one header
+  is sent). A throwing transport listener loses no messages.
 - Web: `maxMessageSize` is enforced (1009, the message is not
   delivered); a dropped connection reports no close code, like the other
   transports; an invalid close code from the server is a protocol

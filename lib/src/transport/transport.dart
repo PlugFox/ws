@@ -66,6 +66,7 @@ abstract interface class TransportListener {
 
   /// A text message as UTF-8 bytes. Not validated: the decoder validates
   /// (DECISIONS.md D5), and a decode failure is a protocol error 1007.
+  /// Read-only, like [onBinary]'s bytes.
   void onTextBytes(Uint8List bytes);
 
   /// A text message as a string (browser).
@@ -74,7 +75,9 @@ abstract interface class TransportListener {
   /// A text message already decoded from JSON by the transport.
   void onJson(Object? value);
 
-  /// A binary message.
+  /// A binary message. Treat [bytes] as read-only: the native transport
+  /// hands out unmodifiable views of its buffers, the others modifiable
+  /// lists.
   void onBinary(Uint8List bytes);
 
   /// A pong arrived (protocol heartbeat).

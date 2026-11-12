@@ -286,10 +286,20 @@ final class _DartConnection implements TransportConnection, FrameHandler {
   // --- FrameHandler ---------------------------------------------------------
 
   @override
-  void onText(Uint8List payload) => _listener.onTextBytes(payload);
+  void onText(Uint8List payload) => _deliver(_listener.onTextBytes, payload);
 
   @override
-  void onBinary(Uint8List payload) => _listener.onBinary(payload);
+  void onBinary(Uint8List payload) => _deliver(_listener.onBinary, payload);
+
+  /// A throwing listener loses neither the error nor the rest of the
+  /// frames read in the same chunk (as on the native transport).
+  void _deliver(void Function(Uint8List) to, Uint8List payload) {
+    try {
+      to(payload);
+    } on Object catch (error, stack) {
+      Zone.current.handleUncaughtError(error, stack);
+    }
+  }
 
   @override
   void onPing(Uint8List payload) {

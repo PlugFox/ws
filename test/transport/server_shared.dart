@@ -9,6 +9,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
+import 'package:ws/transport.dart';
 import 'package:ws/ws.dart';
 
 import '../support/server_handle.dart';
@@ -332,6 +333,75 @@ void sharedServerConformance(
     });
   });
 
+  group('calls after close() (T-12)', () {
+    // The transport itself, without the client: after close() a send is
+    // refused with WebSocketNotConnectedException on every transport, and
+    // ping, close and abort do nothing more than end the connection once.
+    serverTest('send is refused, the rest is harmless', () async {
+      final events = _Events();
+      final c = WebSocketTransports.current.connect(
+        TransportRequest(url: Uri.parse(url('/echo'))),
+        events,
+      );
+      await events.opened.future.timeout(const Duration(seconds: 5));
+      c
+        ..sendText('before')
+        ..close(1000, 'bye');
+      for (final send in <void Function()>[
+        () => c.sendText('after'),
+        () => c.sendTextBytes(Uint8List.fromList('after'.codeUnits)),
+        () => c.sendBinary(Uint8List(1)),
+      ]) {
+        expect(send, throwsA(isA<WebSocketNotConnectedException>()));
+      }
+      expect(
+        c.ping,
+        throwsA(
+          caps.protocolPing
+              ? isA<WebSocketNotConnectedException>()
+              : isA<WebSocketUnsupportedException>(),
+        ),
+      );
+      c
+        ..close(1000, 'again')
+        ..requestDrain();
+      await events.closed.future.timeout(const Duration(seconds: 5));
+      c
+        ..abort()
+        ..close(1000, 'late');
+      expect(
+        () => c.sendText('late'),
+        throwsA(isA<WebSocketNotConnectedException>()),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(events.closes, 1);
+      // Data that precedes the server's close frame is delivered; browsers
+      // drop messages once close() was called (the HTML spec fires message
+      // events only while OPEN). The client drops them anyway.
+      expect(events.texts, caps.protocolCloseCodes ? ['before'] : isEmpty);
+    });
+  });
+
+  serverTest('a throwing listener loses no message and no error', () async {
+    final events = _Events()..throwOnFirst = true;
+    final errors = <Object>[];
+    final done = Completer<void>();
+    late TransportConnection c;
+    runZonedGuarded(() {
+      c = WebSocketTransports.current.connect(
+        TransportRequest(url: Uri.parse(url('/flood?count=50&size=8'))),
+        events,
+      );
+    }, (e, _) => errors.add(e));
+    events.onText = () {
+      if (events.texts.length == 49 && !done.isCompleted) done.complete();
+    };
+    await done.future.timeout(const Duration(seconds: 5));
+    expect(errors, [isA<StateError>()]);
+    c.abort();
+    await events.closed.future.timeout(const Duration(seconds: 5));
+  });
+
   group('reconnect policy on server closes', () {
     const maxDelay = Duration(seconds: 2);
 
@@ -587,6 +657,26 @@ void sharedServerConformance(
       await c.close();
     });
 
+    serverTest('JSON documents of 1 MiB and 17 MiB decode', () async {
+      // The native transport parses up to 16 MiB into a tape off the Dart
+      // thread and hands larger texts to Dart (DECISIONS.md D50).
+      for (final size in [1 << 20, 17 << 20]) {
+        final c = WebSocketClient.json(
+          options: const WebSocketOptions(
+            reconnect: WebSocketReconnect.disabled(),
+          ),
+        );
+        final got = c.messages.first;
+        await c.connect(
+          url('/stream?format=json&size=$size&rate=0&count=1&unicode=1'),
+        );
+        final doc = await got.timeout(const Duration(seconds: 30));
+        expect(doc['seq'], 0, reason: '$size');
+        expect((doc['items']! as List).length, greaterThan(1000));
+        await c.close();
+      }
+    });
+
     serverTest('binary flood with then=close ends with 1000 done', () async {
       final c = WebSocketClient.binary(
         options: const WebSocketOptions(
@@ -824,4 +914,41 @@ void sharedServerConformance(
       await c.close();
     });
   });
+}
+
+final class _Events implements TransportListener {
+  final Completer<void> opened = Completer<void>();
+  final Completer<void> closed = Completer<void>();
+  final List<String> texts = [];
+  int closes = 0;
+  bool throwOnFirst = false;
+  void Function()? onText;
+  void _text(String text) {
+    if (throwOnFirst) {
+      throwOnFirst = false;
+      throw StateError('listener failed');
+    }
+    texts.add(text);
+    onText?.call();
+  }
+
+  @override
+  void onOpen(String? protocol) => opened.complete();
+  @override
+  void onTextBytes(Uint8List bytes) => _text(String.fromCharCodes(bytes));
+  @override
+  void onTextString(String text) => _text(text);
+  @override
+  void onJson(Object? value) {}
+  @override
+  void onBinary(Uint8List bytes) {}
+  @override
+  void onPong() {}
+  @override
+  void onDrain() {}
+  @override
+  void onClosed(int? code, String reason, WebSocketException? error) {
+    closes++;
+    if (!closed.isCompleted) closed.complete();
+  }
 }

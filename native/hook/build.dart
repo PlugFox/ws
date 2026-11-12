@@ -148,15 +148,22 @@ Future<Uri?> _cargoBuild(
   try {
     triple = _rustTriple(code);
     environment = _environment(code, triple);
-  } on Object {
+  } on Object catch (e) {
     // Unsupported target or missing toolchain: pure-Dart fallback in auto
     // mode (DECISIONS.md D9 item 4).
     if (required) rethrow;
+    stderr.writeln(
+      'ws_native: not building ($e); using the pure-Dart '
+      'transport.',
+    );
     return null;
   }
-  // Shared directory as the cargo cache; the result is copied per config,
-  // because cargo does not fingerprint deployment targets or NDK levels.
-  final targetDir = input.outputDirectoryShared.resolve('cargo/');
+  // Shared directory as the cargo cache, one per deployment target or NDK
+  // level: cargo does not fingerprint them, so a build for a newer level
+  // would otherwise be reused for an older one (and fail to load there).
+  final targetDir = input.outputDirectoryShared.resolve(
+    'cargo/${cargoTargetKey(code)}/',
+  );
   final ProcessResult result;
   try {
     result = await Process.run(
@@ -215,7 +222,9 @@ Map<String, String> _environment(CodeConfig code, String triple) {
       final prefix = triple == 'armv7-linux-androideabi'
           ? 'armv7a-linux-androideabi'
           : triple;
-      final clang = compiler.resolve('$prefix$api-clang').toFilePath();
+      final clang = compiler
+          .resolve(ndkClang(prefix, api, windows: Platform.isWindows))
+          .toFilePath();
       env['CARGO_TARGET_${key}_LINKER'] = clang;
       env['CC_$ccKey'] = clang;
       env['AR_$ccKey'] = compiler.resolve('llvm-ar').toFilePath();
@@ -232,6 +241,26 @@ Map<String, String> _environment(CodeConfig code, String triple) {
   }
   return env;
 }
+
+/// The NDK's clang wrapper for [prefix] and [api]: a `.cmd` script on
+/// Windows hosts.
+String ndkClang(String prefix, int api, {required bool windows}) =>
+    '$prefix$api-clang${windows ? '.cmd' : ''}';
+
+/// What, besides the triple, makes a cargo build differ: the NDK level on
+/// Android, the deployment target on Apple platforms.
+String cargoTargetKey(CodeConfig code) => switch (code.targetOS) {
+  OS.android => targetKey('android', '${code.android.targetNdkApi}'),
+  OS.iOS => targetKey('ios', _apple(code.iOS.deploymentVersion)),
+  OS.macOS => targetKey('macos', _apple(code.macOS.deploymentVersion)),
+  _ => targetKey('default', null),
+};
+
+String _apple(AppleVersion v) => '${v.major}.${v.minor}';
+
+/// A directory name for [os] at [version].
+String targetKey(String os, String? version) =>
+    version == null ? os : '$os-$version';
 
 String _rustTriple(CodeConfig code) {
   final sim =

@@ -252,12 +252,20 @@ pub extern "C" fn ws_native_init(post: Option<PostCObjectFn>, threads: u32) -> b
 /// ownership. Dart calls the library through function pointers, where
 /// passing a pointer into a Dart `Uint8List` is not allowed, so the one copy
 /// happens on the Dart side instead of here (DECISIONS.md D30). Returns
-/// null on failure.
+/// null when the memory is not available, instead of aborting the process
+/// as `Box` would (docs/review/native.md finding 18).
 #[unsafe(no_mangle)]
 pub extern "C" fn ws_native_alloc(len: usize) -> *mut u8 {
-    guard(std::ptr::null_mut(), || {
-        Box::into_raw(Box::<[u8]>::new_uninit_slice(len)).cast::<u8>()
-    })
+    if len == 0 {
+        // What `Box<[u8]>` uses for an empty slice.
+        return std::ptr::NonNull::<u8>::dangling().as_ptr();
+    }
+    match std::alloc::Layout::array::<u8>(len) {
+        // The layout of `Box<[u8]>` with `len` bytes, so `take_buffer` can
+        // turn it back into one.
+        Ok(layout) => unsafe { std::alloc::alloc(layout) },
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// Frees a buffer from `ws_native_alloc` that was not handed over.
@@ -596,7 +604,6 @@ fn map_error(error: tungstenite::Error) -> Closed {
             headers: None,
             detail: 0,
         },
-        E::Tls(_) => Closed::error(ERR_TLS, error.to_string()),
         // On an open connection: reset, broken pipe, keepalive timeout.
         other => Closed::error(ERR_CONNECTION, other.to_string()).with_detail(DETAIL_LOST),
     }
@@ -635,7 +642,12 @@ async fn run(
     config: Config,
     mut commands: mpsc::UnboundedReceiver<Command>,
 ) -> Closed {
-    let connecting = open(&config);
+    // A certificate check blocked in the OS polls this (tls.rs).
+    let aborted = shared.clone();
+    let connecting = tls::CANCELLED.scope(
+        Arc::new(move || aborted.aborted.load(Ordering::SeqCst)),
+        open(&config),
+    );
     tokio::pin!(connecting);
     let (ws, protocol) = loop {
         tokio::select! {
@@ -817,7 +829,16 @@ async fn serve(
                     Err(_) => break,
                 }
             }
-            if !post_batch(&decoder_shared, json, &mut batch) {
+            // A large document is parsed while this worker hands its other
+            // tasks to another thread, so the reads, writes and pongs of
+            // every connection go on (docs/review/native.md finding 6).
+            let heavy = json && batch.iter().any(|m| m.is_text() && m.len() > TAPE_IN_PLACE);
+            let posted = if heavy {
+                tokio::task::block_in_place(|| post_batch(&decoder_shared, json, &mut batch))
+            } else {
+                post_batch(&decoder_shared, json, &mut batch)
+            };
+            if !posted {
                 return;
             }
         }
@@ -1040,6 +1061,14 @@ async fn serve(
     outcome
 }
 
+/// JSON texts above this size are parsed with `block_in_place`.
+const TAPE_IN_PLACE: usize = 64 * 1024;
+
+/// JSON texts above this size are delivered as text and decoded by Dart.
+/// Parsing needs up to about 28 times the text at its peak (input copy,
+/// simd-json nodes, tape words): 16 MiB about 0.5 GB, 64 MiB 1.8 GB.
+const TAPE_MAX: usize = 16 * 1024 * 1024;
+
 enum Item {
     Plain(DartCObject),
     External(ExternalBytes),
@@ -1055,7 +1084,10 @@ fn post_batch(shared: &Shared, json: bool, batch: &mut Vec<Message>) -> bool {
         bytes += charge(message.len());
         match message {
             Message::Text(text) => {
-                if json && let Ok(t) = tape::build_tape(text.as_bytes().to_vec()) {
+                if json
+                    && text.len() <= TAPE_MAX
+                    && let Ok(t) = tape::build_tape(text.as_bytes().to_vec())
+                {
                     // The tape is larger than the text: charge the
                     // difference too (it is granted back with the batch).
                     let extra = t.bytes.saturating_sub(text.len()) as i64;
@@ -1108,6 +1140,25 @@ fn post_batch(shared: &Shared, json: bool, batch: &mut Vec<Message>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::tape::build_tape;
+    use super::{take_buffer, ws_native_alloc, ws_native_free};
+
+    #[test]
+    fn alloc_returns_null_instead_of_aborting() {
+        use std::hint::black_box;
+        assert!(ws_native_alloc(usize::MAX).is_null());
+        // Representable but not available. `black_box`: in a release build
+        // LLVM may otherwise assume an allocation whose result is only
+        // compared with null succeeds (FFI callers are opaque to it).
+        assert!(black_box(ws_native_alloc(black_box(isize::MAX as usize))).is_null());
+        let empty = ws_native_alloc(0);
+        assert!(!empty.is_null());
+        assert!(unsafe { take_buffer(empty, 0) }.is_empty());
+        let p = ws_native_alloc(3);
+        unsafe { p.copy_from_nonoverlapping([1u8, 2, 3].as_ptr(), 3) };
+        assert_eq!(unsafe { take_buffer(p, 3) }, [1, 2, 3]);
+        let q = ws_native_alloc(5);
+        unsafe { ws_native_free(q, 5) };
+    }
 
     #[test]
     fn tape_layout() {

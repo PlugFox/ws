@@ -1472,3 +1472,95 @@ not exist.
   observably, since `disconnect()` already cancels the timer and marks
   the session.
 - Status: **adopted**.
+
+### D50. The remaining native findings
+
+docs/review/native.md, findings 5–30 (1–4 and 11 were fixed earlier, 9
+and 10 in D45). Each was checked against the current code first;
+measurements on an M-series Mac, release builds, the Rust test server.
+
+- **5, small payloads pin read chunks: not reproduced.** The review
+  measured RSS: +60 MB after keeping 571 of 4 M 16-byte messages. A
+  control run that keeps nothing grows RSS by the same 60 MB (freed
+  memory is not returned to the OS). Measured with
+  `malloc_zone_statistics` (bytes in use), keeping 572 messages costs
+  +1.3–1.6 MB, about 2.5 KB each, not 128 KiB; the measure is sensitive
+  (572 kept 64 KiB messages: +46.8 MB). Copying payloads up to 32 KiB
+  into the Dart heap (`Dart_CObject_kTypedData`) removed even that, but
+  cost 2–4 % throughput on small messages, so it was not kept.
+- **6, tape memory and blocking: fixed.** JSON texts above 64 KiB are
+  parsed under `block_in_place`, so the worker hands its other tasks
+  (every connection's reads, writes, pongs) to another thread; above
+  16 MiB the text goes to Dart instead of a tape (peak was about 28 times
+  the text). Echo round trip on a second connection while 10 documents
+  arrive, one worker thread:
+
+  | Documents | Before: echo p50 / max, peak RSS | After |
+  |---|---|---|
+  | 1 MiB | 9 / 28 ms, 75 MB | 0 / 0–12 ms, 72–81 MB |
+  | 8 MiB | 12–15 / 19–32 ms, 475 MB | 0 / 18–22 ms, 475 MB |
+  | 32 MiB | 1 / 84 ms, 1829 MB, 735 ms total | 1 / 233 ms, 400–490 MB, 2370 ms total |
+
+  Above the limit Dart decodes on its own thread (slower, longer pauses)
+  but memory stays at a quarter: 1.8 GB gets a mobile app killed. A
+  4 MiB limit was tried first and dropped: 8 MiB documents then took
+  560 ms instead of 180 and the echo p50 rose to 53 ms.
+- **7, `buffered` under steady load:** fixed in D41.
+- **8, OS verifier blocks `abort()`: fixed.** The verification runs on
+  the blocking pool; the connection waits under `block_in_place` and
+  polls a task-local cancel flag every 20 ms, so `abort()` and the
+  connect timeout end the attempt at once (an abandoned check finishes
+  on its own thread). Rust tests with a verifier that blocks for 3 s:
+  aborted after 100 ms it returns within 600 ms, and a single-worker
+  runtime keeps running other tasks meanwhile.
+- **12, hook cache keys: fixed.** The shared cargo target directory is
+  per NDK level or Apple deployment target, and the NDK clang wrapper is
+  `…-clang.cmd` on Windows hosts; a skipped build prints why
+  (`native/test/hook_test.dart`).
+- **13, no Rust-side connect deadline:** kept. The client's
+  `connectTimeout` aborts, and with 8 that works during TLS too; direct
+  users of the transport must do the same.
+- **14 (schemes), 16 (repeated headers):** already fixed by the own
+  handshake (D39).
+- **15, calls after `close()`: fixed** together with T-12. After
+  `close()` every transport throws `WebSocketNotConnectedException` for
+  sends and protocol pings (native ignored the ping and let a second
+  `close()` stop its writer). New shared test on all three transports;
+  it also shows that browsers drop messages after `close()` (the HTML
+  spec fires message events only while open), which the client does
+  anyway.
+- **17, a throwing listener: fixed, and worse than reported.** The
+  native port handler ran in the root zone, so a listener exception was
+  an uncaught error there and ended the isolate; the pure-Dart transport
+  lost the rest of the chunk. Both now deliver every message and report
+  the error to the zone of `connect()`. Shared test on every transport.
+- **18, `ws_native_alloc`:** returns null when memory is not available
+  instead of aborting (Rust test).
+- **19, leaf calls:** `requestDrain` may post an event from inside the
+  call, so it is no longer a leaf call. `send` stays a leaf call; its
+  UTF-8 check runs at several GB/s.
+- **20, NAT64 for IPv4 literals:** as `dart:io`; not changed.
+- **21, proxy response read byte by byte:** kept (about 100 reads per
+  connection, under a millisecond); the status line must now start with
+  `HTTP/` (Rust test).
+- **22, `race` error:** the error of the first (preferred) address is
+  returned, not whichever failed last.
+- **23, cached TLS errors:** build errors are not cached (D45 cache);
+  the Linux fallback to the bundled roots is documented in
+  docs/SECURITY.md.
+- **24, server close 250 ms late: not reproduced.** Server close after
+  100 ms, five runs each: Dart 101–105 ms, native 98–107 ms, with the
+  server holding TCP open or closing it.
+- **25, pongs overtaking data:** any incoming traffic proves liveness,
+  so order does not matter to the heartbeat; not changed.
+- **26, two `Authorization` headers: fixed on both VM transports.** An
+  explicit header (any case) wins over URL user info; test against the
+  server's `/headers`.
+- **27:** received buffers are documented as read-only.
+- **28:** `tokio-rustls` without `logging`, simd-json without
+  `serde_impl`, tokio-tungstenite with `handshake` only, the unreachable
+  `E::Tls` arm removed: the macOS library shrinks from 2,128,496 to
+  2,062,080 bytes (−3.1 %).
+- **29:** a test compares the ABI number in Dart and Rust.
+- **30:** the 32-bit finalizer token is commented.
+- Status: **adopted**.

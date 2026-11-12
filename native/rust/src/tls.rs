@@ -157,7 +157,7 @@ fn system_verifier(
     } else {
         rustls_platform_verifier::Verifier::new_with_extra_roots(extra, provider)?
     };
-    Ok(Arc::new(OffloadedVerifier(verifier)))
+    Ok(Arc::new(OffloadedVerifier(Arc::new(verifier))))
 }
 
 #[cfg(not(any(target_vendor = "apple", windows)))]
@@ -282,15 +282,25 @@ fn load_system_roots() -> Vec<CertificateDer<'static>> {
     Vec::new()
 }
 
-/// Runs the OS verifier with `block_in_place`: Security.framework and
-/// CryptoAPI may block (revocation and intermediate fetching), and the
-/// runtime has only a few worker threads.
-#[cfg(any(target_vendor = "apple", windows))]
-#[derive(Debug)]
-struct OffloadedVerifier(rustls_platform_verifier::Verifier);
+tokio::task_local! {
+    /// Whether the connection being opened was aborted. Set around
+    /// `open()` so that a verifier blocked in the OS can give up.
+    pub static CANCELLED: Arc<dyn Fn() -> bool + Send + Sync>;
+}
 
-#[cfg(any(target_vendor = "apple", windows))]
-impl ServerCertVerifier for OffloadedVerifier {
+/// Runs the OS verifier on the blocking pool: Security.framework and
+/// CryptoAPI may block for seconds (intermediate and revocation fetching;
+/// rustls-platform-verifier allows 10 s on Windows). The connection task
+/// waits under `block_in_place`, so the runtime's few workers stay free,
+/// and checks [`CANCELLED`] every 20 ms, so `abort()` and the Dart connect
+/// timeout end the attempt at once (docs/review/native.md finding 8). An
+/// abandoned verification finishes on its own thread.
+#[cfg(any(target_vendor = "apple", windows, test))]
+#[derive(Debug)]
+struct OffloadedVerifier<V>(Arc<V>);
+
+#[cfg(any(target_vendor = "apple", windows, test))]
+impl<V: ServerCertVerifier + 'static> ServerCertVerifier for OffloadedVerifier<V> {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
@@ -299,18 +309,47 @@ impl ServerCertVerifier for OffloadedVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let verify = || {
-            self.0
-                .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
-        };
         let multi_thread = tokio::runtime::Handle::try_current()
             .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
-        let result = if multi_thread {
-            tokio::task::block_in_place(verify)
-        } else {
-            verify()
+        let cancelled = CANCELLED.try_with(Arc::clone).ok();
+        let (Some(cancelled), true) = (cancelled, multi_thread) else {
+            return self
+                .0
+                .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+                .map_err(classify);
         };
-        result.map_err(classify)
+        let inner = self.0.clone();
+        let (end_entity, server_name) = (end_entity.clone().into_owned(), server_name.to_owned());
+        let intermediates: Vec<_> = intermediates
+            .iter()
+            .map(|c| c.clone().into_owned())
+            .collect();
+        let ocsp_response = ocsp_response.to_vec();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tokio::task::spawn_blocking(move || {
+            let result = inner.verify_server_cert(
+                &end_entity,
+                &intermediates,
+                &server_name,
+                &ocsp_response,
+                now,
+            );
+            let _ = tx.send(result);
+        });
+        tokio::task::block_in_place(|| {
+            loop {
+                match rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                    Ok(result) => return result.map_err(classify),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) if cancelled() => {
+                        return Err(rustls::Error::General("aborted".into()));
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(rustls::Error::General("the verifier stopped".into()));
+                    }
+                }
+            }
+        })
     }
 
     fn verify_tls12_signature(
@@ -340,7 +379,7 @@ impl ServerCertVerifier for OffloadedVerifier {
 /// the rest as text ending in `: <OSStatus>`. Validity errors matter to
 /// apps ("check the device clock"), so map them too (DECISIONS.md D42;
 /// codes from `SecBase.h`).
-#[cfg(any(target_vendor = "apple", windows))]
+#[cfg(any(target_vendor = "apple", windows, test))]
 fn classify(error: rustls::Error) -> rustls::Error {
     #[cfg(target_vendor = "apple")]
     {
@@ -537,6 +576,114 @@ mod tests {
 
     fn settings() -> Settings {
         Settings::default()
+    }
+
+    /// Stands in for an OS verifier that blocks on the network.
+    #[derive(Debug)]
+    struct Slow(std::time::Duration, AcceptAnyCertificate);
+
+    impl ServerCertVerifier for Slow {
+        fn verify_server_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            intermediates: &[CertificateDer<'_>],
+            server_name: &ServerName<'_>,
+            ocsp: &[u8],
+            now: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            std::thread::sleep(self.0);
+            self.1
+                .verify_server_cert(end_entity, intermediates, server_name, ocsp, now)
+        }
+        fn verify_tls12_signature(
+            &self,
+            m: &[u8],
+            c: &CertificateDer<'_>,
+            d: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            self.1.verify_tls12_signature(m, c, d)
+        }
+        fn verify_tls13_signature(
+            &self,
+            m: &[u8],
+            c: &CertificateDer<'_>,
+            d: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            self.1.verify_tls13_signature(m, c, d)
+        }
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.1.supported_verify_schemes()
+        }
+    }
+
+    /// One slow verification under a cancel flag set after `abort_after`,
+    /// on a runtime with one worker: (result, elapsed, ticks of another
+    /// task meanwhile).
+    fn offloaded(
+        delay_ms: u64,
+        abort_after_ms: Option<u64>,
+    ) -> (
+        Result<ServerCertVerified, rustls::Error>,
+        std::time::Duration,
+        u32,
+    ) {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::time::{Duration, Instant};
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let verifier = OffloadedVerifier(Arc::new(Slow(
+                Duration::from_millis(delay_ms),
+                AcceptAnyCertificate(provider),
+            )));
+            let cert = rcgen::generate_simple_self_signed(vec!["x".into()])
+                .unwrap()
+                .cert;
+            let cert = CertificateDer::from(cert.der().to_vec());
+            let flag = Arc::new(AtomicBool::new(false));
+            let ticks = Arc::new(AtomicU32::new(0));
+            let (f, t) = (flag.clone(), ticks.clone());
+            tokio::spawn(async move {
+                for i in 0..u64::MAX {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    t.fetch_add(1, Ordering::SeqCst);
+                    if abort_after_ms.is_some_and(|ms| i * 10 >= ms) {
+                        f.store(true, Ordering::SeqCst);
+                    }
+                }
+            });
+            let start = Instant::now();
+            let name = ServerName::try_from("x").unwrap();
+            let result = CANCELLED
+                .scope(Arc::new(move || flag.load(Ordering::SeqCst)), async {
+                    verifier.verify_server_cert(&cert, &[], &name, &[], UnixTime::now())
+                })
+                .await;
+            (result, start.elapsed(), ticks.load(Ordering::SeqCst))
+        })
+    }
+
+    #[test]
+    fn an_os_verification_keeps_the_runtime_running() {
+        let (result, elapsed, ticks) = offloaded(300, None);
+        assert!(result.is_ok());
+        assert!(elapsed >= std::time::Duration::from_millis(300));
+        // The only worker was free for the ticker meanwhile.
+        assert!(ticks >= 10, "ticks {ticks}");
+    }
+
+    #[test]
+    fn an_aborted_os_verification_returns_at_once() {
+        let (result, elapsed, _) = offloaded(3000, Some(100));
+        assert!(matches!(result, Err(rustls::Error::General(ref m)) if m == "aborted"));
+        assert!(
+            elapsed < std::time::Duration::from_millis(600),
+            "{elapsed:?}"
+        );
     }
 
     /// Tests that look at the shared cache must not run while another one

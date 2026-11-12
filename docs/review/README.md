@@ -50,9 +50,8 @@ file; finding ids below refer to them.
    ~~reconnect policy on real sockets~~ done, D48; ~~randomized
    re-entrancy sequences, exact content checks (T-5, T-6)~~ done, D49.
    Left from §4 for item 7: exact backpressure (T-7, `sendBufferLimit`),
-   calls after close (T-12), close variants, tape equivalence, stalls,
-   native lifecycle.
-7. **Remaining medium/low items**: native 5–10, 12–30 (pinned read
-   chunks, tape memory, OS verifier blocking `abort()`, custom roots
-   rebuilding the TLS config), protocol F10–F12, F14–F18, client F23,
-   F27–F29, distribution F21–F30, doc corrections in tests_docs.md.
+   close variants, tape equivalence, stalls, native lifecycle (calls
+   after close, T-12, went with D50).
+7. **Remaining medium/low items**: ~~native 5–10, 12–30~~ done, D50;
+   protocol F10–F12, F14–F18, client F23, F27–F29, distribution F21–F30,
+   doc corrections in tests_docs.md.
