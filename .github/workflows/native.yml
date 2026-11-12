@@ -85,12 +85,14 @@ jobs:
         run: |
           (cd server && cargo build --release --locked)
           (cd native/rust && cargo build --release --locked)
+          # Native Windows paths: Dart cannot open MSYS paths (/d/a/...).
+          root="$(pwd -W 2>/dev/null || pwd)"
           case "$RUNNER_OS" in
             Windows) lib=ws_native.dll; exe=.exe ;;
             macOS) lib=libws_native.dylib; exe= ;;
             *) lib=libws_native.so; exe= ;;
           esac
           dart pub get
-          WS_TEST_SERVER="$PWD/server/target/release/ws_bench_server$exe" \
-          WS_NATIVE_LIBRARY="$PWD/native/rust/target/release/$lib" \
+          WS_TEST_SERVER="$root/server/target/release/ws_bench_server$exe" \
+          WS_NATIVE_LIBRARY="$root/native/rust/target/release/$lib" \
             dart test test/native --reporter expanded

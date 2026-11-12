@@ -56,7 +56,12 @@ jobs:
           (cd native && dart analyze --fatal-infos --fatal-warnings)
 
       - name: 📦 Publish dry run
-        run: dart pub publish --dry-run
+        run: |
+          # The example's asset submodule is never published (.pubignore),
+          # but pub on Linux reports the uninitialized gitlink as an ignored
+          # checked-in file. Drop it from this workspace's index only.
+          git rm -q --cached example/assets
+          dart pub publish --dry-run
 
   test-vm:
     name: "Tests (VM)"
@@ -86,13 +91,15 @@ jobs:
         run: |
           (cd server && cargo build --release --locked)
           (cd native/rust && cargo build --release --locked)
+          # Native Windows paths: Dart cannot open MSYS paths (/d/a/...).
+          root="$(pwd -W 2>/dev/null || pwd)"
           case "$RUNNER_OS" in
             Windows) lib=ws_native.dll; exe=.exe ;;
             macOS) lib=libws_native.dylib; exe= ;;
             *) lib=libws_native.so; exe= ;;
           esac
-          echo "WS_TEST_SERVER=$PWD/server/target/release/ws_bench_server$exe" >> "$GITHUB_ENV"
-          echo "WS_NATIVE_LIBRARY=$PWD/native/rust/target/release/$lib" >> "$GITHUB_ENV"
+          echo "WS_TEST_SERVER=$root/server/target/release/ws_bench_server$exe" >> "$GITHUB_ENV"
+          echo "WS_NATIVE_LIBRARY=$root/native/rust/target/release/$lib" >> "$GITHUB_ENV"
       - name: 🧪 Run tests (pure Dart, native by path, against the Rust server)
         run: dart test --platform vm --reporter expanded
 
