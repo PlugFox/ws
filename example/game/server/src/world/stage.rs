@@ -7,6 +7,8 @@
 //! the launch grace.
 
 use super::directory::{run_instance, HubCommand};
+use super::horde::catalog::MonsterCatalog;
+use super::horde::{Horde, HordeConfig};
 use super::hub::{HubEvent, HubInstance, HubSimConfig, HubWorld, PlayerProfile};
 use super::missions::MissionInfo;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -26,11 +28,18 @@ pub struct StageConfig {
     pub max_stages: usize,
     /// A launched stage nobody entered is shut down after this long.
     pub launch_grace: Duration,
+    /// Monster simulation of every stage (when a catalog is loaded).
+    pub horde: HordeConfig,
 }
 
 impl Default for StageConfig {
     fn default() -> Self {
-        Self { sim: HubSimConfig::default(), max_stages: 64, launch_grace: Duration::from_secs(30) }
+        Self {
+            sim: HubSimConfig::default(),
+            max_stages: 64,
+            launch_grace: Duration::from_secs(30),
+            horde: HordeConfig::default(),
+        }
     }
 }
 
@@ -86,6 +95,8 @@ struct StageState {
 pub struct StageDirectory {
     /// Stage world per map id (built once at boot, shared by instances).
     worlds: Arc<HashMap<String, Arc<HubWorld>>>,
+    /// Monster catalog; stages run without monsters when absent.
+    monsters: Option<Arc<MonsterCatalog>>,
     config: StageConfig,
     state: Arc<Mutex<StageState>>,
 }
@@ -96,7 +107,13 @@ impl StageDirectory {
             .into_iter()
             .map(|w| (w.map(w.entry()).id().to_string(), Arc::new(w)))
             .collect();
-        Self { worlds: Arc::new(worlds), config, state: Arc::new(Mutex::new(StageState::default())) }
+        Self { worlds: Arc::new(worlds), monsters: None, config, state: Arc::new(Mutex::new(StageState::default())) }
+    }
+
+    /// Stages launched from now on get a horde of these monsters.
+    pub fn with_monsters(mut self, catalog: MonsterCatalog) -> Self {
+        self.monsters = (!catalog.is_empty()).then(|| Arc::new(catalog));
+        self
     }
 
     /// Whether `mission` can be launched at all (its map is loaded).
@@ -118,7 +135,11 @@ impl StageDirectory {
         }
         let stage_id = st.next_id;
         let (tx, rx) = mpsc::channel(COMMAND_CAPACITY);
-        let instance = HubInstance::stage(stage_id, mission.id, Arc::clone(world), self.config.sim.clone());
+        let mut instance = HubInstance::stage(stage_id, mission.id, Arc::clone(world), self.config.sim.clone());
+        if let Some(catalog) = &self.monsters {
+            let config = HordeConfig { waves: mission.waves.clone(), ..self.config.horde.clone() };
+            instance = instance.with_horde(Horde::new(Arc::clone(world), Arc::clone(catalog), config));
+        }
         tokio::spawn(run_instance(instance, rx));
         st.stages.insert(
             stage_id,
@@ -245,9 +266,9 @@ mod tests {
     use crate::world::OUTBOX_CAPACITY;
 
     static MISSION: MissionInfo =
-        MissionInfo { id: "m1", name: "M1", description: "", map: "field", max_players: 4 };
+        MissionInfo { id: "m1", name: "M1", description: "", map: "field", max_players: 4, waves: crate::world::horde::director::WaveRules::NORMAL };
     static MISSING: MissionInfo =
-        MissionInfo { id: "m2", name: "M2", description: "", map: "nowhere", max_players: 4 };
+        MissionInfo { id: "m2", name: "M2", description: "", map: "nowhere", max_players: 4, waves: crate::world::horde::director::WaveRules::NORMAL };
 
     fn stages(max: usize) -> StageDirectory {
         let field = map(

@@ -2,6 +2,7 @@
 //! instances and their wire protocol.
 
 pub mod directory;
+pub mod horde;
 pub mod hub;
 pub mod lobby;
 pub mod map;

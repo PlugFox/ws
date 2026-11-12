@@ -21,6 +21,28 @@
 //! ```
 //!
 //! 13 header bytes + 9 bytes per entity.
+//!
+//! Stage instances send `STAGE_SNAPSHOT` instead: the same header and player
+//! block, then the monsters within the recipient's light radius (plus a
+//! small margin):
+//!
+//! ```text
+//! u8   kind       = 0x03 (STAGE_SNAPSHOT)
+//! ...  header and player block exactly as HUB_SNAPSHOT
+//! u16  monster_count
+//! monster_count × {
+//!   u16 slot       pool slot
+//!   u8  generation bumps whenever the slot is freed: (slot, generation) is
+//!                  the monster's identity, a new pair is a new monster
+//!   u8  kind       index into `stage_joined.monsters`
+//!   u16 x, u16 y   same fixed point as players
+//! }
+//! ```
+//!
+//! 8 bytes per monster. Facing and walk/idle are derived client-side from
+//! the movement. A monster missing from snapshots for a while has left the
+//! view (or died): the client times it out rather than trusting absence
+//! from one frame, so the format survives lost or reordered datagrams.
 
 use super::map::{CameraConstraint, LocationKind, MapData};
 use super::missions::MissionInfo;
@@ -28,6 +50,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
 pub const SNAPSHOT_KIND: u8 = 0x01;
+pub const STAGE_SNAPSHOT_KIND: u8 = 0x03;
+pub const MONSTER_ENTRY_LEN: usize = 8;
 pub const SNAPSHOT_HEADER_LEN: usize = 13;
 pub const SNAPSHOT_ENTRY_LEN: usize = 9;
 const FIXED_ONE: f32 = 64.0;
@@ -146,6 +170,12 @@ pub enum ServerMsg {
         mission: String,
         tick_rate: u32,
         entity_id: u32,
+        /// Monster kind ids; a snapshot's `kind` byte indexes this list
+        /// (also the sprite names in the location atlas).
+        monsters: Vec<String>,
+        /// The recipient's light radius in cells: monsters are visible (and
+        /// sent) only within it. 0 when the stage has no monsters.
+        light_radius: f32,
     },
     /// The recipient is in a lobby; sent on every change.
     LobbyState { lobby: LobbyInfo },
@@ -246,14 +276,39 @@ impl SnapshotBody {
 
     pub fn frame(&self, map_epoch: u16, tick: u32, ack_seq: u32) -> Bytes {
         let mut out = BytesMut::with_capacity(SNAPSHOT_HEADER_LEN + self.buf.len());
-        out.put_u8(SNAPSHOT_KIND);
+        self.put_head(&mut out, SNAPSHOT_KIND, map_epoch, tick, ack_seq);
+        out.freeze()
+    }
+
+    /// Stage snapshot: this body plus `monster_count` pre-encoded monster
+    /// entries (`MONSTER_ENTRY_LEN` bytes each).
+    pub fn stage_frame(&self, map_epoch: u16, tick: u32, ack_seq: u32, monsters: &[u8], monster_count: u16) -> Bytes {
+        debug_assert_eq!(monsters.len(), monster_count as usize * MONSTER_ENTRY_LEN);
+        let mut out = BytesMut::with_capacity(SNAPSHOT_HEADER_LEN + self.buf.len() + 2 + monsters.len());
+        self.put_head(&mut out, STAGE_SNAPSHOT_KIND, map_epoch, tick, ack_seq);
+        out.put_u16_le(monster_count);
+        out.extend_from_slice(monsters);
+        out.freeze()
+    }
+
+    fn put_head(&self, out: &mut BytesMut, kind: u8, map_epoch: u16, tick: u32, ack_seq: u32) {
+        out.put_u8(kind);
         out.put_u16_le(map_epoch);
         out.put_u32_le(tick);
         out.put_u32_le(ack_seq);
         out.put_u16_le(self.count);
         out.extend_from_slice(&self.buf);
-        out.freeze()
     }
+}
+
+/// One monster of a stage snapshot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MonsterEntry {
+    pub slot: u16,
+    pub generation: u8,
+    pub kind: u8,
+    pub x: f32,
+    pub y: f32,
 }
 
 /// Decoded snapshot (used by tests and headless bots).
@@ -263,17 +318,42 @@ pub struct Snapshot {
     pub tick: u32,
     pub ack_seq: u32,
     pub entities: Vec<(u32, f32, f32, u8)>,
+    /// Empty for hub snapshots.
+    pub monsters: Vec<MonsterEntry>,
 }
 
 impl Snapshot {
+    /// Decodes a hub or stage snapshot.
     pub fn decode(b: &[u8]) -> Option<Self> {
-        if b.len() < SNAPSHOT_HEADER_LEN || b[0] != SNAPSHOT_KIND {
+        if b.len() < SNAPSHOT_HEADER_LEN || (b[0] != SNAPSHOT_KIND && b[0] != STAGE_SNAPSHOT_KIND) {
             return None;
         }
         let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
         let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
         let count = u16_at(11) as usize;
-        if b.len() != SNAPSHOT_HEADER_LEN + count * SNAPSHOT_ENTRY_LEN {
+        let players_end = SNAPSHOT_HEADER_LEN + count * SNAPSHOT_ENTRY_LEN;
+        let mut monsters = Vec::new();
+        if b[0] == STAGE_SNAPSHOT_KIND {
+            if b.len() < players_end + 2 {
+                return None;
+            }
+            let m = u16_at(players_end) as usize;
+            if b.len() != players_end + 2 + m * MONSTER_ENTRY_LEN {
+                return None;
+            }
+            monsters = (0..m)
+                .map(|i| {
+                    let o = players_end + 2 + i * MONSTER_ENTRY_LEN;
+                    MonsterEntry {
+                        slot: u16_at(o),
+                        generation: b[o + 2],
+                        kind: b[o + 3],
+                        x: decode_pos(u16_at(o + 4)),
+                        y: decode_pos(u16_at(o + 6)),
+                    }
+                })
+                .collect();
+        } else if b.len() != players_end {
             return None;
         }
         let entities = (0..count)
@@ -282,7 +362,7 @@ impl Snapshot {
                 (u32_at(o), decode_pos(u16_at(o + 4)), decode_pos(u16_at(o + 6)), b[o + 8])
             })
             .collect();
-        Some(Self { map_epoch: u16_at(1), tick: u32_at(3), ack_seq: u32_at(7), entities })
+        Some(Self { map_epoch: u16_at(1), tick: u32_at(3), ack_seq: u32_at(7), entities, monsters })
     }
 }
 
@@ -303,6 +383,26 @@ mod tests {
         assert_eq!(s.ack_seq, 55);
         assert_eq!(s.entities, vec![(7, 12.5, 300.25, 3), (u32::MAX, 0.0, 1023.0, 7)]);
         assert!(Snapshot::decode(&frame[..frame.len() - 1]).is_none());
+    }
+
+    #[test]
+    fn stage_snapshot_round_trip() {
+        let mut body = SnapshotBody::with_capacity(1);
+        body.push(7, 12.5, 30.0, 3);
+        let mut m = BytesMut::new();
+        m.put_u16_le(513);
+        m.put_u8(4);
+        m.put_u8(2);
+        m.put_u16_le(encode_pos(100.25));
+        m.put_u16_le(encode_pos(7.5));
+        let frame = body.stage_frame(1, 2, 3, &m, 1);
+        assert_eq!(frame.len(), SNAPSHOT_HEADER_LEN + SNAPSHOT_ENTRY_LEN + 2 + MONSTER_ENTRY_LEN);
+        let s = Snapshot::decode(&frame).unwrap();
+        assert_eq!(s.entities, vec![(7, 12.5, 30.0, 3)]);
+        assert_eq!(s.monsters, vec![MonsterEntry { slot: 513, generation: 4, kind: 2, x: 100.25, y: 7.5 }]);
+        assert!(Snapshot::decode(&frame[..frame.len() - 1]).is_none());
+        let empty = body.stage_frame(1, 2, 3, &[], 0);
+        assert!(Snapshot::decode(&empty).unwrap().monsters.is_empty());
     }
 
     #[test]

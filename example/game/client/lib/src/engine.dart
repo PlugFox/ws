@@ -20,6 +20,10 @@ extension type GameView._(JSObject _) implements JSObject {
   external JSPromise<JSAny?> loadLocation(String manifestUrl);
   external void setCamera(String constraintJson);
   external double cameraYaw();
+
+  /// Light radius of the focused unit in cells (0 = no limit): beyond it
+  /// the world sinks into fog and [Row.flagFade] units dissolve.
+  external void setLightRadius(double cells);
   external int spriteIndex(String name);
   external int actionIndex(String name);
   @JS('upsertEntities')
@@ -81,6 +85,9 @@ abstract final class Row {
 
   /// Players and bosses (high-rate tier).
   static const flagHigh = 2;
+
+  /// Monsters: dissolve in and out at the edge of the light radius.
+  static const flagFade = 4;
 }
 
 /// Growable row buffer for `upsertEntities`; reused every frame.

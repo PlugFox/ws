@@ -44,6 +44,25 @@ final class _Npc {
   }
 }
 
+/// A stage monster seen in snapshots. Its identity is `(slot, generation)`:
+/// a new generation on the same slot is a different monster.
+final class _Mob {
+  _Mob(this.slot, this.generation, this.kind) : track = RemoteTrack(entityIdOf(slot));
+
+  /// Engine ids of monsters: above every character id, below 2^24 (exact in
+  /// float32), and positive (NPCs are negative).
+  static int entityIdOf(int slot) => 0x800000 + slot;
+
+  final int slot;
+  final int generation;
+  final int kind;
+  final RemoteTrack track;
+  double lastSeen = 0;
+  int facing = 4;
+  double lastX = double.nan;
+  double lastY = double.nan;
+}
+
 final class _Peer {
   _Peer(this.name, this.archetype);
   final String name;
@@ -85,6 +104,14 @@ final class HubSession {
   final _tracks = <int, RemoteTrack>{};
   final _lastSeen = <int, double>{};
   final _peers = <int, _Peer>{};
+
+  /// Stage monsters by pool slot, and the kind table from `stage_joined`.
+  final _mobs = <int, _Mob>{};
+  var _monsterKinds = const <String>[];
+
+  /// A monster not refreshed for this long left the view (or died); one
+  /// missing snapshot alone means nothing once frames ride on datagrams.
+  static const _mobTimeout = 0.5;
   var _npcs = <_Npc>[];
   _Npc? _nearNpc;
 
@@ -156,7 +183,7 @@ final class HubSession {
 
   void _onMessage(Uint8List data) {
     if (data.isEmpty) return;
-    if (data[0] == Snapshot.kind) {
+    if (Snapshot.isSnapshot(data[0])) {
       final s = Snapshot.decode(data);
       if (s != null) _onSnapshot(s);
       return;
@@ -173,6 +200,7 @@ final class HubSession {
         _channel = msg['channel_name']! as String;
         _tickHz = (msg['tick_rate']! as num).toInt();
         _clock = ServerClock(tickHz: _tickHz);
+        view.setLightRadius(0);
         if (_inStage) {
           _inStage = false;
           view.showPanel('');
@@ -182,6 +210,8 @@ final class HubSession {
         _channel = 'Stage-${msg['stage_id']}';
         _tickHz = (msg['tick_rate']! as num).toInt();
         _clock = ServerClock(tickHz: _tickHz);
+        _monsterKinds = ((msg['monsters'] as List?) ?? const []).cast<String>();
+        view.setLightRadius(((msg['light_radius'] as num?) ?? 0).toDouble());
         _inStage = true;
         _renderStagePanel();
       case 'lobby_state':
@@ -243,6 +273,32 @@ final class HubSession {
       (_tracks[id] ??= RemoteTrack(id)).push(s.tick, s.xs[i], s.ys[i], s.facings[i]);
       _lastSeen[id] = now;
     }
+    for (var i = 0; i < s.monsterCount; i++) {
+      final slot = s.mobSlots[i];
+      var m = _mobs[slot];
+      if (m == null || m.generation != s.mobGenerations[i]) {
+        // A reused slot is a new monster: snap, never slide from the old one.
+        if (m != null) view.removeEntity(m.track.id.toDouble());
+        m = _mobs[slot] = _Mob(slot, s.mobGenerations[i], s.mobKinds[i]);
+      }
+      final x = s.mobXs[i], y = s.mobYs[i];
+      // Facing from movement, with a dead zone so push-out nudges in a
+      // settled crowd do not spin the sprite.
+      final dx = x - m.lastX, dy = y - m.lastY;
+      if (dx * dx + dy * dy > 0.03 * 0.03) m.facing = facingOf(dx, dy);
+      m
+        ..lastX = x
+        ..lastY = y
+        ..lastSeen = now;
+      m.track.push(s.tick, x, y, m.facing);
+    }
+  }
+
+  void _clearMobs() {
+    for (final m in _mobs.values) {
+      view.removeEntity(m.track.id.toDouble());
+    }
+    _mobs.clear();
   }
 
   Future<void> _onMapEnter(Map<String, Object?> msg) async {
@@ -257,6 +313,7 @@ final class HubSession {
     for (final id in _tracks.keys.toList()) {
       _removePeer(id);
     }
+    _clearMobs();
     for (final npc in _npcs) {
       view.setLabel(npc.entityId, null, '');
     }
@@ -603,6 +660,7 @@ final class HubSession {
           {'id': 'props', 'label': 'Props (buildings, trees)', 'type': 'toggle', 'value': e['props']},
           {'id': 'cutout', 'label': 'See-through buildings', 'type': 'toggle', 'value': e['cutout']},
           range('cutoutRadius', 'See-through radius, m', 0.5, 4, 0.1, e['cutoutRadius']),
+          {'id': 'fog', 'label': 'Animated fog beyond the light', 'type': 'toggle', 'value': e['fog']},
         ],
       }),
     );
@@ -728,6 +786,48 @@ final class HubSession {
     }
     stale.forEach(_removePeer);
 
+    // Monsters: same segment logic as remote players, sprite by kind.
+    final staleMobs = <int>[];
+    for (final m in _mobs.values) {
+      if (now - m.lastSeen > _mobTimeout) {
+        staleMobs.add(m.slot);
+        continue;
+      }
+      final t = m.track..segment(rt);
+      final action = t.moving ? Act.walk : Act.idle;
+      final sprite = _mobSprite(m.kind);
+      final still = t.x0 == t.x1 && t.y0 == t.y1;
+      if (t.sentFacing == t.facing && t.sentAction == action && t.sentSprite == sprite) {
+        if (still ? (t.sentX == t.x1 && t.sentY == t.y1) : (t.sentTick0 == t.tick0 && t.sentTick1 == t.tick1)) {
+          continue;
+        }
+      }
+      _out.add(
+        id: t.id.toDouble(),
+        x0: t.x0,
+        y0: t.y0,
+        t0: _sec(t.tick0),
+        x1: t.x1,
+        y1: t.y1,
+        t1: still ? _sec(t.tick0) : _sec(t.tick1),
+        facing: t.facing,
+        sprite: sprite,
+        action: action,
+        flags: Row.flagFade,
+      );
+      t
+        ..sentTick0 = t.tick0
+        ..sentTick1 = t.tick1
+        ..sentFacing = t.facing
+        ..sentAction = action
+        ..sentSprite = sprite
+        ..sentX = still ? t.x1 : double.nan
+        ..sentY = still ? t.y1 : double.nan;
+    }
+    for (final slot in staleMobs) {
+      view.removeEntity(_mobs.remove(slot)!.track.id.toDouble());
+    }
+
     _nearNpc = null;
     for (final npc in _npcs) {
       if (npc.inReach(p.x, p.y)) _nearNpc = npc;
@@ -753,6 +853,13 @@ final class HubSession {
     }();
   }
 
+  /// Sprite of a monster kind in the current location atlas (-1 when the
+  /// atlas lacks it; the engine skips such rows).
+  int _mobSprite(int kind) {
+    final name = kind < _monsterKinds.length ? _monsterKinds[kind] : '';
+    return _spriteCache['$_mapId:mob:$name'] ??= view.spriteIndex(name);
+  }
+
   void _updateStats(double now, LocalPredictor p) {
     if (now - _rateWindowStart >= 1) {
       final span = now - _rateWindowStart;
@@ -765,7 +872,8 @@ final class HubSession {
     }
     final stats = jsonDecode(view.stats()) as Map<String, Object?>;
     view.updateHud(
-      '$_mapName · $_channel · ${_peers.length + 1} here\n'
+      '$_mapName · $_channel · ${_peers.length + 1} here'
+      '${_inStage ? ' · ${_mobs.length} monsters in view' : ''}\n'
       'rtt ${_rttMs.toStringAsFixed(0)} ms · interp ${(_clock.delay * 1000).toStringAsFixed(0)} ms'
       ' (jitter ${(_clock.jitter * 1000).toStringAsFixed(1)})\n'
       'snapshots ${_snapshotRate.toStringAsFixed(0)}/s · in ${(_bytesInRate / 1024).toStringAsFixed(1)} KB/s'

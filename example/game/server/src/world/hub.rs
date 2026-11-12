@@ -9,7 +9,8 @@
 use super::map::{MapData, MapError};
 use super::missions;
 use super::protocol::{MapInfo, PlayerInfo, ServerMsg, SnapshotBody};
-use bytes::Bytes;
+use super::horde::{Horde, PlayerView};
+use bytes::{Bytes, BytesMut};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
@@ -228,6 +229,12 @@ pub struct HubInstance {
     config: HubSimConfig,
     players: Vec<HubPlayer>,
     tick: u32,
+    /// Stage monsters (on the world's entry map); `None` in hubs.
+    horde: Option<Horde>,
+    /// Scratch: player positions on the horde map, and one recipient's
+    /// encoded monster entries.
+    horde_players: Vec<PlayerView>,
+    monster_buf: BytesMut,
 }
 
 pub const MISSION_BOARD: &str = "mission_board";
@@ -259,7 +266,32 @@ impl HubInstance {
             InstanceKind::Hub { channel } => format!("Hub-{channel}"),
             InstanceKind::Stage { stage_id, .. } => format!("Stage-{stage_id}"),
         };
-        Self { kind, name, world, config, players: Vec::new(), tick: 0 }
+        Self {
+            kind,
+            name,
+            world,
+            config,
+            players: Vec::new(),
+            tick: 0,
+            horde: None,
+            horde_players: Vec::new(),
+            monster_buf: BytesMut::new(),
+        }
+    }
+
+    /// Adds a horde to a stage. Its map must be this instance's world entry.
+    pub fn with_horde(mut self, horde: Horde) -> Self {
+        debug_assert_eq!(horde.map(), self.world.entry());
+        self.horde = Some(horde);
+        self
+    }
+
+    pub fn horde(&self) -> Option<&Horde> {
+        self.horde.as_ref()
+    }
+
+    pub fn horde_mut(&mut self) -> Option<&mut Horde> {
+        self.horde.as_mut()
     }
 
     pub fn kind(&self) -> &InstanceKind {
@@ -348,6 +380,8 @@ impl HubInstance {
                 mission: mission.clone(),
                 tick_rate: self.config.tick_hz,
                 entity_id: player.profile.character_id,
+                monsters: self.horde.as_ref().map(|h| h.catalog().ids()).unwrap_or_default(),
+                light_radius: self.horde.as_ref().map_or(0.0, |h| h.light_radius()),
             },
         };
         out.push((user_id, HubEvent::Control(joined)));
@@ -493,6 +527,15 @@ impl HubInstance {
         for (idx, portal) in transitions.into_iter().rev() {
             self.use_portal(idx, portal, out);
         }
+        if let Some(horde) = &mut self.horde {
+            // Everyone has the default light radius until upgrades exist.
+            let light = horde.light_radius();
+            self.horde_players.clear();
+            self.horde_players.extend(
+                self.players.iter().filter(|p| p.map == horde.map()).map(|p| PlayerView { x: p.x, y: p.y, light }),
+            );
+            horde.tick_views(self.tick, self.config.tick_hz, &self.horde_players);
+        }
         self.emit_snapshots(out);
     }
 
@@ -565,7 +608,7 @@ impl HubInstance {
         }
     }
 
-    fn emit_snapshots(&self, out: &mut Outgoing) {
+    fn emit_snapshots(&mut self, out: &mut Outgoing) {
         for map in 0..self.world.map_count() as MapIdx {
             let on_map = || self.players.iter().filter(move |p| p.map == map);
             let count = on_map().count();
@@ -576,8 +619,18 @@ impl HubInstance {
             for p in on_map() {
                 body.push(p.profile.character_id, p.x, p.y, p.facing);
             }
+            let horde = self.horde.as_ref().filter(|h| h.map() == map);
             for p in on_map() {
-                out.push((p.profile.user_id, HubEvent::Snapshot(body.frame(p.map_epoch, self.tick, p.last_seq))));
+                let frame = match horde {
+                    Some(h) => {
+                        self.monster_buf.clear();
+                        let viewer = PlayerView { x: p.x, y: p.y, light: h.light_radius() };
+                        let n = h.write_visible(&viewer, &mut self.monster_buf);
+                        body.stage_frame(p.map_epoch, self.tick, p.last_seq, &self.monster_buf, n)
+                    }
+                    None => body.frame(p.map_epoch, self.tick, p.last_seq),
+                };
+                out.push((p.profile.user_id, HubEvent::Snapshot(frame)));
             }
         }
     }
@@ -952,6 +1005,33 @@ mod tests {
         );
         assert!(controls_for(&out, 2).iter().any(|m| matches!(m, ServerMsg::PlayerVanished { entity_id: 101 })));
         assert_eq!(stage.population(), 1);
+    }
+
+    #[test]
+    fn stage_with_horde_sends_monsters_in_view() {
+        use crate::world::horde::catalog::{test_def, MonsterCatalog};
+        use crate::world::horde::{Horde, HordeConfig};
+        let world = Arc::new(stage_world());
+        let catalog = Arc::new(MonsterCatalog::new(vec![test_def("blob", 2.0, 1, 0.0, false)]).unwrap());
+        let cfg = HordeConfig { light_radius: 3.0, director_enabled: false, seed: Some(1), ..HordeConfig::default() };
+        let horde = Horde::new(Arc::clone(&world), catalog, cfg);
+        let mut stage = HubInstance::stage(1, "m1", world, HubSimConfig::default()).with_horde(horde);
+        let mut out = Vec::new();
+        stage.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::StageJoined { monsters, .. } if monsters == &["blob"])));
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let near = stage.horde_mut().unwrap().spawn(0, px + 2.0, py).unwrap();
+        out.clear();
+        stage.tick(&mut out);
+        let snap = last_snapshot(&out, 1).unwrap();
+        assert_eq!(snap.monsters.len(), 1);
+        assert_eq!(snap.monsters[0].slot, near);
+        assert!(snap.monsters[0].x < px + 2.0, "it moved towards the player");
+        // Monsters stand still while nobody is on the map.
+        stage.leave(1, Uuid::nil(), &mut out);
+        let before: Vec<_> = stage.horde().unwrap().monsters().collect();
+        stage.tick(&mut out);
+        assert_eq!(stage.horde().unwrap().monsters().collect::<Vec<_>>(), before);
     }
 
     #[test]

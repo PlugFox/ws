@@ -87,6 +87,9 @@ impl AppConfig {
         if let Some(max) = env::var("MAX_STAGES").ok().and_then(|v| v.parse().ok()) {
             stages.max_stages = max;
         }
+        if let Some(cap) = env::var("STAGE_MONSTER_CAP").ok().and_then(|v| v.parse::<usize>().ok()) {
+            stages.horde.alive_cap = cap.min(stages.horde.pool);
+        }
 
         Self {
             host,

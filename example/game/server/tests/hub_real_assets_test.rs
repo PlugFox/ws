@@ -256,3 +256,43 @@ fn stage_on_prt_fild08_exits_to_izlude_arrival() {
     );
     assert_eq!(stage.population(), 0);
 }
+
+#[test]
+fn horde_on_prt_fild08_spawns_chases_and_stays_on_walkable_ground() {
+    use game_server::world::horde::catalog::MonsterCatalog;
+    use game_server::world::horde::{Horde, HordeConfig};
+    let Some(dir) = dist() else { return };
+    let world = Arc::new(HubWorld::load(&dir, &["prt_fild08".into()], "prt_fild08").unwrap());
+    let catalog = Arc::new(MonsterCatalog::load(&dir).expect("monsters.json loads"));
+    assert!(catalog.kind_of("poring").is_some() && catalog.kind_of("baphomet").is_some());
+    let cfg = HordeConfig { seed: Some(5), ..HordeConfig::default() };
+    let mut horde = Horde::new(Arc::clone(&world), Arc::clone(&catalog), cfg);
+    let map = world.map(world.entry());
+    let (sx, sy) = map.spawn;
+    let players = [(sx, sy), (sx + 3.0, sy + 1.0)];
+    assert!(players.iter().all(|&(x, y)| map.walk.is_walkable(x, y)));
+
+    let hz = 20;
+    let mut nearest_seen = f32::INFINITY;
+    for t in 0..(75 * hz) {
+        horde.tick(t, hz, &players);
+        for (_, _, _, x, y) in horde.monsters() {
+            assert!(map.walk.is_walkable(x, y), "monster on a blocked cell at {x},{y} (tick {t})");
+        }
+    }
+    let stats = horde.stats();
+    assert!(stats.alive > 30, "director kept spawning: {stats:?}");
+    assert!(stats.field_builds >= 1);
+    for (_, _, kind, x, y) in horde.monsters() {
+        let d = players.iter().map(|&(px, py)| (x - px).hypot(y - py)).fold(f32::INFINITY, f32::min);
+        nearest_seen = nearest_seen.min(d);
+        assert!(!catalog.get(kind).boss, "baphomet unlocks at 300 s");
+    }
+    // The first waves have reached the party (spawned outside the view, so
+    // anything close walked there).
+    assert!(nearest_seen < 3.0, "closest monster is {nearest_seen} cells away");
+    let mut buf = bytes::BytesMut::new();
+    let viewer = game_server::world::horde::PlayerView { x: sx, y: sy, light: horde.light_radius() };
+    let n = horde.write_visible(&viewer, &mut buf) as usize;
+    assert!(n > 0 && n <= horde.len());
+}

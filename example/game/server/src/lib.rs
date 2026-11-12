@@ -63,7 +63,20 @@ pub async fn create_app(config: AppConfig) -> Result<(Router, AppState), Box<dyn
             }
         }
     }
-    create_app_with_worlds(config, world, stages).await
+    let monsters = match (&config.assets_dir, stages.is_empty()) {
+        (Some(dir), false) => match world::horde::catalog::MonsterCatalog::load(dir) {
+            Ok(c) => {
+                info!("Loaded {} monster kinds", c.defs().len());
+                Some(c)
+            }
+            Err(err) => {
+                warn!("Stages run without monsters: {err}");
+                None
+            }
+        },
+        _ => None,
+    };
+    create_app_with_monsters(config, world, stages, monsters).await
 }
 
 /// Same as [`create_app`] with an already-built hub world and no stage maps
@@ -76,11 +89,22 @@ pub async fn create_app_with_world(
     create_app_with_worlds(config, world, Vec::new()).await
 }
 
-/// Same as [`create_app`] with already-built hub and stage worlds.
+/// Same as [`create_app`] with already-built hub and stage worlds (stages
+/// without monsters).
 pub async fn create_app_with_worlds(
     config: AppConfig,
     world: Option<HubWorld>,
     stages: Vec<HubWorld>,
+) -> Result<(Router, AppState), Box<dyn std::error::Error + Send + Sync>> {
+    create_app_with_monsters(config, world, stages, None).await
+}
+
+/// Same as [`create_app`] with already-built worlds and monster catalog.
+pub async fn create_app_with_monsters(
+    config: AppConfig,
+    world: Option<HubWorld>,
+    stages: Vec<HubWorld>,
+    monsters: Option<world::horde::catalog::MonsterCatalog>,
 ) -> Result<(Router, AppState), Box<dyn std::error::Error + Send + Sync>> {
     let pool = init_db(&config.database_url).await?;
 
@@ -101,7 +125,10 @@ pub async fn create_app_with_worlds(
         dir
     });
     let lobbies = hub.as_ref().map(|_| {
-        let stages = StageDirectory::new(stages, config.stages.clone());
+        let mut stages = StageDirectory::new(stages, config.stages.clone());
+        if let Some(m) = monsters {
+            stages = stages.with_monsters(m);
+        }
         let _reaper = stages.spawn_reaper(Duration::from_secs(5));
         LobbyDirectory::new(stages)
     });

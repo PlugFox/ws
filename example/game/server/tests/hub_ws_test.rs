@@ -6,7 +6,8 @@ use game_server::world::map::{
     WalkGrid,
 };
 use game_server::world::{HubWorld, Snapshot};
-use game_server::{config::AppConfig, create_app_with_worlds, api::AppState};
+use game_server::world::horde::catalog::{MonsterCatalog, MonsterDef};
+use game_server::{config::AppConfig, create_app_with_monsters, api::AppState};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -85,8 +86,25 @@ async fn start() -> (SocketAddr, AppState) {
 }
 
 async fn start_with(stages: Vec<HubWorld>) -> (SocketAddr, AppState) {
+    let poring = MonsterDef {
+        id: "poring".into(),
+        name: "Poring".into(),
+        radius: 0.35,
+        speed: 2.5,
+        max_hp: 55,
+        touch_damage: 4,
+        spawn_cost: 1,
+        unlock_secs: 0.0,
+        weight: 100,
+        xp: 5,
+        boss: false,
+        pack: (6, 12),
+    };
+    let monsters = MonsterCatalog::new(vec![poring]).unwrap();
     let (app, state) =
-        create_app_with_worlds(AppConfig::test_config(), Some(synthetic_world()), stages).await.unwrap();
+        create_app_with_monsters(AppConfig::test_config(), Some(synthetic_world()), stages, Some(monsters))
+            .await
+            .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await.unwrap() });
@@ -392,6 +410,8 @@ async fn lobby_ready_check_stage_launch_and_return() {
         assert_eq!(next_json_of(ws, "lobby_left").await["reason"], "launched");
         let joined = next_json_of(ws, "stage_joined").await;
         assert_eq!(joined["mission"], "poring_island_survival");
+        assert_eq!(joined["monsters"], json!(["poring"]), "kind index → id table");
+        assert!(joined["light_radius"].as_f64().unwrap() > 0.0, "the client draws the light");
         stage_ids.push(joined["stage_id"].as_u64().unwrap());
         let enter = next_json_of(ws, "map_enter").await;
         assert_eq!(enter["map"]["id"], "prt_fild08");
@@ -402,6 +422,14 @@ async fn lobby_ready_check_stage_launch_and_return() {
     let lobbies = state.lobbies.as_ref().unwrap();
     assert_eq!(lobbies.stages().active(), 1);
     assert_eq!(state.hub.as_ref().unwrap().channels()[0].population, 0, "the party left the hub");
+    // Stage snapshots carry the monster block (empty here: the synthetic
+    // field is smaller than the light radius).
+    let raw = loop {
+        if let Message::Binary(b) = tokio::time::timeout(Duration::from_secs(3), a.next()).await.unwrap().unwrap().unwrap() {
+            break b;
+        }
+    };
+    assert_eq!(raw[0], 0x03, "stage snapshot kind");
     let snap = next_snapshot(&mut a, |s| s.entities.len() == 2).await;
     assert!(snap.entities.iter().any(|e| e.0 == b_id as u32));
 
