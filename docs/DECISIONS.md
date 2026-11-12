@@ -1321,8 +1321,14 @@ not exist.
   to host", errno 65) for LAN addresses until the local network
   permission is granted (TN3179); both transports report it as
   `unreachable`. The device harness waits for the server first.
-- Not done: the user-CA case on the device needs a CA installed by hand
-  (`device_test/README.md`). NSC pin sets and `debug-overrides` are still
-  not read (no JNI, `docs/SECURITY.md`); certificate
-  transparency and revocation as before (3.7).
+- User CA on the device (a test CA installed through Settings, stored
+  as `cacerts-added/bcc17572.0`, DER, named by OpenSSL's
+  `subject_hash_old`): without `trustUserCertificates` both transports
+  report `untrusted`, with it both connect. First / second connection
+  with echo: Rust 53 / 11 ms, Dart 97 / 58 ms (the second reuses the
+  cached configuration and resumes the TLS session).
+- Not done: a disabled system CA on a device (unit-tested with the
+  device's file layout only). NSC pin sets and `debug-overrides` are
+  still not read (no JNI, `docs/SECURITY.md`); certificate transparency
+  and revocation as before (3.7).
 - Status: **adopted**.
