@@ -1379,3 +1379,31 @@ not exist.
   test is skipped on the web), about 10 s per compiler; 5 runs on dart2js
   and 3 on the VM without a failure.
 - Status: **adopted**.
+
+### D47. Every suite checks the transport contract
+
+- Context: the `TransportListener` contract ("callbacks never
+  synchronous from a connection method; `onOpen` at most once; exactly
+  one `onClosed`, always last") was only checked indirectly, through the
+  client (TEST_PLAN T28). The session-identity test could not fail
+  (docs/review/tests_docs.md T-4): the fake echoed our close, so the old
+  connection ended and the fake itself dropped its events.
+- Decision: `test/support/checked_transport.dart` wraps the transport of
+  every test in `conformance.dart`, `server_suite.dart` and
+  `server_shared.dart` (VM, native by path and through the hook, and the
+  browser on dart2js and dart2wasm). The wrapper records any callback made
+  while `connect` or a connection method is on the stack, events after
+  `onClosed`, a second `onOpen`, messages or pongs before `onOpen`, and
+  `onDrain` without `requestDrain`. After each test it waits up to 5 s
+  for every connection's `onClosed` and fails the test otherwise.
+  `checked_transport_test.dart` breaks each rule once to show the checker
+  catches it.
+- The session-identity test now keeps the old connection open
+  (`echoClose = false`) and sends text, binary, a pong, a drain and a
+  late close through it after the URL switch. Removing either the
+  `_current` guard, the `_delivering` guard or the guard on `onClosed`
+  makes it fail (each checked by hand).
+- Result: no violation on any transport. The fake transport is not
+  wrapped: its tests run in fake time, and it is a test double whose
+  timing the tests set.
+- Status: **adopted**.

@@ -14,6 +14,8 @@ import 'package:ws/src/protocol/handshake.dart';
 import 'package:ws/transport.dart';
 import 'package:ws/ws.dart';
 
+import '../support/checked_transport.dart';
+
 /// A dart:io WebSocket server; [onSocket] handles each connection.
 /// [onRequest] sees the request before the 101 is sent (the client may
 /// finish connecting before [onSocket] runs).
@@ -83,8 +85,7 @@ Uint8List frame(int opcode, List<int> payload, {bool fin = true}) =>
 /// Registers the conformance tests for the transport made by [create].
 void transportConformance(WebSocketTransport Function() create) {
   late WebSocketTransport transport;
-  setUp(() => WebSocketTransports.use(transport = create()));
-  tearDown(() => WebSocketTransports.use(null));
+  useCheckedTransport(() => transport = create());
 
   group('against dart:io server', () {
     late HttpServer server;

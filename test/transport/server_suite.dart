@@ -13,6 +13,7 @@ import 'package:test/test.dart';
 import 'package:ws/transport.dart';
 import 'package:ws/ws.dart';
 
+import '../support/checked_transport.dart';
 import '../support/test_server.dart';
 import 'server_shared.dart';
 
@@ -22,8 +23,7 @@ void serverConformance(WebSocketTransport Function() create) {
     late TestServer server;
     setUpAll(() async => server = await TestServer.start());
     tearDownAll(() => server.stop());
-    setUp(() => WebSocketTransports.use(create()));
-    tearDown(() => WebSocketTransports.use(null));
+    useCheckedTransport(create);
 
     WebSocketClient<String> client({
       WebSocketVmOptions vm = const WebSocketVmOptions(),

@@ -1,6 +1,7 @@
 // Edge cases of WebSocketClient over the fake transport (TEST_PLAN C4–C25).
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:fake_async/fake_async.dart';
 import 'package:test/test.dart';
@@ -391,18 +392,39 @@ void main() {
           options: WebSocketOptions(transport: server),
         );
         final got = <String>[];
+        final states = <WebSocketState>[];
         client.messages.listen(got.add);
         client.connect('ws://a');
         async.flushMicrotasks();
-        final old = server.last;
+        // The old connection never answers our close, so it stays open
+        // and everything it says reaches the client's old listener: only
+        // the session guard can drop it (ARCHITECTURE "session identity").
+        final old = server.last
+          ..echoClose = false
+          ..bufferedAmount = 1;
         client.connect('ws://b');
         async.flushMicrotasks();
         expect(server.connections, hasLength(2));
-        // The old connection is closing; whatever it still says is dropped.
-        if (old.isOpen) old.sendText('stale');
+        expect(old.isOpen, isTrue);
+        expect(old.clientClose, isNotNull);
+        expect(client.state.isOpen, isTrue);
+        client.states.listen(states.add);
+        old
+          ..sendText('stale')
+          ..sendBinary(Uint8List(1))
+          ..pong()
+          ..drain();
         server.last.sendText('fresh');
         async.flushMicrotasks();
+        old.close(4000, 'late');
+        async.flushMicrotasks();
         expect(got, ['fresh']);
+        expect(states, isEmpty);
+        expect(client.state.isOpen, isTrue);
+        expect(client.metrics.connects, 2);
+        // The old connection's end is not a reason to reconnect later.
+        async.elapse(const Duration(seconds: 30));
+        expect(client.metrics.connects, 2);
         expect(client.state.isOpen, isTrue);
         client.close();
       });
@@ -422,7 +444,8 @@ void main() {
         connection.sendText('before');
         async.flushMicrotasks();
         client.disconnect();
-        if (connection.isOpen) connection.sendText('after');
+        expect(connection.isOpen, isTrue);
+        connection.sendText('after');
         async.elapse(const Duration(seconds: 5));
         expect(got, ['before']);
         client.close();
