@@ -1,70 +1,236 @@
 //! WebSocket server for benchmarks, tests and examples of the `ws` package.
 //!
-//! Endpoints (same on the plain and TLS ports):
+//! It runs its own HTTP front end: the request head is read and routed here
+//! (see [`endpoints`]), HTTP-level faults are answered directly, and the
+//! `101` is written by hand. Well-behaved endpoints (`/echo`, `/stream`,
+//! ...) then hand the socket to tungstenite; scripted fault endpoints write
+//! raw frames. See `README.md` for the endpoint list.
 //!
-//! * `/echo` — sends every text/binary message back unchanged.
-//! * `/stream?format=json|binary&size=1024&rate=1000&duration=5000&count=N&unicode=0|1`
-//!   — server-to-client stream. Every message carries a sequence number and a
-//!   send timestamp (microseconds since the Unix epoch) so the client can
-//!   measure delivery latency:
-//!   * `json`   → text frame `{"seq":N,"ts":T,"items":[...]}`
-//!   * `binary` → binary frame, `u64 LE seq` + `u64 LE ts` + filler.
+//! Listeners started by [`start`]:
 //!
-//!   `rate` is messages per second; `rate=0` floods as fast as the socket
-//!   allows. The message count is `count`, or `rate * duration / 1000`.
-//!   When done the server closes the connection with code 1000, reason `done`.
+//! * `ws`: plain endpoints, plus `GET /ca.pem`, `/log?id=`, `/proxy-log`.
+//! * `wss`: TLS, certificate for `localhost`, `127.0.0.1`, `::1`.
+//! * `wss_badhost`: TLS, certificate for `wrong.invalid` only.
+//! * `ws6`: plain endpoints on `[::1]`, when IPv6 is available.
+//! * `proxy` / `proxy_auth`: HTTP CONNECT proxies.
 //!
-//! The binary (`src/main.rs`) runs it standalone; [`start_embedded`] runs it
-//! inside another process (the mobile benchmark app) on its own runtime.
-//! The TLS port uses a freshly generated self-signed certificate for
-//! `localhost` / `127.0.0.1`.
+//! Both certificates are signed by a CA generated at startup
+//! ([`Server::ca_pem`]). The binary (`src/main.rs`) runs it standalone;
+//! [`start_embedded`] runs it inside another process (the mobile benchmark
+//! app) on its own runtime.
+
+pub mod conn;
+pub mod endpoints;
+pub mod frame;
+pub mod handshake;
+pub mod http;
+pub mod log;
+pub mod proxy;
+pub mod tls;
 
 use std::{
     cell::Cell,
-    collections::HashMap,
+    fmt::Write as _,
+    net::{IpAddr, Ipv6Addr},
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use std::fmt::Write as _;
+use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::TlsAcceptor;
 
-use bytes::{Bytes, BytesMut};
-use futures_util::{SinkExt, StreamExt};
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    net::{TcpListener, TcpStream},
-};
-use tokio_rustls::{
-    TlsAcceptor,
-    rustls::{
-        self,
-        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-    },
-};
-use tokio_tungstenite::{
-    WebSocketStream, accept_hdr_async_with_config,
-    tungstenite::{
-        Message,
-        handshake::server::{Request, Response},
-        protocol::{CloseFrame, WebSocketConfig, frame::coding::CloseCode},
-    },
-};
+use crate::{conn::Conn, log::Logs, tls::Pki};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Binds the plain and TLS listeners and spawns their accept loops on the
-/// current runtime.
-pub async fn listen(host: &str, port: u16, tls_port: u16) -> Result<(), BoxError> {
-    let plain = TcpListener::bind((host, port)).await?;
-    let secure = TcpListener::bind((host, tls_port)).await?;
-    let acceptor = tls_acceptor()?;
-    tokio::spawn(accept_loop(plain, None));
-    tokio::spawn(accept_loop(secure, Some(acceptor)));
-    Ok(())
+/// When set, per-connection errors are not printed to stderr (fault tests
+/// produce many expected ones).
+pub static QUIET: AtomicBool = AtomicBool::new(false);
+
+/// State shared by every listener of one server.
+pub struct Shared {
+    pub logs: Logs,
+    pub ca_pem: String,
 }
+
+/// Where to listen. Port `0` picks an ephemeral port.
+#[derive(Clone, Debug)]
+pub struct Options {
+    pub host: String,
+    pub port: u16,
+    pub tls_port: u16,
+    pub badhost_port: u16,
+    pub proxy_port: u16,
+    pub proxy_auth_port: u16,
+    /// Also listen on `[::1]` (same port number as `port` unless `port` is 0).
+    pub ipv6: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            host: "127.0.0.1".into(),
+            port: 0,
+            tls_port: 0,
+            badhost_port: 0,
+            proxy_port: 0,
+            proxy_auth_port: 0,
+            ipv6: true,
+        }
+    }
+}
+
+/// Actual bound ports.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ports {
+    pub ws: u16,
+    pub wss: u16,
+    pub wss_badhost: u16,
+    pub ws6: Option<u16>,
+    pub proxy: u16,
+    pub proxy_auth: u16,
+}
+
+/// A running server (its tasks live on the runtime that called [`start`]).
+pub struct Server {
+    pub ports: Ports,
+    /// PEM of the CA that signed both TLS certificates.
+    pub ca_pem: String,
+    /// DER of the same CA certificate.
+    pub ca_der: Vec<u8>,
+}
+
+impl Server {
+    /// The single-line JSON the binary prints with `--ready-json`.
+    pub fn ready_json(&self) -> String {
+        let p = &self.ports;
+        let ws6 = p.ws6.map_or("null".into(), |v| v.to_string());
+        let mut out = format!(
+            "{{\"ws\":{},\"wss\":{},\"wss_badhost\":{},\"ws6\":{ws6},\"proxy\":{},\"proxy_auth\":{},\"ca_pem\":",
+            p.ws, p.wss, p.wss_badhost, p.proxy, p.proxy_auth
+        );
+        http::json_str(&mut out, &self.ca_pem);
+        out.push('}');
+        out
+    }
+}
+
+/// Binds every listener and spawns the accept loops on the current runtime.
+pub async fn start(opts: &Options) -> Result<Server, BoxError> {
+    let pki = Pki::generate()?;
+    let shared = Arc::new(Shared {
+        logs: Logs::default(),
+        ca_pem: pki.ca_pem.clone(),
+    });
+    let host = opts.host.as_str();
+    let plain = TcpListener::bind((host, opts.port)).await?;
+    let secure = TcpListener::bind((host, opts.tls_port)).await?;
+    let badhost = TcpListener::bind((host, opts.badhost_port)).await?;
+    let proxy = TcpListener::bind((host, opts.proxy_port)).await?;
+    let proxy_auth = TcpListener::bind((host, opts.proxy_auth_port)).await?;
+    let ws = plain.local_addr()?.port();
+    let ipv6 = if opts.ipv6 {
+        bind_ipv6(host, ws, opts.port).await
+    } else {
+        None
+    };
+    let ports = Ports {
+        ws,
+        wss: secure.local_addr()?.port(),
+        wss_badhost: badhost.local_addr()?.port(),
+        ws6: ipv6.as_ref().map(|(_, p)| *p),
+        proxy: proxy.local_addr()?.port(),
+        proxy_auth: proxy_auth.local_addr()?.port(),
+    };
+    tokio::spawn(accept_loop(plain, None, shared.clone()));
+    tokio::spawn(accept_loop(secure, Some(pki.good), shared.clone()));
+    tokio::spawn(accept_loop(badhost, Some(pki.badhost), shared.clone()));
+    if let Some((Some(l), _)) = ipv6 {
+        tokio::spawn(accept_loop(l, None, shared.clone()));
+    }
+    tokio::spawn(proxy::accept_loop(proxy, false, shared.clone()));
+    tokio::spawn(proxy::accept_loop(proxy_auth, true, shared));
+    Ok(Server {
+        ports,
+        ca_pem: pki.ca_pem,
+        ca_der: pki.ca_der,
+    })
+}
+
+/// Binds `[::1]` for the plain endpoints. Returns the listener (none when
+/// `host` already is IPv6 loopback, so the main listener covers it) and
+/// the port, or `None` when IPv6 is unavailable.
+async fn bind_ipv6(host: &str, ws: u16, requested: u16) -> Option<(Option<TcpListener>, u16)> {
+    if host.parse::<IpAddr>().ok() == Some(IpAddr::V6(Ipv6Addr::LOCALHOST)) {
+        return Some((None, ws));
+    }
+    let port = if requested == 0 { 0 } else { ws };
+    let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, port)).await.ok()?;
+    let port = listener.local_addr().ok()?.port();
+    Some((Some(listener), port))
+}
+
+/// Binds the listeners and spawns their accept loops on the current
+/// runtime (kept for the benchmarks; see [`start`]).
+pub async fn listen(host: &str, port: u16, tls_port: u16) -> Result<(), BoxError> {
+    let opts = Options {
+        host: host.into(),
+        port,
+        tls_port,
+        ..Options::default()
+    };
+    start(&opts).await.map(|_| ())
+}
+
+async fn accept_loop(listener: TcpListener, tls: Option<TlsAcceptor>, shared: Arc<Shared>) {
+    loop {
+        let Ok((tcp, _)) = listener.accept().await else {
+            continue;
+        };
+        let tls = tls.clone();
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve(tcp, tls, shared).await
+                && !QUIET.load(Ordering::Relaxed)
+            {
+                eprintln!("connection error: {e}");
+            }
+        });
+    }
+}
+
+/// Wraps an accepted socket (TLS if needed) and hands it to the router.
+async fn serve(
+    tcp: TcpStream,
+    tls: Option<TlsAcceptor>,
+    shared: Arc<Shared>,
+) -> Result<(), BoxError> {
+    tcp.set_nodelay(true)?;
+    let peer = tcp.peer_addr().ok();
+    let (tcp, socket) = split_socket(tcp)?;
+    let conn = match tls {
+        Some(acceptor) => Conn::new(
+            Box::new(acceptor.accept(tcp).await?),
+            Some(socket),
+            peer,
+            true,
+        ),
+        None => Conn::new(Box::new(tcp), Some(socket), peer, false),
+    };
+    endpoints::serve(conn, shared).await
+}
+
+/// Duplicates the socket handle so endpoints can set `SO_LINGER` later,
+/// even after the stream is wrapped in TLS.
+fn split_socket(tcp: TcpStream) -> std::io::Result<(TcpStream, socket2::Socket)> {
+    let std = tcp.into_std()?;
+    let dup = socket2::Socket::from(std.try_clone()?);
+    Ok((TcpStream::from_std(std)?, dup))
+}
+
+// --- Embedded mode (mobile benchmark app) ---------------------------------
 
 static EMBEDDED: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static EMBEDDED_CPU_NANOS: AtomicU64 = AtomicU64::new(0);
@@ -73,8 +239,19 @@ thread_local! {
     static LAST_CPU_NANOS: Cell<u64> = const { Cell::new(0) };
 }
 
+/// Thread CPU time; 0 where unsupported (Windows: the embedded server
+/// runs only inside the mobile benchmark app).
+#[cfg(not(unix))]
 fn thread_cpu_nanos() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    0
+}
+
+#[cfg(unix)]
+fn thread_cpu_nanos() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: valid out pointer; CLOCK_THREAD_CPUTIME_ID is supported on
     // Linux/Android and Darwin.
     if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } != 0 {
@@ -92,7 +269,12 @@ fn report_thread_cpu() {
 
 /// Starts the server on a dedicated runtime with `threads` workers, for
 /// running it inside the benchmark process. Idempotent.
-pub fn start_embedded(host: &str, port: u16, tls_port: u16, threads: usize) -> Result<(), BoxError> {
+pub fn start_embedded(
+    host: &str,
+    port: u16,
+    tls_port: u16,
+    threads: usize,
+) -> Result<(), BoxError> {
     if EMBEDDED.get().is_some() {
         return Ok(());
     }
@@ -116,250 +298,28 @@ pub fn embedded_cpu_micros() -> u64 {
     EMBEDDED_CPU_NANOS.load(Ordering::Relaxed) / 1000
 }
 
-fn tls_acceptor() -> Result<TlsAcceptor, BoxError> {
-    let certified =
-        rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])?;
-    let cert = CertificateDer::from(certified.cert.der().to_vec());
-    let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(
-        certified.signing_key.serialize_der(),
-    ));
-    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()?
-    .with_no_client_auth()
-    .with_single_cert(vec![cert], key)?;
-    Ok(TlsAcceptor::from(Arc::new(config)))
-}
-
-async fn accept_loop(listener: TcpListener, tls: Option<TlsAcceptor>) {
-    loop {
-        let Ok((tcp, _)) = listener.accept().await else {
-            continue;
-        };
-        let tls = tls.clone();
-        tokio::spawn(async move {
-            if let Err(e) = serve(tcp, tls).await {
-                eprintln!("connection error: {e}");
-            }
-        });
+/// Human-readable listener summary (the binary prints it to stderr).
+pub fn describe(host: &str, ports: &Ports) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "ws  listening on ws://{host}:{}", ports.ws);
+    let _ = writeln!(
+        out,
+        "wss listening on wss://{host}:{} (test CA, GET /ca.pem)",
+        ports.wss
+    );
+    let _ = writeln!(
+        out,
+        "wss (cert for wrong.invalid) on wss://{host}:{}",
+        ports.wss_badhost
+    );
+    if let Some(p) = ports.ws6 {
+        let _ = writeln!(out, "ws6 listening on ws://[::1]:{p}");
     }
-}
-
-async fn serve(tcp: TcpStream, tls: Option<TlsAcceptor>) -> Result<(), BoxError> {
-    tcp.set_nodelay(true)?;
-    match tls {
-        Some(acceptor) => handle(acceptor.accept(tcp).await?).await,
-        None => handle(tcp).await,
-    }
-}
-
-fn ws_config() -> WebSocketConfig {
-    WebSocketConfig::default()
-        .max_message_size(Some(256 << 20))
-        .max_frame_size(Some(256 << 20))
-}
-
-#[allow(clippy::result_large_err)] // the handshake callback signature is fixed by tungstenite
-async fn handle<S>(stream: S) -> Result<(), BoxError>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let mut uri = None;
-    let ws = accept_hdr_async_with_config(
-        stream,
-        |req: &Request, resp: Response| {
-            uri = Some(req.uri().clone());
-            Ok(resp)
-        },
-        Some(ws_config()),
-    )
-    .await?;
-    let uri = uri.ok_or("missing request uri")?;
-    let query = parse_query(uri.query().unwrap_or(""));
-    match uri.path() {
-        "/echo" => echo(ws).await,
-        "/stream" => stream_messages(ws, &query).await,
-        path => {
-            let mut ws = ws;
-            ws.close(Some(CloseFrame {
-                code: CloseCode::Policy,
-                reason: format!("unknown path {path}").into(),
-            }))
-            .await?;
-            Ok(())
-        }
-    }
-}
-
-fn parse_query(query: &str) -> HashMap<String, String> {
-    query
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
-        .collect()
-}
-
-async fn echo<S>(mut ws: WebSocketStream<S>) -> Result<(), BoxError>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    while let Some(msg) = ws.next().await {
-        match msg? {
-            msg @ (Message::Text(_) | Message::Binary(_)) => ws.send(msg).await?,
-            Message::Close(_) => break,
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Format {
-    Json,
-    Binary,
-}
-
-fn now_micros() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_micros() as u64)
-}
-
-async fn stream_messages<S>(
-    ws: WebSocketStream<S>,
-    query: &HashMap<String, String>,
-) -> Result<(), BoxError>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let get = |k: &str, d: u64| query.get(k).and_then(|v| v.parse().ok()).unwrap_or(d);
-    let format = match query.get("format").map(String::as_str) {
-        Some("binary") => Format::Binary,
-        _ => Format::Json,
-    };
-    let size = get("size", 1024) as usize;
-    let rate = get("rate", 1000);
-    let duration = get("duration", 5000);
-    let count = query
-        .get("count")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(rate * duration / 1000);
-    let unicode = get("unicode", 0) != 0;
-
-    let (mut tx, mut rx) = ws.split();
-    // Drain the client side (pongs, close) so the connection stays healthy.
-    let reader = tokio::spawn(async move {
-        while let Some(Ok(msg)) = rx.next().await {
-            if msg.is_close() {
-                break;
-            }
-        }
-    });
-
-    let payload = Payload::new(format, size, unicode);
-    let start = Instant::now();
-    let mut seq: u64 = 0;
-    while seq < count {
-        let due = if rate == 0 {
-            count
-        } else {
-            (start.elapsed().as_micros() as u64 * rate / 1_000_000 + 1).min(count)
-        };
-        // In flood mode flush periodically so the client starts receiving early.
-        let batch_end = if rate == 0 { (seq + 64).min(due) } else { due };
-        while seq < batch_end {
-            tx.feed(payload.message(seq, now_micros())).await?;
-            seq += 1;
-        }
-        tx.flush().await?;
-        if rate != 0 && seq < count {
-            tokio::time::sleep(Duration::from_micros(500)).await;
-        }
-    }
-    tx.send(Message::Close(Some(CloseFrame {
-        code: CloseCode::Normal,
-        reason: "done".into(),
-    })))
-    .await?;
-    let _ = tokio::time::timeout(Duration::from_secs(5), reader).await;
-    Ok(())
-}
-
-struct Payload {
-    format: Format,
-    /// Pre-rendered JSON `items` array.
-    json: String,
-    /// Binary filler template.
-    binary: Bytes,
-}
-
-impl Payload {
-    fn new(format: Format, size: usize, unicode: bool) -> Self {
-        match format {
-            Format::Json => Self {
-                format,
-                json: json_items(size, unicode),
-                binary: Bytes::new(),
-            },
-            Format::Binary => Self {
-                format,
-                json: String::new(),
-                binary: (0..size.max(16)).map(|i| (i % 251) as u8).collect(),
-            },
-        }
-    }
-
-    fn message(&self, seq: u64, ts: u64) -> Message {
-        match self.format {
-            Format::Json => {
-                let mut text = String::with_capacity(self.json.len() + 64);
-                let _ = write!(text, "{{\"seq\":{seq},\"ts\":{ts},\"items\":");
-                text.push_str(&self.json);
-                text.push('}');
-                Message::text(text)
-            }
-            Format::Binary => {
-                let mut buf = BytesMut::from(&self.binary[..]);
-                buf[0..8].copy_from_slice(&seq.to_le_bytes());
-                buf[8..16].copy_from_slice(&ts.to_le_bytes());
-                Message::Binary(buf.freeze())
-            }
-        }
-    }
-}
-
-/// Renders a realistic JSON array of objects so that the whole message is
-/// roughly `size` bytes.
-fn json_items(size: usize, unicode: bool) -> String {
-    const ENVELOPE: usize = 48; // {"seq":…,"ts":…,"items":…}
-    let mut out = String::from("[");
-    let mut i = 0u64;
-    while out.len() + ENVELOPE < size {
-        if i > 0 {
-            out.push(',');
-        }
-        let name = if unicode {
-            format!("Товар №{i} — ünïcødé ✓")
-        } else {
-            format!("item-{i}")
-        };
-        out.push_str(&format!(
-            concat!(
-                r#"{{"id":{id},"name":"{name}","price":{price:.2},"qty":{qty},"#,
-                r#""active":{active},"tags":["alpha","beta","gamma"],"#,
-                r#""meta":{{"score":{score:.4},"rank":{rank},"note":null}}}}"#
-            ),
-            id = 100_000 + i,
-            name = name,
-            price = (i as f64) * 1.37 + 0.99,
-            qty = i % 17,
-            active = i.is_multiple_of(2),
-            score = (i as f64).sqrt() / 3.0,
-            rank = i % 100,
-        ));
-        i += 1;
-    }
-    out.push(']');
+    let _ = writeln!(out, "proxy (CONNECT) on {host}:{}", ports.proxy);
+    let _ = write!(
+        out,
+        "proxy (CONNECT, Basic test:secret) on {host}:{}",
+        ports.proxy_auth
+    );
     out
 }
