@@ -226,3 +226,30 @@ run = "cd benchmark && dart run bin/matrix.dart --quick --server=../server/targe
 [tasks.autobahn]
 description = "Autobahn TestSuite in Docker (arg: dart | native)"
 run = "tool/autobahn.sh"
+
+# --- game example (survivors-like) -------------------------------------------
+
+[tasks.game]
+alias = "game:run"
+description = "Run the full game: builds web client and starts Rust game server at http://127.0.0.1:8080"
+depends = ["game:client:build"]
+dir = "example/game/server"
+run = "cargo run"
+
+[tasks."game:client:build"]
+description = "Build Dart web client (example/game/client/build/web)"
+dir = "example/game/client"
+run = "./tool/build.sh"
+
+[tasks."game:engine:build"]
+description = "Build TypeScript Three.js engine runtime bundle"
+run = "npm --prefix example/assets run build:engine"
+
+[tasks."game:demo"]
+description = "Run standalone TypeScript engine demo via Vite (http://localhost:5173/demo/index.html)"
+run = "npm --prefix example/assets run dev:engine"
+
+[tasks."game:bots"]
+description = "Run simulated player bots in the hub (default: 10 bots)"
+dir = "example/game/client"
+run = "dart run tool/bot.dart --server http://127.0.0.1:8080 --count 10"

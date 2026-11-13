@@ -102,6 +102,10 @@ npm run bake
 # Build TypeScript game engine runtime bundle
 npm run build:engine
 
-# Start TypeScript engine dev server
-npm run dev:engine
+# Start TypeScript engine dev server (standalone demo)
+mise run game:demo
+# or: npm run dev:engine
+
+# Run full game cycle (builds Dart client and runs Rust game server at http://127.0.0.1:8080)
+mise run game
 ```
