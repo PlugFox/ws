@@ -4,6 +4,7 @@
 //! of the active ones ([`Status`]), which is also what clients see (a
 //! varint on the wire: the first seven fit one byte).
 
+use super::class::Save;
 use super::rules::Element;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -28,10 +29,13 @@ pub enum Condition {
     Poisoned,
     /// −2 AC (standing in a swamp).
     Mired,
+    /// Hunts and strikes whoever taunted it (Provoke), not the nearest;
+    /// −2 AC and disadvantage on attacks against anyone else.
+    Taunted,
 }
 
 /// Conditions a monster can carry (timers per slot).
-pub const CONDITIONS: usize = 9;
+pub const CONDITIONS: usize = 10;
 
 impl Condition {
     pub const ALL: [Condition; CONDITIONS] = [
@@ -44,6 +48,7 @@ impl Condition {
         Condition::Burning,
         Condition::Poisoned,
         Condition::Mired,
+        Condition::Taunted,
     ];
 
     /// The skill table's names.
@@ -58,12 +63,23 @@ impl Condition {
             "burning" => Condition::Burning,
             "poisoned" => Condition::Poisoned,
             "mired" => Condition::Mired,
+            "taunted" => Condition::Taunted,
             _ => return None,
         })
     }
 
     pub const fn bit(self) -> u16 {
         1 << self as u16
+    }
+
+    /// The save that resists it: dodging (Reflex), enduring (Body) or
+    /// keeping one's head (Mind).
+    pub const fn save(self) -> Save {
+        match self {
+            Condition::Slowed | Condition::Frozen | Condition::Rooted | Condition::Mired => Save::Reflex,
+            Condition::Stunned | Condition::Petrified | Condition::Burning | Condition::Poisoned => Save::Body,
+            Condition::Blinded | Condition::Taunted => Save::Mind,
+        }
     }
 }
 
@@ -118,13 +134,16 @@ impl Status {
         }
     }
 
-    /// Change of its armour class.
+    /// Change of its armour class (swamp, provoked).
     pub const fn ac(self) -> i32 {
+        let mut ac = 0;
         if self.has(Condition::Mired) {
-            -2
-        } else {
-            0
+            ac -= 2;
         }
+        if self.has(Condition::Taunted) {
+            ac -= 2;
+        }
+        ac
     }
 
     /// Takes damage every second (burning, poisoned).
@@ -169,6 +188,9 @@ mod tests {
         assert!(s(&[Condition::Stunned]).saves_fail());
         assert_eq!(s(&[Condition::Poisoned]).advantage(), -1);
         assert_eq!(s(&[Condition::Mired]).ac(), -2);
+        assert_eq!(s(&[Condition::Mired, Condition::Taunted]).ac(), -4);
+        assert_eq!(Condition::Poisoned.save(), Save::Body);
+        assert_eq!(Condition::Slowed.save(), Save::Reflex);
         assert!(s(&[Condition::Burning]).ailing() && !s(&[Condition::Slowed]).ailing());
         assert_eq!(Condition::from_id("petrified"), Some(Condition::Petrified));
         assert_eq!(Condition::from_id("bleeding"), None);

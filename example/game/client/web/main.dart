@@ -24,6 +24,7 @@ Future<void> main() async {
     assetsBase: _assets,
     characterName: character['name']! as String,
     archetype: character['archetype'] as String? ?? 'novice',
+    level: (character['level'] as num?)?.toInt() ?? 1,
     look: Look.fromJson(character['look']),
   );
   web.console.info('Entering the hub as ${character['name']}'.toJS);

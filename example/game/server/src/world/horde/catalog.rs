@@ -44,10 +44,17 @@ struct RawStats {
     element: String,
     #[serde(default)]
     size: String,
+    #[serde(default)]
+    race: String,
 }
 
 fn one() -> u32 {
     1
+}
+
+#[derive(Deserialize)]
+struct RawSkillRef {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -57,6 +64,8 @@ struct RawMonster {
     radius: f32,
     director: RawDirector,
     stats: RawStats,
+    #[serde(default)]
+    skills: Vec<RawSkillRef>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +94,10 @@ pub struct MonsterDef {
     /// Pack size range the game master buys this kind in (by archetype:
     /// swarms by the dozen, chasers in small groups, tanks alone).
     pub pack: (u16, u16),
+    /// Monster skill ids (`skills.json` `monster_skills`).
+    pub skills: Vec<String>,
+    /// Undead or demon (Divine Protection, Demon Bane).
+    pub evil: bool,
 }
 
 /// Pack size range of a director archetype.
@@ -153,6 +166,8 @@ impl MonsterCatalog {
                 unlock_secs: m.director.min_wave_time,
                 weight: m.director.weight,
                 xp: m.director.xp_reward,
+                skills: m.skills.into_iter().map(|s| s.id).collect(),
+                evil: matches!(m.stats.race.as_str(), "undead" | "demon"),
             })
             .collect();
         Self::new(defs)
@@ -205,6 +220,8 @@ pub(crate) fn test_def(id: &str, speed: f32, cost: u32, unlock: f32, boss: bool)
         xp: 1,
         boss,
         pack: if boss { (1, 1) } else { (1, 3) },
+        skills: Vec::new(),
+        evil: false,
     }
 }
 

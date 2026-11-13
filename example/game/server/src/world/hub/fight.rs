@@ -3,13 +3,16 @@
 //! [`crate::world::combat`]; this file only applies them to the instance's
 //! players and horde once per tick.
 
+use super::area::Area;
 use super::cast::{wound, Casting};
 use super::{facing_of, HubEvent, HubInstance, Outgoing};
 use crate::world::combat::skills::SLOTS;
 use crate::world::combat::rules::{attack_roll, AttackOutcome};
-use crate::world::combat::{self, cantrip_k, exp_to_next, kill_value, share_kill, Class, Damage, DamageType, Reach, Weapon};
-use crate::world::horde::storage::FLAG_FULL;
-use crate::world::hub::PortalLink;
+use crate::world::combat::{
+    self, cantrip_k, exp_to_next, kill_value, share_kill, Class, Condition, Damage, DamageType, Dice, Mods, Reach, Save, Status,
+    Weapon, CONDITIONS,
+};
+use crate::world::horde::storage::{FLAG_BOSS, FLAG_FULL};
 use crate::world::protocol::{hit, HitEvent, ServerMsg, Swing, MONSTER_ENTITY_BASE};
 
 /// Standing still this many ticks (0.15 s at 20 Hz) starts the basic attack:
@@ -47,6 +50,17 @@ impl Vital {
     }
 }
 
+/// A buff running on a player.
+#[derive(Clone, Copy, Debug)]
+struct Buff {
+    /// The skill that gave it (a recast refreshes it).
+    skill: u16,
+    until: u32,
+    mods: Mods,
+    /// It granted temporary HP (gone with the last such buff).
+    temp: bool,
+}
+
 /// A player's combat state inside a stage.
 #[derive(Clone, Debug)]
 pub struct Fighter {
@@ -69,10 +83,26 @@ pub struct Fighter {
     /// Ticks left per skill.
     pub(super) cooldowns: Vec<u32>,
     pub(super) casting: Option<Casting>,
+    /// Ground that lasts while a slot is held.
+    pub(super) channel: Option<super::cast::Channel>,
     /// Rooted after a cast; the basic attack waits.
     pub(super) recovery: u32,
-    /// Passive SP regeneration, fraction of max SP per second.
-    pub(super) sp_regen: f32,
+    /// Modifiers of the learned passives.
+    passive: Mods,
+    /// Running buffs.
+    buffs: Vec<Buff>,
+    /// Passives plus buffs, summed once per tick.
+    pub(super) mods: Mods,
+    /// Temporary HP, spent before HP (Endure, Kyrie Eleison).
+    pub temp_hp: i32,
+    /// Ticks left per condition (monster skills), and the active set.
+    cond: [u16; CONDITIONS],
+    pub(super) status: Status,
+    /// Kills of the party and experience gained since the stage began
+    /// (the result screen).
+    pub(super) run_exp: u64,
+    /// Signature of the buff set last sent (`BUFFS`).
+    pub(super) buffs_sent: u64,
     /// Level changed: skill points to resend.
     pub(super) skills_dirty: bool,
     attack_cd: u32,
@@ -81,8 +111,9 @@ pub struct Fighter {
     revive: u32,
     regen_hp: f32,
     regen_sp: f32,
-    /// Last vitals sent (hp, max_hp, sp, max_sp, state).
-    sent: Option<(i32, i32, i32, i32, u8)>,
+    /// Last vitals sent (hp, max_hp, sp, max_sp, state, status, temp HP,
+    /// light).
+    sent: Option<[i32; 8]>,
     gained: u64,
     progress_dirty: bool,
     progress_wait: u32,
@@ -107,8 +138,16 @@ impl Fighter {
             hotbar: [None; SLOTS],
             cooldowns: Vec::new(),
             casting: None,
+            channel: None,
             recovery: 0,
-            sp_regen: 0.0,
+            passive: Mods::default(),
+            buffs: Vec::new(),
+            mods: Mods::default(),
+            temp_hp: 0,
+            cond: [0; CONDITIONS],
+            status: Status(0),
+            run_exp: 0,
+            buffs_sent: 0,
             skills_dirty: false,
             attack_cd: 0,
             still: 0,
@@ -127,6 +166,158 @@ impl Fighter {
         self.state == Vital::Up
     }
 
+    /// Standing and not playing dead: monsters come for it.
+    pub fn hunted(&self) -> bool {
+        self.is_up() && !self.mods.hidden
+    }
+
+    pub(super) fn set_passive(&mut self, passive: Mods) {
+        self.passive = passive;
+        self.sum_mods();
+    }
+
+    fn sum_mods(&mut self) {
+        let mut m = self.passive;
+        for b in &self.buffs {
+            m.add(&b.mods);
+        }
+        self.mods = m;
+    }
+
+    /// Drops buffs that ran out (at tick `now`) and sums the rest.
+    pub(super) fn refresh(&mut self, now: u32) {
+        let n = self.buffs.len();
+        self.buffs.retain(|b| b.until > now);
+        if self.buffs.len() != n || self.buffs.is_empty() && self.mods != self.passive {
+            self.sum_mods();
+        }
+        if self.temp_hp > 0 && !self.buffs.iter().any(|b| b.temp) {
+            self.temp_hp = 0;
+        }
+    }
+
+    /// Starts (or refreshes) the buff of `skill` until tick `until`, with
+    /// `temp_hp` temporary HP (the larger pool is kept).
+    pub(super) fn buff(&mut self, skill: u16, until: u32, mods: Mods, temp_hp: i32) {
+        let temp = temp_hp > 0;
+        match self.buffs.iter_mut().find(|b| b.skill == skill) {
+            Some(b) => {
+                b.until = b.until.max(until);
+                b.mods = mods;
+                b.temp |= temp;
+            }
+            None => self.buffs.push(Buff { skill, until, mods, temp }),
+        }
+        self.temp_hp = self.temp_hp.max(temp_hp);
+        self.sum_mods();
+    }
+
+    /// Moving ends playing dead.
+    pub(super) fn unhide(&mut self) {
+        if self.mods.hidden {
+            self.buffs.retain(|b| !b.mods.hidden);
+            self.sum_mods();
+        }
+    }
+
+    /// Leaves condition `c` for `ticks` (the longer of two is kept). Endure
+    /// keeps the player on their feet.
+    pub(super) fn afflict(&mut self, c: Condition, ticks: u16) {
+        if self.mods.steady && matches!(c, Condition::Stunned | Condition::Frozen) {
+            return;
+        }
+        let t = &mut self.cond[c as usize];
+        *t = (*t).max(ticks);
+        self.status.0 |= c.bit();
+    }
+
+    /// One tick of the condition timers.
+    fn wear_off(&mut self) {
+        let mut bits = 0;
+        for (i, t) in self.cond.iter_mut().enumerate() {
+            *t = t.saturating_sub(1);
+            if *t > 0 {
+                bits |= 1 << i;
+            }
+        }
+        self.status = Status(bits);
+    }
+
+    pub(super) fn clear_conditions(&mut self) {
+        self.cond = [0; CONDITIONS];
+        self.status = Status(0);
+    }
+
+    /// Armour class with buffs and conditions.
+    pub(super) fn armour(&self) -> i32 {
+        self.ac + self.mods.ac + self.status.ac()
+    }
+
+    /// Saving throw bonus against `c` (or a plain Reflex save).
+    pub(super) fn save_against(&self, c: Option<Condition>) -> i32 {
+        self.class.save_bonus(self.level, c.map_or(Save::Reflex, Condition::save))
+    }
+
+    /// Takes a hit: resistance and armour, then temporary HP, then HP.
+    /// Returns what came off HP and temporary HP together.
+    pub(super) fn take(&mut self, amount: i32, physical: bool) -> i32 {
+        let a = self.mods.taken(amount, physical);
+        let soak = a.min(self.temp_hp);
+        self.temp_hp -= soak;
+        let mut rest = a - soak;
+        if self.mods.mana_shield && rest > 0 {
+            // Energy Coat: 1 SP stops 2 HP.
+            let stopped = rest.min(self.sp.max(0) * 2);
+            self.sp -= (stopped + 1) / 2;
+            rest -= stopped;
+        }
+        self.hp -= rest;
+        a
+    }
+
+    /// A hit from a monster: undead and demons hurt less with Divine
+    /// Protection.
+    pub(super) fn take_from(&mut self, amount: i32, physical: bool, evil: bool) -> i32 {
+        let amount = if evil && self.mods.evil_resist > 0.0 {
+            (amount as f32 * (1.0 - self.mods.evil_resist.min(0.9))).round() as i32
+        } else {
+            amount
+        };
+        self.take(amount, physical)
+    }
+
+    /// Turns a toggled buff of `skill` on (until cast again) or off.
+    pub(super) fn toggle(&mut self, skill: u16, mods: Mods) {
+        if let Some(i) = self.buffs.iter().position(|b| b.skill == skill) {
+            self.buffs.swap_remove(i);
+        } else {
+            self.buffs.push(Buff { skill, until: u32::MAX, mods, temp: false });
+        }
+        self.sum_mods();
+    }
+
+    /// Changes when a buff starts, is refreshed or ends.
+    pub(super) fn buff_signature(&self) -> u64 {
+        self.buffs.iter().fold(self.buffs.len() as u64, |h, b| {
+            h.rotate_left(13) ^ (u64::from(b.skill) << 32 | u64::from(b.until)).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        })
+    }
+
+    /// Running buffs as (skill, ticks left), for the HUD.
+    pub(super) fn buff_list(&self, now: u32) -> impl Iterator<Item = (u16, u32)> + '_ {
+        self.buffs.iter().map(move |b| (b.skill, b.until.saturating_sub(now)))
+    }
+
+    /// Downed at 0 HP (conditions end).
+    pub(super) fn fall_if_spent(&mut self, hz: f32) {
+        if self.hp <= 0 && self.is_up() {
+            self.hp = 0;
+            self.state = Vital::Downed { ticks: (DOWNED_SECS * hz) as u32 };
+            self.revive = 0;
+            self.clear_conditions();
+        }
+    }
+
     fn vitals(&self, entity_id: u32) -> ServerMsg {
         ServerMsg::PlayerVitals {
             entity_id,
@@ -135,6 +326,10 @@ impl Fighter {
             sp: self.sp.max(0) as u32,
             max_sp: self.max_sp as u32,
             state: self.state.code(),
+            status: self.status.0 as u32,
+            temp_hp: self.temp_hp.max(0) as u32,
+            light: (self.mods.light.max(0.0).round() as u32).min(255),
+            level: self.level,
         }
     }
 
@@ -148,6 +343,7 @@ impl Fighter {
         if exp == 0 {
             return;
         }
+        self.run_exp += exp;
         self.exp += exp;
         self.gained += exp;
         self.progress_dirty = true;
@@ -170,7 +366,7 @@ impl Fighter {
     }
 }
 
-fn damage_type_bits(kind: DamageType) -> u8 {
+pub(super) fn damage_type_bits(kind: DamageType) -> u8 {
     (kind as u8) << 4
 }
 
@@ -190,15 +386,18 @@ impl HubInstance {
         let hz = self.config.tick_hz as f32;
         let rng = &mut self.dice;
 
-        // 1. Players: the basic attack while standing.
+        // 1. Players: the basic attack while standing. It is an area too: a
+        //    cone in front for melee, a splash at the impact for ranged; the
+        //    target is the nearest monster in reach (index queries only).
+        let mut targets: Vec<u16> = Vec::new();
         for p in self.players.iter_mut().filter(|p| p.map == map) {
             let Some(f) = p.fighter.as_mut() else { continue };
             f.attack_cd = f.attack_cd.saturating_sub(1);
-            if !f.is_up() || p.dir != (0.0, 0.0) {
+            if !f.is_up() || p.dir != (0.0, 0.0) || f.mods.hidden || f.status.held() {
                 f.still = 0;
                 continue;
             }
-            if f.casting.is_some() || f.recovery > 0 {
+            if f.casting.is_some() || f.channel.is_some() || f.recovery > 0 {
                 continue;
             }
             f.still += 1;
@@ -206,73 +405,45 @@ impl HubInstance {
                 continue;
             }
             let weapon = f.weapon;
+            let m = f.mods;
             let (dice, kind) = weapon.damage(f.class, f.level);
-            let damage = Damage::new(dice, kind);
+            let damage = Damage::new(Dice { bonus: dice.bonus + m.damage_flat, ..dice }, kind);
             let (range, arc_cos, splash) = match weapon.reach {
                 Reach::Melee { range, arc_cos } => (range, Some(arc_cos), 0.0),
                 Reach::Ranged { range, splash } => (range, None, splash),
             };
+            let Some((target, _)) = horde.nearest_to(p.x, p.y, range, |_| false) else { continue };
             let store = horde.store();
-            let catalog = horde.catalog();
-            let mut best: Option<(u16, f32)> = None;
-            for &s in store.alive() {
-                let i = s as usize;
-                if store.hp[i] <= 0 {
-                    continue;
-                }
-                let r = catalog.get(store.kind[i]).radius;
-                let (dx, dy) = (store.x[i] - p.x, store.y[i] - p.y);
-                let reach = range + r;
-                if dx.abs() > reach || dy.abs() > reach {
-                    continue;
-                }
-                let d = (dx * dx + dy * dy).sqrt() - r;
-                if d <= range && best.is_none_or(|(_, b)| d < b) {
-                    best = Some((s, d));
-                }
-            }
-            let Some((target, _)) = best else { continue };
             let (tx, ty) = (store.x[target as usize], store.y[target as usize]);
             let (ax, ay) = (tx - p.x, ty - p.y);
             let alen = (ax * ax + ay * ay).sqrt().max(1e-3);
-            let mut targets: Vec<u16> = Vec::new();
-            for &s in store.alive() {
-                let i = s as usize;
-                if store.hp[i] <= 0 {
-                    continue;
-                }
-                let r = catalog.get(store.kind[i]).radius;
-                let inside = match arc_cos {
-                    Some(cos) => {
-                        let (dx, dy) = (store.x[i] - p.x, store.y[i] - p.y);
-                        let d = (dx * dx + dy * dy).sqrt();
-                        s == target || (d - r <= range && (dx * ax + dy * ay) >= cos * d * alen)
-                    }
-                    None => {
-                        let (dx, dy) = (store.x[i] - tx, store.y[i] - ty);
-                        let reach = splash + r;
-                        dx * dx + dy * dy <= reach * reach
-                    }
-                };
-                if inside {
-                    targets.push(s);
-                }
+            let area = match arc_cos {
+                Some(arc_cos) => Area::Arc { x: p.x, y: p.y, dir: (ax / alen, ay / alen), r: range, arc_cos },
+                None => Area::Circle { x: tx, y: ty, r: splash },
+            };
+            targets.clear();
+            area.monsters(horde, &mut targets);
+            if !targets.contains(&target) {
+                targets.push(target);
             }
-            let bonus = weapon.to_hit(f.level);
             let attacks = f.class.attacks_per_action(f.level);
             let entity = p.profile.character_id;
             let k = cantrip_k(f.level);
-            for s in targets {
+            for &s in &targets {
                 let block = horde.block(s);
                 for _ in 0..attacks {
                     let id = MONSTER_ENTITY_BASE + s as u32;
-                    let advantage = horde.store().status_of(s).advantage_against();
-                    let ac = block.ac + horde.store().status_of(s).ac();
-                    match attack_roll(rng, bonus, ac, advantage, 20) {
+                    let status = horde.store().status_of(s);
+                    let advantage = (status.advantage_against() + m.advantage as i8 + f.status.advantage()).clamp(-1, 1);
+                    let ac = block.ac + status.ac();
+                    let bless = if m.to_hit_die > 0 { rng.die(m.to_hit_die) as i32 } else { 0 };
+                    match attack_roll(rng, weapon.to_hit(f.level) + m.to_hit + bless, ac, advantage, m.crit_from()) {
                         AttackOutcome::Miss => hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS }),
                         outcome => {
                             let crit = outcome == AttackOutcome::Critical;
-                            let amount = wound(horde, rng, s, damage, None, crit, false, k);
+                            let bane = if horde.catalog().get(horde.store().kind[s as usize]).evil { m.evil_damage } else { 0 };
+                            let amount = wound(horde, rng, s, damage, m.damage, crit, false, k) + bane;
+                            horde.store_mut().hp[s as usize] -= bane;
                             let dead = horde.store().hp[s as usize] <= 0;
                             let mut flags = damage_type_bits(damage.kind);
                             if crit {
@@ -290,7 +461,7 @@ impl HubInstance {
                     }
                 }
             }
-            f.attack_cd = (weapon.interval_ms as f32 * hz / 1000.0).round() as u32;
+            f.attack_cd = (weapon.interval_ms as f32 * m.interval() * hz / 1000.0).round() as u32;
             f.quiet = 0;
             p.facing = facing_of(ax, ay);
             swings.push(Swing { entity_id: entity, facing: p.facing });
@@ -298,6 +469,7 @@ impl HubInstance {
 
         // 2. Kills: experience for everyone in the party on this map, then
         //    the slot goes back to the pool (the client sees a REMOVE).
+        let mut boss_down = false;
         if !kills.is_empty() {
             let levels: Vec<u32> =
                 self.players.iter().filter(|p| p.map == map).filter_map(|p| p.fighter.as_ref().map(|f| f.level)).collect();
@@ -306,6 +478,8 @@ impl HubInstance {
                 if !store.is_alive(s) {
                     continue;
                 }
+                boss_down |= store.flags[s as usize] & FLAG_BOSS != 0;
+                self.kills += 1;
                 let def = horde.catalog().get(store.kind[s as usize]);
                 let level = store.level[s as usize] as u32;
                 let shares = share_kill(kill_value(level, def.archetype), level, &levels);
@@ -319,13 +493,19 @@ impl HubInstance {
             }
         }
 
-        // 3. Monsters in contact strike the nearest standing player.
-        let ups: Vec<(usize, f32, f32)> = self
+        // 3. Monster skills: wind-ups, landings, hazards on players.
+        self.monster_skills(out, &mut hits);
+        let Some(horde) = self.horde.as_mut() else { return };
+        let rng = &mut self.dice;
+
+        // 4. Monsters in contact strike the nearest standing player (a
+        //    taunted one its taunter, when in reach).
+        let ups: Vec<(usize, f32, f32, u32)> = self
             .players
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.map == map && p.fighter.as_ref().is_some_and(Fighter::is_up))
-            .map(|(i, p)| (i, p.x, p.y))
+            .filter(|(_, p)| p.map == map && p.fighter.as_ref().is_some_and(Fighter::hunted))
+            .map(|(i, p)| (i, p.x, p.y, p.profile.user_id))
             .collect();
         let alive = horde.store().alive().len();
         for k in 0..alive {
@@ -342,15 +522,19 @@ impl HubInstance {
             }
             let (mx, my) = (store.x[i], store.y[i]);
             let reach = horde.catalog().get(horde.store().kind[i]).radius + PLAYER_RADIUS + MONSTER_REACH;
+            let taunter = if status.has(Condition::Taunted) { horde.store().taunter[i] } else { 0 };
             let mut victim: Option<(usize, f32, f32, f32)> = None;
-            for &(pi, px, py) in &ups {
+            for &(pi, px, py, uid) in &ups {
                 let (dx, dy) = (px - mx, py - my);
-                let d2 = dx * dx + dy * dy;
-                if d2 <= reach * reach && victim.is_none_or(|(_, _, _, b)| d2 < b) {
+                // The taunter sorts first.
+                let d2 = dx * dx + dy * dy - if uid == taunter && taunter != 0 { 1e6 } else { 0.0 };
+                if dx * dx + dy * dy <= reach * reach && victim.is_none_or(|(_, _, _, b)| d2 < b) {
                     victim = Some((pi, dx, dy, d2));
                 }
             }
             let Some((pi, dx, dy, _)) = victim else { continue };
+            // Provoked: it fights badly against anyone but its taunter.
+            let off_target = taunter != 0 && ups.iter().find(|u| u.0 == pi).is_some_and(|u| u.3 != taunter);
             let block = horde.block(s);
             let p = &mut self.players[pi];
             let Some(f) = p.fighter.as_mut() else { continue };
@@ -358,24 +542,24 @@ impl HubInstance {
                 continue;
             }
             let id = p.profile.character_id;
-            if let Some(w) = self.zones.iter_mut().find(|z| z.shields(map, p.x, p.y)) {
+            if let Some(w) = self.lives.iter_mut().find(|z| z.shields(map, p.x, p.y)) {
                 // Safety Wall: the blow lands on the ward.
                 w.absorb();
-                hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS });
+                hits.push(HitEvent { target: id, amount: 0, flags: hit::GUARD });
+            } else if f.mods.block > 0 && rng.chance(f.mods.block) {
+                // Auto Guard: the shield takes it.
+                hits.push(HitEvent { target: id, amount: 0, flags: hit::GUARD });
             } else {
-                match attack_roll(rng, block.attack, f.ac, status.advantage(), 20) {
+                let advantage = (status.advantage() + f.status.advantage_against() - off_target as i8).clamp(-1, 1);
+                match attack_roll(rng, block.attack, f.armour(), advantage, 20) {
                     AttackOutcome::Miss => hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS }),
                     outcome => {
                         let crit = outcome == AttackOutcome::Critical;
-                        let amount = block.damage.roll(rng, crit);
-                        f.hp -= amount;
+                        let evil = horde.catalog().get(horde.store().kind[i]).evil;
+                        let amount = f.take_from(block.damage.roll(rng, crit), true, evil);
                         let flags = damage_type_bits(DamageType::Physical) | if crit { hit::CRITICAL } else { 0 };
                         hits.push(HitEvent { target: id, amount: amount as u32, flags });
-                        if f.hp <= 0 {
-                            f.hp = 0;
-                            f.state = Vital::Downed { ticks: (DOWNED_SECS * hz) as u32 };
-                            f.revive = 0;
-                        }
+                        f.fall_if_spent(hz);
                     }
                 }
             }
@@ -384,7 +568,7 @@ impl HubInstance {
             swings.push(Swing { entity_id: MONSTER_ENTITY_BASE + s as u32, facing: facing_of(dx, dy) });
         }
 
-        // 4. Downed, revive, regeneration.
+        // 5. Downed, revive, regeneration.
         let wave = horde.waves();
         let new_wave = wave != self.last_wave;
         self.last_wave = wave;
@@ -394,16 +578,36 @@ impl HubInstance {
             .filter(|p| p.map == map)
             .map(|p| (p.profile.user_id, p.x, p.y, p.fighter.as_ref().is_some_and(Fighter::is_up)))
             .collect();
+        let tick = self.tick;
+        let every = (hz as u32).max(1);
         for p in self.players.iter_mut().filter(|p| p.map == map) {
             let (uid, x, y) = (p.profile.user_id, p.x, p.y);
             let Some(f) = p.fighter.as_mut() else { continue };
             match f.state {
                 Vital::Up => {
+                    // Burning and poison bite once a second (staggered).
+                    if f.status.ailing() && (tick + uid).is_multiple_of(every) {
+                        for (c, kind) in [(Condition::Burning, DamageType::Fire), (Condition::Poisoned, DamageType::Poison)] {
+                            if f.status.has(c) {
+                                let amount = f.take(rng.die(4) as i32, false);
+                                hits.push(HitEvent { target: p.profile.character_id, amount: amount as u32, flags: damage_type_bits(kind) });
+                                f.quiet = 0;
+                            }
+                        }
+                        f.fall_if_spent(hz);
+                    }
+                    f.wear_off();
+                    if !f.is_up() {
+                        continue;
+                    }
                     f.quiet = f.quiet.saturating_add(1);
                     if f.quiet as f32 >= QUIET_SECS * hz && f.hp < f.max_hp {
                         f.regen_hp += f.max_hp as f32 * 0.005 / hz;
                     }
-                    let sp_rate = if p.dir == (0.0, 0.0) { 0.02 } else { 0.005 } + f.sp_regen;
+                    if f.mods.hp_regen > 0.0 && f.hp < f.max_hp {
+                        f.regen_hp += f.max_hp as f32 * f.mods.hp_regen / hz;
+                    }
+                    let sp_rate = if p.dir == (0.0, 0.0) { 0.02 } else { 0.005 } + f.mods.sp_regen;
                     if f.sp < f.max_sp {
                         f.regen_sp += f.max_sp as f32 * sp_rate / hz;
                     }
@@ -437,7 +641,7 @@ impl HubInstance {
             }
         }
 
-        // 5. Messages: combat to the map, vitals on change, progress to self.
+        // 6. Messages: combat to the map, vitals on change, progress to self.
         let recipients: Vec<u32> = self.players.iter().filter(|p| p.map == map).map(|p| p.profile.user_id).collect();
         let mut skill_updates: Vec<u32> = Vec::new();
         if !swings.is_empty() || !hits.is_empty() {
@@ -450,7 +654,16 @@ impl HubInstance {
             let id = p.profile.character_id;
             let uid = p.profile.user_id;
             let Some(f) = p.fighter.as_mut() else { continue };
-            let now = (f.hp.max(0), f.max_hp, f.sp, f.max_sp, f.state.code());
+            let now = [
+                f.hp.max(0),
+                f.max_hp,
+                f.sp,
+                f.max_sp,
+                f.state.code() as i32,
+                f.status.0 as i32,
+                f.temp_hp,
+                f.mods.light.round() as i32,
+            ];
             if f.sent != Some(now) {
                 f.sent = Some(now);
                 let msg = f.vitals(id);
@@ -477,21 +690,22 @@ impl HubInstance {
             }
         }
 
-        // 6. Defeat: nobody on the map is standing.
+        // 7. Defeat: nobody on the map is standing.
         let fighters = self.players.iter().filter(|p| p.map == map && p.fighter.is_some()).count();
         let standing = self.players.iter().filter(|p| p.map == map && p.fighter.as_ref().is_some_and(Fighter::is_up)).count();
         if fighters > 0 && standing == 0 {
             self.defeat(map, out);
         }
+        self.mission_step(map, boss_down, out);
     }
 
     /// The whole party is down: each member loses 1% of their level's
-    /// requirement (never a level) and everyone leaves through the stage exit.
+    /// requirement (never a level); the result screen, then the exit.
     fn defeat(&mut self, map: super::MapIdx, out: &mut Outgoing) {
-        let exit = (0..self.world.map(map).manifest.portals.len())
-            .find(|&i| matches!(self.world.link(map, i), PortalLink::External { .. }));
-        let mut leaving: Vec<usize> = Vec::new();
-        for (idx, p) in self.players.iter_mut().enumerate().filter(|(_, p)| p.map == map) {
+        if self.outcome != super::mission::Outcome::Running {
+            return;
+        }
+        for p in self.players.iter_mut().filter(|p| p.map == map) {
             let uid = p.profile.user_id;
             if let Some(f) = p.fighter.as_mut() {
                 let penalty = exp_to_next(f.level) / 100;
@@ -500,14 +714,8 @@ impl HubInstance {
                 out.push((uid, HubEvent::Control(f.progress())));
                 out.push((uid, HubEvent::Progress { level: f.level, exp: f.exp }));
             }
-            out.push((uid, HubEvent::Control(ServerMsg::Notification { message: "Your party has fallen.".into() })));
-            leaving.push(idx);
         }
-        if let Some(portal) = exit {
-            for idx in leaving.into_iter().rev() {
-                self.use_portal(idx, portal, out);
-            }
-        }
+        self.end_stage(map, false, out);
     }
 
     /// Vitals of everyone on the newcomer's map to them, theirs to everyone,

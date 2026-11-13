@@ -85,7 +85,7 @@ void main() {
       final enter =
           ServerMsg.decode(
                 hex(
-                  '210166054669656c64029003020000003f00000034c200002041000020420000a04106612e6f676702006000900000010902426f066e6f76696365c00000010601040203',
+                  '210166054669656c64029003020000003f00000034c200002041000020420000a04106612e6f676702006000900000010902426f066e6f76696365c000000106010402031f',
                 ),
               )!
               as MapEnter;
@@ -105,6 +105,7 @@ void main() {
       final p = enter.players.single;
       expect((p.entityId, p.name, p.archetype, p.x, p.y, p.facing), (9, 'Bo', 'novice', 3.0, 4.0, 6));
       expect(p.look, const Look(gender: 1, hair: 4, hairColor: 2, bodyColor: 3));
+      expect(p.level, 31);
 
       final lobby =
           (ServerMsg.decode(
@@ -129,8 +130,9 @@ void main() {
       expect((ServerMsg.decode(hex('1105'))! as Pong).ts, -3);
       final look = ServerMsg.decode(hex('29ac02000c0f07'))! as PlayerLook;
       expect((look.entityId, look.look), (300, const Look(hair: 12, hairColor: 15, bodyColor: 7)));
-      final v = ServerMsg.decode(hex('2aac02287a07830101'))! as PlayerVitals;
+      final v = ServerMsg.decode(hex('2aac02287a07830101800503041f'))! as PlayerVitals;
       expect((v.entityId, v.hp, v.maxHp, v.sp, v.maxSp, v.state), (300, 40, 122, 7, 131, 1));
+      expect((v.status, v.tempHp, v.light, v.level), (640, 3, 4, 31));
       final c = ServerMsg.decode(hex('2b01ac02060287808004c80115ac020002'))! as Combat;
       expect((c.swings.single.entityId, c.swings.single.facing), (300, 6));
       final kill = c.hits[0], miss = c.hits[1];
@@ -142,8 +144,18 @@ void main() {
       expect((sk.level, sk.points), (12, 3));
       expect(sk.levels, {'bolt': 4});
       expect(sk.hotbar, ['bolt', '']);
-      final cast = ServerMsg.decode(hex('2eac0204626f6c74a002d0009c04e807'))! as Cast;
+      final cast = ServerMsg.decode(hex('2eac0204626f6c74a002d0009c04e80701090102a002d0004000024000f02eac0203'))! as Cast;
       expect((cast.caster, cast.skill, cast.x, cast.y, cast.castMs, cast.cooldownMs), (300, 'bolt', 10.5, 3.25, 540, 1000));
+      expect(cast.level, 3);
+      final t = cast.areas.single;
+      expect((t.id, t.shape, t.look, t.x, t.y, t.dir, t.a, t.b, t.spanMs, t.follow), (9, 1, 2, 10.5, 3.25, 64, 8.0, 1.0, 6000, 300));
+      expect((ServerMsg.decode(hex('2f09'))! as ZoneEnd).id, 9);
+      final end = ServerMsg.decode(hex('3401a503d209cd8306904e'))! as StageEnd;
+      expect((end.victory, end.secs, end.kills, end.exp, end.leaveMs), (true, 421, 1234, 98765, 10000));
+      final boss = ServerMsg.decode(hex('35858080040442617068d00fe615'))! as Boss;
+      expect((boss.entityId, boss.name, boss.hp, boss.maxHp), (monsterEntityBase + 5, 'Baph', 2000, 2790));
+      final buffs = ServerMsg.decode(hex('36010568617374659423'))! as Buffs;
+      expect(buffs.buffs.single, (skill: 'haste', ms: 4500));
     });
 
     test('looks come from the REST character JSON', () {

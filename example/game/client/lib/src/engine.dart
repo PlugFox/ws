@@ -59,8 +59,11 @@ extension type GameView._(JSObject _) implements JSObject {
   /// Call once, before the first `loadLocation`.
   external JSPromise<JSAny?> loadCustomization(String baseUrl);
 
-  /// Sprite index of the dyeable body for a gender (0 male, 1 female), or -1.
-  external int bodySpriteIndex(int gender);
+  /// Sprite index of the dyeable body of a class and gender (0 male,
+  /// 1 female), or -1 without the customization pack. [job] is a body slug
+  /// (`novice`, `swordsman`, `crusader`, `wizard`, ...; see `bodyJob`);
+  /// an unknown one is the novice. The clothes dyes follow the body drawn.
+  external int bodySpriteIndex(int gender, String job);
 
   /// Hair style and dyes of a character drawn with [bodySpriteIndex];
   /// a negative gender removes them.
@@ -92,12 +95,45 @@ extension type GameView._(JSObject _) implements JSObject {
   /// the hotbar. Events: `skill_learn`, `skill_slot`, `skill_tree`.
   external void setSkills(String json);
 
-  /// A cast starts (telegraph; `own` also drives the cast bar and cooldown):
-  /// `{caster, skill, x, y, castMs, cooldownMs, level, own}`.
+  /// A cast starts (telegraphs; `own` also drives the cast bar and
+  /// cooldown): `{caster, skill, x, y, castMs, cooldownMs, level, own,
+  /// areas: [{id, shape, look, x, y, dir, a, b, spanMs, follow}]}`.
   external void castSkill(String json);
+
+  /// Lasting ground `id` ended early (a spent ward, a sprung trap).
+  external void endZone(int id);
+
+  /// The boss's bar at the top (`{id, name, hp, maxHp}` JSON; '' hides it).
+  external void setBoss(String json);
+
+  /// Own buff icons (`[{skill, ms}]` JSON; ms 0 = until toggled off).
+  external void setBuffs(String json);
 
   /// Opens (1), closes (0) or toggles (-1) the skill tree; returns whether it is open.
   external bool toggleSkillTree(int mode);
+
+  /// Touch controls: -1 auto (touch devices), 0 off, 1 on. Events:
+  /// `skill_auto {slot}` (long press), `open_settings`.
+  external void setTouchControls(int mode);
+
+  /// Touch state for this tick into [out] (6 floats: move x, y; aim x, y in
+  /// cells; slot bits released since the last read; 1 while aiming). Pass a
+  /// JS-allocated array and read it through `toDart` (no copy under dart2js
+  /// or dart2wasm). False (zeroed) when the touch controls are off.
+  external bool readTouch(JSFloat32Array out);
+
+  /// Auto-cast slots (bit i = slot i), marked on the hotbar and touch buttons.
+  external void setAutoCast(int mask);
+
+  /// Metres a manual aim reaches for [skill] (its range, or a short default).
+  external double skillReach(String skill);
+
+  /// Aim guide around the local player: offset and reach in cells; NaN hides.
+  external void setAimGuide(double x, double y, double reach);
+
+  /// Controller navigation of the open window or side panel (`Nav` codes);
+  /// true when the UI took it, false when it is game input.
+  external bool navigateUi(int action);
 
   /// Passes the rows as a view on the same buffer: under dart2js and
   /// dart2wasm (with a JS-backed list) this crosses without a copy.
@@ -137,7 +173,7 @@ abstract final class Row {
   static const flagFade = 4;
 
   /// Condition tints (engine `units.ts`): ice, stone, stars, slow, blind,
-  /// fire, poison.
+  /// fire, poison, rage.
   static const flagFrozen = 8;
   static const flagPetrified = 16;
   static const flagStunned = 32;
@@ -145,6 +181,7 @@ abstract final class Row {
   static const flagBlinded = 128;
   static const flagBurning = 256;
   static const flagPoisoned = 512;
+  static const flagTaunted = 1024;
 }
 
 /// Growable row buffer for `upsertEntities`; reused every frame.

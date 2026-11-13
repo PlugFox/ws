@@ -7,7 +7,7 @@
 
 use super::dice::Dice;
 use super::rules::DamageType;
-use super::{Class, Condition};
+use super::{Class, Condition, Mods};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -70,20 +70,110 @@ pub enum Target {
     DownedAlly,
 }
 
+/// Shape of an effect's area (COMBAT.md §4.3). Sizes grow with the skill
+/// level (`Lin`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Shape {
+    /// `radius` around the point.
     #[default]
     Circle,
+    /// Centred on the point: `length` along the aim × `width` across (a
+    /// wall is short and wide, a square has both equal).
+    Rect,
+    /// From the caster along the aim: `length` (the skill's range when
+    /// 0) × `width` (piercing arrows, beams, dashes).
     Line,
+    /// In front of the caster: `radius` and `arc` degrees (sword swings).
     Arc,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+/// What an area moves with while it lasts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum Follow {
+    /// Stays where it landed.
+    #[default]
+    None,
+    /// An aura around the caster.
+    Caster,
+    /// Homing: the hit goes wherever the picked monster (or ally) goes and
+    /// cannot miss it.
+    Target,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoveMode {
     Slide,
     Blink,
+}
+
+impl<'de> Deserialize<'de> for MoveMode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match String::deserialize(d)?.as_str() {
+            "slide" | "dash" => Ok(MoveMode::Slide),
+            "blink" => Ok(MoveMode::Blink),
+            other => Err(serde::de::Error::custom(format!("unknown move mode {other}"))),
+        }
+    }
+}
+
+/// Where an effect lands and whom it picks (cells).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AreaFx {
+    pub shape: Shape,
+    pub radius: Lin,
+    pub length: Lin,
+    pub width: Lin,
+    /// Cosine of half the arc.
+    pub arc_cos: f32,
+    /// Around the caster instead of the target point.
+    pub at_caster: bool,
+    pub follow: Follow,
+    /// At most this many targets, nearest the origin first (a line keeps
+    /// the first ones along it); 0 = everything inside.
+    pub limit: Lin,
+    /// Hops after the first target, each to the nearest one not hit yet
+    /// within `jump` (bouncing shields, chain spells).
+    pub chain: Lin,
+    pub jump: f32,
+    /// Random offset of each hit.
+    pub scatter: f32,
+    /// Each hit on a different monster, nearest the point first.
+    pub spread: bool,
+}
+
+impl AreaFx {
+    /// A single point (no area): the payload lands on the picked target only.
+    pub fn is_point(&self, slv: u8) -> bool {
+        self.shape == Shape::Circle && self.radius.at(slv) <= 0.0
+    }
+}
+
+/// When an effect acts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimingFx {
+    /// Repeated hits, `every` seconds apart (bolts, storms).
+    pub count: Lin,
+    pub every: f32,
+    /// Projectile speed, cells per second: the hit lands after its flight
+    /// (0 = at once).
+    pub speed: f32,
+    /// Seconds the area lasts on the ground (0 = it acts once).
+    pub secs: Lin,
+    /// Seconds between the actions of a lasting area.
+    pub pulse: f32,
+    /// A trap: waits (up to `secs`) until a monster comes within `trigger`
+    /// cells, then acts once.
+    pub trigger: f32,
+    /// A trap also goes off by itself after this many seconds (0 = never).
+    pub fuse: f32,
+}
+
+impl TimingFx {
+    pub fn lasting(&self, slv: u8) -> bool {
+        self.secs.at(slv) > 0.0
+    }
 }
 
 /// Dice of an effect: fixed, or the held weapon's.
@@ -103,18 +193,11 @@ pub struct DamageFx {
     pub mult: Lin,
     pub bonus: Lin,
     pub kind: DamageType,
-    pub count: Lin,
-    /// Ticks between hits (0 = all at once).
-    pub every: f32,
-    pub shape: Shape,
-    pub radius: f32,
-    pub width: f32,
-    /// Cosine of half the arc.
-    pub arc_cos: f32,
-    pub scatter: f32,
-    pub spread: bool,
     /// A failed save also leaves this condition.
     pub save: Option<SaveFx>,
+    /// Cells pushed away from the area's origin (along the aim for lines
+    /// and rects); negative pulls in.
+    pub knockback: Lin,
 }
 
 /// The condition a failed saving throw leaves, and for how long.
@@ -125,57 +208,165 @@ pub struct SaveFx {
     pub secs: Lin,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ZoneFx {
-    pub radius: f32,
-    pub secs: Lin,
-    pub condition: Option<Condition>,
-    pub ac: i32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WallFx {
-    /// Cells.
-    pub length: f32,
-    pub width: f32,
-    pub secs: Lin,
-    pub dice: Dice,
-    pub scale_k: bool,
-    pub kind: DamageType,
-    pub save: Option<SaveFx>,
-    /// Cells.
-    pub knockback: f32,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct HealFx {
     pub dice: Dice,
     pub scale_k: bool,
     pub mult: Lin,
-    pub radius: f32,
-    pub count: Lin,
-    pub every: f32,
+}
+
+/// A buff on allies (or a passive on the caster when `secs` is 0).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BuffFx {
+    /// Seconds; 0 = for as long as the skill is learned (passives).
+    pub secs: Lin,
+    pub ac: Lin,
+    pub to_hit: Lin,
+    pub to_hit_die: u32,
+    /// Per weapon hit: `damage` dice, count × `mult`, plus `damage_flat`.
+    pub damage: Option<Dice>,
+    pub mult: Lin,
+    pub damage_flat: Lin,
+    pub haste: Lin,
+    pub speed: Lin,
+    pub resist: Lin,
+    pub reduce: Lin,
+    /// Percent of melee hits blocked.
+    pub block: Lin,
+    /// Cells.
+    pub light: Lin,
+    /// Fractions of the maximum per second.
+    pub sp_regen: Lin,
+    pub hp_regen: Lin,
+    pub crit: Lin,
+    /// Temporary HP: `temp_hp` dice (count × `mult`, × k when `scale_k`)
+    /// plus `shield` × max HP.
+    pub temp_hp: Option<Dice>,
+    pub scale_k: bool,
+    pub shield: Lin,
+    pub advantage: bool,
+    pub hidden: bool,
+    pub steady: bool,
+    pub mana_shield: bool,
+    pub evil_resist: Lin,
+    pub evil_damage: Lin,
+    pub soul_drain: Lin,
+    /// On until cast again (Energy Coat).
+    pub toggle: bool,
+}
+
+impl BuffFx {
+    /// The modifiers at skill level `slv`.
+    pub fn mods(&self, slv: u8) -> Mods {
+        let n = |l: Lin| l.at(slv);
+        let i = |l: Lin| l.at(slv).round() as i32;
+        Mods {
+            ac: i(self.ac),
+            to_hit: i(self.to_hit),
+            to_hit_die: self.to_hit_die,
+            damage: self.damage.and_then(|d| {
+                let count = (d.count as f32 * self.mult.at(slv)).round() as u32;
+                (count > 0).then_some(Dice { count, ..d })
+            }),
+            damage_flat: i(self.damage_flat),
+            haste: n(self.haste),
+            speed: n(self.speed),
+            resist: n(self.resist),
+            reduce: i(self.reduce),
+            block: i(self.block).clamp(0, 75) as u32,
+            light: n(self.light),
+            sp_regen: n(self.sp_regen) / 100.0,
+            hp_regen: n(self.hp_regen) / 100.0,
+            crit: i(self.crit).max(0) as u32,
+            advantage: self.advantage,
+            hidden: self.hidden,
+            steady: self.steady,
+            mana_shield: self.mana_shield,
+            evil_resist: n(self.evil_resist),
+            evil_damage: i(self.evil_damage),
+            soul_drain: i(self.soul_drain),
+        }
+    }
+
+    pub fn grants_temp_hp(&self) -> bool {
+        self.temp_hp.is_some() || self.shield != Lin::default()
+    }
+}
+
+/// What an effect does to each target it picks.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Payload {
+    /// Monsters: damage (a save for half unless it swings the weapon).
+    Damage(DamageFx),
+    /// Allies.
+    Heal(HealFx),
+    /// Monsters: a save or `condition` (Taunted makes them hunt the
+    /// caster). Without a save the condition is kept while inside a lasting
+    /// area; `mired` adds Mired (swamps).
+    Condition { condition: Condition, save: bool, secs: Lin, mired: bool },
+    /// Monsters: pushed `distance` cells away from the origin (negative
+    /// pulls), no damage.
+    Push(Lin),
+    /// Allies.
+    Buff(BuffFx),
+    /// Allies inside ignore the next `hits` melee hits (shared); a ranged
+    /// ward makes monsters' ranged skills miss instead.
+    Ward { hits: Lin, ranged: bool },
+    /// Monsters cannot stay inside: pushed out every tick (ice walls,
+    /// sanctums).
+    Barrier,
+    /// A downed ally stands up with `hp` × max HP.
+    Revive { hp: Lin },
+    /// Allies inside lose their conditions (Status Recovery).
+    Cure,
+    /// Monster ground inside ends (Ganbantein).
+    Dispel,
+}
+
+impl Payload {
+    /// Lands on monsters (or else on allies).
+    pub fn hostile(&self) -> bool {
+        matches!(self, Payload::Damage(_) | Payload::Condition { .. } | Payload::Push(_) | Payload::Barrier | Payload::Dispel)
+    }
+
+    /// Seconds between the actions of a lasting area of this payload.
+    fn default_pulse(&self) -> f32 {
+        match self {
+            Payload::Damage(_) | Payload::Push(_) => 0.5,
+            Payload::Condition { .. } => 0.25,
+            Payload::Heal(_) | Payload::Buff(_) | Payload::Revive { .. } => 1.0,
+            Payload::Barrier | Payload::Ward { .. } | Payload::Cure | Payload::Dispel => 0.0,
+        }
+    }
+}
+
+/// One cast effect: an area, its timing and its payload.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Act {
+    pub area: AreaFx,
+    pub timing: TimingFx,
+    pub payload: Payload,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
-    Damage(DamageFx),
-    Heal(HealFx),
+    Act(Box<Act>),
+    /// The caster moves (slides keep the facing, blinks skip the ground in
+    /// between).
     Move { mode: MoveMode, distance: Lin },
-    /// Passive: + value % of max SP per second.
-    SpRegen(Lin),
-    /// Save or the condition, no damage (in `radius` of the point).
-    Condition { save: SaveFx, radius: f32 },
-    /// Ground that lasts: what stands inside keeps `condition`, and `ac`
-    /// below zero leaves it Mired (a swamp).
-    Zone(ZoneFx),
-    /// A wall across the aim: every contact is a hit (save for half, its
-    /// condition on a failure) and a push away from the caster.
-    Wall(WallFx),
-    /// Allies inside ignore the next `hits` melee hits (shared).
-    Ward { radius: f32, secs: Lin, hits: Lin },
-    /// Not cast by the server yet (conditions, zones, buffs...).
+    /// Always on while learned.
+    Passive(BuffFx),
+    /// Not cast by the server yet.
     Pending(String),
+}
+
+impl Effect {
+    pub fn act(&self) -> Option<&Act> {
+        match self {
+            Effect::Act(a) => Some(a),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -190,6 +381,9 @@ pub struct SkillDef {
     pub min_level: u32,
     pub passive: bool,
     pub mobile: bool,
+    /// Its ground lasts only while the slot is held and the caster stands
+    /// (Gravitation Field, Battle Chant, Basilica).
+    pub channel: bool,
     pub target: Target,
     /// Cells.
     pub range: f32,
@@ -294,10 +488,46 @@ pub enum SkillBookError {
     Bad(String, String),
 }
 
+/// How a monster picks where its skill lands (COMBAT.md §4.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobTarget {
+    /// Around the monster (novas, splashes).
+    #[serde(rename = "self")]
+    Caster,
+    /// The nearest standing player.
+    Nearest,
+    /// The point covering the most players.
+    Densest,
+    /// An arc toward the nearest player.
+    Front,
+}
+
+/// A monster skill: the same effects as a player's, landing on players.
+#[derive(Clone, Debug)]
+pub struct MonsterSkill {
+    pub id: String,
+    pub name: String,
+    pub target: MobTarget,
+    /// Cells: used when a player is this close.
+    pub range: f32,
+    /// Seconds of telegraph; the monster stands still.
+    pub cast: f32,
+    pub cooldown: f32,
+    /// Percent per check while ready.
+    pub chance: u32,
+    /// Only below this fraction of its HP.
+    pub hp_below: f32,
+    /// A ranged ward over the player stops it.
+    pub ranged: bool,
+    pub effects: Vec<Effect>,
+}
+
 /// Every skill, indexed by position (the order of the file).
 #[derive(Clone, Debug, Default)]
 pub struct SkillBook {
     skills: Vec<SkillDef>,
+    monster: Vec<MonsterSkill>,
 }
 
 impl SkillBook {
@@ -322,7 +552,7 @@ impl SkillBook {
                 let i = index.get(req.as_str()).ok_or_else(|| bad(format!("requires unknown {req}")))?;
                 requires.push((*i, lvl));
             }
-            let effects = s.effects.iter().map(RawEffect::parse).collect::<Result<Vec<_>, String>>().map_err(bad)?;
+            let effects = s.effects.iter().map(|e| RawEffect::parse(e, s.passive)).collect::<Result<Vec<_>, String>>().map_err(bad)?;
             skills.push(SkillDef {
                 id: s.id.clone(),
                 name: s.name.clone(),
@@ -333,6 +563,7 @@ impl SkillBook {
                 min_level: s.min_level,
                 passive: s.passive,
                 mobile: s.mobile,
+                channel: s.channel,
                 target: s.target,
                 range: s.range * CELLS,
                 cast: s.cast,
@@ -341,7 +572,36 @@ impl SkillBook {
                 effects,
             });
         }
-        Ok(Self { skills })
+        let mut monster = Vec::with_capacity(raw.monster_skills.len());
+        for m in &raw.monster_skills {
+            let bad = |why: String| SkillBookError::Bad(m.id.clone(), why);
+            let effects = m.effects.iter().map(|e| RawEffect::parse(e, false)).collect::<Result<Vec<_>, String>>().map_err(bad)?;
+            if effects.is_empty() || effects.iter().any(|e| matches!(e, Effect::Pending(_) | Effect::Passive(_))) {
+                return Err(bad("a monster skill needs castable effects".into()));
+            }
+            monster.push(MonsterSkill {
+                id: m.id.clone(),
+                name: m.name.clone(),
+                target: m.target,
+                range: m.range * CELLS,
+                cast: m.cast.max(0.0),
+                cooldown: m.cooldown.max(0.0),
+                chance: m.chance.clamp(1, 100),
+                hp_below: m.hp_below,
+                ranged: m.ranged,
+                effects,
+            });
+        }
+        Ok(Self { skills, monster })
+    }
+
+    /// Monster skill by id.
+    pub fn find_monster(&self, id: &str) -> Option<u16> {
+        self.monster.iter().position(|m| m.id == id).map(|i| i as u16)
+    }
+
+    pub fn monster(&self, i: u16) -> &MonsterSkill {
+        &self.monster[i as usize]
     }
 
     pub fn len(&self) -> usize {
@@ -449,6 +709,34 @@ impl SkillBook {
 #[derive(Deserialize)]
 struct RawBook {
     skills: Vec<RawSkill>,
+    #[serde(default)]
+    monster_skills: Vec<RawMonsterSkill>,
+}
+
+#[derive(Deserialize)]
+struct RawMonsterSkill {
+    id: String,
+    name: String,
+    target: MobTarget,
+    range: f32,
+    #[serde(default)]
+    cast: f32,
+    cooldown: f32,
+    #[serde(default = "hundred")]
+    chance: u32,
+    #[serde(default = "whole")]
+    hp_below: f32,
+    #[serde(default)]
+    ranged: bool,
+    effects: Vec<serde_json::Value>,
+}
+
+fn hundred() -> u32 {
+    100
+}
+
+fn whole() -> f32 {
+    1.0
 }
 
 #[derive(Deserialize)]
@@ -468,6 +756,8 @@ struct RawSkill {
     passive: bool,
     #[serde(default)]
     mobile: bool,
+    #[serde(default)]
+    channel: bool,
     #[serde(default = "caster")]
     target: Target,
     #[serde(default)]
@@ -500,6 +790,7 @@ fn caster() -> Target {
 struct RawEffect {
     #[serde(rename = "type")]
     kind: String,
+    // Payload.
     #[serde(default)]
     dice: String,
     #[serde(default)]
@@ -510,37 +801,81 @@ struct RawEffect {
     bonus: Option<Lin>,
     #[serde(default)]
     damage: String,
-    count: Option<Lin>,
+    save: Option<RawSave>,
     #[serde(default)]
-    every: f32,
+    condition: String,
+    #[serde(default)]
+    ac: Option<Lin>,
+    knockback: Option<Lin>,
+    distance: Option<Lin>,
+    mode: Option<MoveMode>,
+    value: Option<Lin>,
+    hits: Option<Lin>,
+    #[serde(default)]
+    ranged: bool,
+    hp: Option<Lin>,
+    // Buff numbers.
+    to_hit: Option<Lin>,
+    #[serde(default)]
+    bless: String,
+    damage_flat: Option<Lin>,
+    haste: Option<Lin>,
+    speed: Option<Lin>,
+    resist: Option<Lin>,
+    reduce: Option<Lin>,
+    block: Option<Lin>,
+    light: Option<Lin>,
+    sp_regen: Option<Lin>,
+    hp_regen: Option<Lin>,
+    crit: Option<Lin>,
+    #[serde(default)]
+    temp_hp: String,
+    shield: Option<Lin>,
+    #[serde(default)]
+    advantage: bool,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    steady: bool,
+    #[serde(default)]
+    mana_shield: bool,
+    evil_resist: Option<Lin>,
+    evil_damage: Option<Lin>,
+    soul_drain: Option<Lin>,
+    #[serde(default)]
+    toggle: bool,
+    // Area.
     #[serde(default)]
     shape: Shape,
-    #[serde(default)]
-    radius: f32,
-    #[serde(default)]
-    width: f32,
+    radius: Option<Lin>,
+    length: Option<Lin>,
+    width: Option<Lin>,
     #[serde(default)]
     arc: f32,
+    #[serde(default)]
+    at: String,
+    #[serde(default)]
+    follow: Follow,
+    limit: Option<Lin>,
+    chain: Option<Lin>,
+    #[serde(default)]
+    jump: f32,
     #[serde(default)]
     scatter: f32,
     #[serde(default)]
     spread: bool,
-    mode: Option<MoveMode>,
-    distance: Option<Lin>,
-    value: Option<Lin>,
-    save: Option<RawSave>,
+    // Timing.
+    count: Option<Lin>,
+    #[serde(default)]
+    every: f32,
+    #[serde(default)]
+    projectile: f32,
     secs: Option<Lin>,
+    pulse: Option<f32>,
     #[serde(default)]
-    length: f32,
+    trigger: f32,
     #[serde(default)]
-    knockback: f32,
-    #[serde(default)]
-    condition: String,
-    #[serde(default)]
-    ac: i32,
-    hits: Option<Lin>,
-    #[serde(default)]
-    ranged: bool,
+    fuse: f32,
 }
 
 #[derive(Deserialize)]
@@ -549,18 +884,27 @@ struct RawSave {
     secs: Option<Lin>,
 }
 
+/// Effect types the server casts.
+const CAST: &[&str] =
+    &["damage", "heal", "condition", "push", "buff", "ward", "barrier", "revive", "move", "sp_regen", "cure", "dispel"];
+
+fn cells(l: Option<Lin>) -> Lin {
+    let l = l.unwrap_or_default();
+    Lin(l.0 * CELLS, l.1 * CELLS)
+}
+
 /// Timings stay in seconds; the caller turns them into ticks.
 impl RawEffect {
-    fn parse(v: &serde_json::Value) -> Result<Effect, String> {
+    fn parse(v: &serde_json::Value, passive: bool) -> Result<Effect, String> {
         let kind = v.get("type").and_then(|t| t.as_str()).ok_or("effect without a type")?;
-        if !matches!(kind, "damage" | "heal" | "move" | "sp_regen" | "condition" | "zone" | "wall" | "ward") {
+        if !CAST.contains(&kind) {
             return Ok(Effect::Pending(kind.to_string()));
         }
         let raw: RawEffect = serde_json::from_value(v.clone()).map_err(|e| format!("{kind} effect: {e}"))?;
-        raw.build()
+        raw.build(passive)
     }
 
-    fn build(&self) -> Result<Effect, String> {
+    fn build(&self, passive: bool) -> Result<Effect, String> {
         // A condition the server does not apply yet keeps the skill pending.
         let save = match &self.save {
             None => None,
@@ -576,67 +920,127 @@ impl RawEffect {
                 None => return Ok(Effect::Pending(format!("condition {c}"))),
             },
         };
-        let kind = || match self.damage.as_str() {
-            "" => Ok(DamageType::Physical),
-            d => DamageType::from_id(d).ok_or_else(|| format!("unknown damage type {d}")),
+        let dice_or = |s: &str| (!s.is_empty()).then(|| parse_dice(s)).transpose();
+        let one = Lin(1.0, 0.0);
+        let buff = || -> Result<BuffFx, String> {
+            Ok(BuffFx {
+                secs: self.secs.unwrap_or_default(),
+                ac: self.ac.unwrap_or_default(),
+                to_hit: self.to_hit.unwrap_or_default(),
+                to_hit_die: dice_or(&self.bless)?.map_or(0, |d| d.sides),
+                damage: dice_or(&self.extra)?,
+                mult: self.mult.unwrap_or(one),
+                damage_flat: self.damage_flat.unwrap_or_default(),
+                haste: self.haste.unwrap_or_default(),
+                speed: self.speed.unwrap_or_default(),
+                resist: self.resist.unwrap_or_default(),
+                reduce: self.reduce.unwrap_or_default(),
+                block: self.block.unwrap_or_default(),
+                light: cells(self.light),
+                sp_regen: self.sp_regen.or(self.value).unwrap_or_default(),
+                hp_regen: self.hp_regen.unwrap_or_default(),
+                crit: self.crit.unwrap_or_default(),
+                temp_hp: dice_or(&self.temp_hp)?,
+                scale_k: self.scale == "k",
+                shield: self.shield.unwrap_or_default(),
+                advantage: self.advantage,
+                hidden: self.hidden,
+                steady: self.steady,
+                mana_shield: self.mana_shield,
+                evil_resist: self.evil_resist.unwrap_or_default(),
+                evil_damage: self.evil_damage.unwrap_or_default(),
+                soul_drain: self.soul_drain.unwrap_or_default(),
+                toggle: self.toggle,
+            })
         };
-        let secs = self.secs.unwrap_or(Lin(1.0, 0.0));
-        let mult = self.mult.unwrap_or(Lin(1.0, 0.0));
-        let count = self.count.unwrap_or(Lin(1.0, 0.0));
-        Ok(match self.kind.as_str() {
-            "damage" => Effect::Damage(DamageFx {
+        let payload = match self.kind.as_str() {
+            "move" => {
+                return Ok(Effect::Move { mode: self.mode.ok_or("move without a mode")?, distance: cells(self.distance) });
+            }
+            "sp_regen" | "buff" if passive => return Ok(Effect::Passive(buff()?)),
+            "sp_regen" => return Err("sp_regen is a passive".into()),
+            "damage" => Payload::Damage(DamageFx {
                 dice: match self.dice.as_str() {
                     "weapon" => EffectDice::Weapon,
                     d => EffectDice::Fixed(parse_dice(d)?),
                 },
-                extra: (!self.extra.is_empty()).then(|| parse_dice(&self.extra)).transpose()?,
+                extra: dice_or(&self.extra)?,
                 scale_k: self.scale == "k",
-                mult,
+                mult: self.mult.unwrap_or(one),
                 bonus: self.bonus.unwrap_or_default(),
-                kind: kind()?,
-                count,
-                every: self.every,
+                kind: match self.damage.as_str() {
+                    "" => DamageType::Physical,
+                    d => DamageType::from_id(d).ok_or_else(|| format!("unknown damage type {d}"))?,
+                },
+                save,
+                knockback: cells(self.knockback),
+            }),
+            "heal" => Payload::Heal(HealFx { dice: parse_dice(&self.dice)?, scale_k: self.scale == "k", mult: self.mult.unwrap_or(one) }),
+            "condition" => {
+                let mired = self.ac.is_some_and(|a| a.0 < 0.0);
+                match (save, condition) {
+                    (Some(s), _) => Payload::Condition { condition: s.condition, save: true, secs: s.secs, mired },
+                    (None, Some(c)) => Payload::Condition { condition: c, save: false, secs: Lin::default(), mired },
+                    (None, None) if mired => Payload::Condition { condition: Condition::Mired, save: false, secs: Lin::default(), mired },
+                    (None, None) => return Err("condition without a condition".into()),
+                }
+            }
+            "push" => Payload::Push(cells(self.distance)),
+            "buff" => Payload::Buff(buff()?),
+            // A ranged ward holds for its whole time.
+            "ward" if self.ranged => Payload::Ward { hits: Lin(f32::from(u16::MAX), 0.0), ranged: true },
+            "ward" => Payload::Ward { hits: self.hits.unwrap_or(one), ranged: false },
+            "barrier" => Payload::Barrier,
+            "revive" => Payload::Revive { hp: self.hp.unwrap_or(Lin(0.25, 0.0)) },
+            "cure" => Payload::Cure,
+            "dispel" => Payload::Dispel,
+            other => return Ok(Effect::Pending(other.to_string())),
+        };
+        // A buff's `secs` is how long it lasts on whoever gets it; only a
+        // pulsing buff (an aura) is ground that lasts.
+        let ground = match payload {
+            Payload::Buff(_) => self.pulse.is_some(),
+            _ => true,
+        };
+        let secs = if ground { self.secs.unwrap_or_default() } else { Lin::default() };
+        let at_caster = match self.at.as_str() {
+            "" | "target" => false,
+            "caster" => true,
+            other => return Err(format!("unknown anchor {other}")),
+        };
+        if self.trigger > 0.0 && secs.at(1) <= 0.0 {
+            return Err("a trap needs secs (how long it waits)".into());
+        }
+        Ok(Effect::Act(Box::new(Act {
+            area: AreaFx {
                 shape: self.shape,
-                radius: self.radius * CELLS,
-                width: self.width * CELLS,
-                arc_cos: if self.arc > 0.0 { (self.arc.to_radians() / 2.0).cos() } else { -1.0 },
+                radius: cells(self.radius),
+                length: cells(self.length),
+                width: match self.width {
+                    Some(w) => cells(Some(w)),
+                    None if self.shape == Shape::Line || self.shape == Shape::Rect => Lin(1.0, 0.0),
+                    None => Lin::default(),
+                },
+                arc_cos: if self.arc > 0.0 { (self.arc.min(360.0).to_radians() / 2.0).cos() } else { -1.0 },
+                at_caster,
+                follow: self.follow,
+                limit: self.limit.unwrap_or_default(),
+                chain: self.chain.unwrap_or_default(),
+                jump: if self.jump > 0.0 { self.jump * CELLS } else { 6.0 },
                 scatter: self.scatter * CELLS,
                 spread: self.spread,
-                save,
-            }),
-            "heal" => Effect::Heal(HealFx {
-                dice: parse_dice(&self.dice)?,
-                scale_k: self.scale == "k",
-                mult,
-                radius: self.radius * CELLS,
-                count,
+            },
+            timing: TimingFx {
+                count: self.count.unwrap_or(one),
                 every: self.every,
-            }),
-            "move" => Effect::Move {
-                mode: self.mode.ok_or("move without a mode")?,
-                distance: Lin(self.distance.unwrap_or_default().0 * CELLS, self.distance.unwrap_or_default().1 * CELLS),
-            },
-            "sp_regen" => Effect::SpRegen(self.value.unwrap_or_default()),
-            "condition" => Effect::Condition {
-                save: save.ok_or("condition without a save")?,
-                radius: self.radius * CELLS,
-            },
-            "zone" => Effect::Zone(ZoneFx { radius: self.radius * CELLS, secs, condition, ac: self.ac }),
-            "wall" => Effect::Wall(WallFx {
-                length: self.length * CELLS,
-                width: if self.width > 0.0 { self.width * CELLS } else { 1.0 },
+                speed: self.projectile * CELLS,
                 secs,
-                dice: parse_dice(&self.dice)?,
-                scale_k: self.scale == "k",
-                kind: kind()?,
-                save,
-                knockback: self.knockback * CELLS,
-            }),
-            // Monsters have no ranged attacks yet.
-            "ward" if self.ranged => Effect::Pending("ranged ward".into()),
-            "ward" => Effect::Ward { radius: self.radius * CELLS, secs, hits: self.hits.unwrap_or(Lin(1.0, 0.0)) },
-            other => Effect::Pending(other.to_string()),
-        })
+                pulse: self.pulse.unwrap_or_else(|| payload.default_pulse()),
+                trigger: self.trigger * CELLS,
+                fuse: self.fuse,
+            },
+            payload,
+        })))
     }
 }
 
@@ -689,14 +1093,50 @@ pub(crate) mod tests {
       {"id":"scorch","name":"Scorch","class":"mage","target":"nearest","range":10,
        "effects":[{"type":"damage","dice":"1d4","save":{"condition":"bleeding"}}]},
       {"id":"swamp","name":"Swamp","class":"mage","target":"densest","range":10,
-       "effects":[{"type":"zone","radius":1.5,"secs":4,"condition":"slowed","ac":-2}]},
+       "effects":[{"type":"condition","radius":1.5,"secs":4,"condition":"slowed","ac":-2}]},
       {"id":"flames","name":"Flames","class":"mage","target":"aim","range":6,
-       "effects":[{"type":"wall","length":4,"secs":[2,1],"dice":"1d6","scale":"k","damage":"fire","knockback":1,
-                   "save":{"condition":"burning","secs":3}}]},
+       "effects":[{"type":"damage","shape":"rect","length":0.5,"width":4,"secs":[2,1],"dice":"1d6","scale":"k",
+                   "damage":"fire","knockback":1,"save":{"condition":"burning","secs":3}}]},
       {"id":"shield","name":"Shield","class":"mage","target":"densest_allies","range":8,
        "effects":[{"type":"ward","radius":2,"secs":10,"hits":[1,1]}]},
       {"id":"pneuma","name":"Pneuma","class":"mage","target":"densest_allies","range":8,
-       "effects":[{"type":"ward","radius":2,"secs":10,"ranged":true}]}
+       "effects":[{"type":"ward","radius":2,"secs":10,"ranged":true}]},
+      {"id":"taunt","name":"Taunt","class":"swordsman","target":"self",
+       "effects":[{"type":"condition","radius":4,"save":{"condition":"taunted","secs":5}}]},
+      {"id":"chain","name":"Chain","class":"mage","target":"nearest","range":10,
+       "effects":[{"type":"damage","dice":"1d4","chain":2,"jump":1.5}]},
+      {"id":"arrow","name":"Arrow","class":"archer","target":"aim","range":8,
+       "effects":[{"type":"damage","dice":"1d4","shape":"line","width":0.5,"limit":1,"knockback":1}]},
+      {"id":"snare","name":"Snare","class":"archer","target":"aim","range":6,
+       "effects":[{"type":"condition","radius":1,"trigger":0.5,"secs":10,"save":{"condition":"rooted","secs":3}}]},
+      {"id":"icewall","name":"Ice Wall","class":"mage","target":"aim","range":6,
+       "effects":[{"type":"barrier","shape":"rect","length":0.5,"width":3,"secs":5}]},
+      {"id":"chant","name":"Chant","class":"acolyte","target":"self",
+       "effects":[{"type":"buff","radius":2,"secs":4,"pulse":0.5,"follow":"caster","ac":2}]},
+      {"id":"haste","name":"Haste","class":"acolyte","max_level":5,"target":"allies","range":5,
+       "effects":[{"type":"buff","radius":5,"secs":10,"haste":0.5,"speed":0.25,"ac":[0,1]}]},
+      {"id":"endure","name":"Endure","class":"swordsman","max_level":5,"target":"self",
+       "effects":[{"type":"buff","secs":10,"temp_hp":"1d10","mult":[0,1],"steady":true}]},
+      {"id":"homing","name":"Homing","class":"mage","target":"nearest","range":10,
+       "effects":[{"type":"damage","dice":"1d4","follow":"target","projectile":5}]},
+      {"id":"raise","name":"Raise","class":"acolyte","target":"downed_ally","range":10,
+       "effects":[{"type":"revive","hp":0.5}]},
+      {"id":"mastery","name":"Mastery","class":"swordsman","max_level":10,"passive":true,
+       "effects":[{"type":"buff","to_hit":[0,0.5],"damage_flat":[0,1]}]},
+      {"id":"gravity","name":"Gravity","class":"mage","target":"densest","range":8,"channel":true,
+       "effects":[{"type":"damage","dice":"1d4","radius":2,"secs":4,"pulse":0.5}]},
+      {"id":"pull","name":"Pull","class":"mage","target":"self",
+       "effects":[{"type":"push","radius":4,"distance":-2}]}
+    ],"monster_skills":[
+      {"id":"splash","name":"Splash","target":"self","range":1.5,"cast":0.5,"cooldown":4,
+       "effects":[{"type":"damage","dice":"2d6","damage":"cold","radius":1.5,"at":"caster"}]},
+      {"id":"cloud","name":"Cloud","target":"nearest","range":4,"cast":0.5,"cooldown":10,"ranged":true,
+       "effects":[{"type":"damage","dice":"1d4","damage":"poison","radius":2,"secs":3,"pulse":1},
+                  {"type":"condition","radius":2,"save":{"condition":"poisoned","secs":4}}]},
+      {"id":"cleave","name":"Cleave","target":"front","range":3,"cast":0.5,"cooldown":6,"hp_below":0.5,
+       "effects":[{"type":"damage","dice":"4d10","shape":"arc","radius":3,"arc":120,"at":"caster","knockback":1.5}]},
+      {"id":"hop","name":"Hop","target":"nearest","range":4,"cast":0.2,"cooldown":6,"chance":50,
+       "effects":[{"type":"move","mode":"dash","distance":2.5},{"type":"damage","dice":"1d4","radius":0.8,"at":"caster"}]}
     ]}"#;
 
     pub fn book() -> SkillBook {
@@ -706,13 +1146,14 @@ pub(crate) mod tests {
     #[test]
     fn parses_the_table_in_cells() {
         let b = book();
-        assert_eq!(b.len(), 15);
+        assert_eq!(b.len(), 28);
         let (_, bolt) = b.find("bolt").unwrap();
         assert_eq!(bolt.range, 20.0);
         assert_eq!(bolt.class, Some(Class::Mage));
         assert!(bolt.ready());
-        let Effect::Damage(fx) = &bolt.effects[0] else { panic!() };
-        assert_eq!((fx.radius, fx.kind, fx.count.at(3)), (2.0, DamageType::Fire, 3.0));
+        let act = bolt.effects[0].act().unwrap();
+        let Payload::Damage(fx) = &act.payload else { panic!() };
+        assert_eq!((act.area.radius.at(1), fx.kind, act.timing.count.at(3)), (2.0, DamageType::Fire, 3.0));
         assert!(!b.find("storm").unwrap().1.ready(), "unknown effects are not cast");
         assert_eq!(b.find("slide").unwrap().1.class, None);
         assert_eq!(bolt.sp_cost(3), 3);
@@ -722,25 +1163,53 @@ pub(crate) mod tests {
     #[test]
     fn saves_carry_conditions() {
         let b = book();
-        let Effect::Damage(fx) = &b.find("chill").unwrap().1.effects[0] else { panic!() };
+        let Payload::Damage(fx) = &b.find("chill").unwrap().1.effects[0].act().unwrap().payload else { panic!() };
         let save = fx.save.unwrap();
         assert_eq!((save.condition, save.secs.at(2)), (Condition::Frozen, 2.0));
         let curse = b.find("curse").unwrap().1;
         assert!(curse.ready());
-        assert!(matches!(curse.effects[0], Effect::Condition { save: SaveFx { condition: Condition::Petrified, secs: Lin(3.0, 0.0) }, .. }));
+        let act = curse.effects[0].act().unwrap();
+        assert!(act.area.is_point(1), "no radius: only the picked monster");
+        assert_eq!(act.payload, Payload::Condition { condition: Condition::Petrified, save: true, secs: Lin(3.0, 0.0), mired: false });
         assert!(!b.find("scorch").unwrap().1.ready(), "an unknown condition keeps the skill pending");
     }
 
     #[test]
     fn ground_effects_parse_in_cells() {
         let b = book();
-        let Effect::Zone(z) = b.find("swamp").unwrap().1.effects[0] else { panic!() };
-        assert_eq!((z.radius, z.secs.at(1), z.condition, z.ac), (3.0, 4.0, Some(Condition::Slowed), -2));
-        let Effect::Wall(w) = b.find("flames").unwrap().1.effects[0] else { panic!() };
-        assert_eq!((w.length, w.knockback, w.secs.at(2), w.kind), (8.0, 2.0, 4.0, DamageType::Fire));
-        assert_eq!(w.save.map(|s| s.condition), Some(Condition::Burning));
-        assert!(matches!(b.find("shield").unwrap().1.effects[0], Effect::Ward { radius: 4.0, hits: Lin(1.0, 1.0), .. }));
-        assert!(!b.find("pneuma").unwrap().1.ready(), "ranged wards wait for ranged monsters");
+        let z = b.find("swamp").unwrap().1.effects[0].act().unwrap();
+        assert_eq!((z.area.radius.at(1), z.timing.secs.at(1), z.timing.pulse), (3.0, 4.0, 0.25));
+        assert_eq!(z.payload, Payload::Condition { condition: Condition::Slowed, save: false, secs: Lin::default(), mired: true });
+        let w = b.find("flames").unwrap().1.effects[0].act().unwrap();
+        let Payload::Damage(d) = &w.payload else { panic!() };
+        assert_eq!((w.area.shape, w.area.width.at(1), w.area.length.at(1)), (Shape::Rect, 8.0, 1.0));
+        assert_eq!((d.knockback.at(1), w.timing.secs.at(2), w.timing.pulse, d.kind), (2.0, 4.0, 0.5, DamageType::Fire));
+        assert_eq!(d.save.map(|s| s.condition), Some(Condition::Burning));
+        let ward = b.find("shield").unwrap().1.effects[0].act().unwrap();
+        assert_eq!((ward.area.radius.at(1), &ward.payload), (4.0, &Payload::Ward { hits: Lin(1.0, 1.0), ranged: false }));
+        let pneuma = b.find("pneuma").unwrap().1;
+        assert!(pneuma.ready());
+        assert!(matches!(pneuma.effects[0].act().unwrap().payload, Payload::Ward { ranged: true, .. }));
+    }
+
+    #[test]
+    fn generic_pieces_parse() {
+        let b = book();
+        let arrow = b.find("arrow").unwrap().1.effects[0].act().unwrap();
+        assert_eq!((arrow.area.shape, arrow.area.limit.at(1), arrow.area.width.at(1)), (Shape::Line, 1.0, 1.0));
+        let snare = b.find("snare").unwrap().1.effects[0].act().unwrap();
+        assert_eq!((snare.timing.trigger, snare.timing.secs.at(1)), (1.0, 10.0));
+        let chant = b.find("chant").unwrap().1.effects[0].act().unwrap();
+        assert_eq!((chant.area.follow, chant.timing.lasting(1), chant.timing.pulse), (Follow::Caster, true, 0.5));
+        let haste = b.find("haste").unwrap().1.effects[0].act().unwrap();
+        assert!(!haste.timing.lasting(1), "a buff's secs is its duration on the ally");
+        let Payload::Buff(h) = &haste.payload else { panic!() };
+        assert_eq!((h.mods(3).ac, h.mods(3).haste, h.secs.at(1)), (3, 0.5, 10.0));
+        let homing = b.find("homing").unwrap().1.effects[0].act().unwrap();
+        assert_eq!((homing.area.follow, homing.timing.speed), (Follow::Target, 10.0));
+        assert!(matches!(b.find("mastery").unwrap().1.effects[0], Effect::Passive(BuffFx { .. })));
+        assert_eq!(b.find("pull").unwrap().1.effects[0].act().unwrap().payload, Payload::Push(Lin(-4.0, 0.0)));
+        assert!(SkillBook::from_json(r#"{"skills":[{"id":"t","name":"T","class":"basic","effects":[{"type":"damage","dice":"1d4","trigger":1}]}]}"#).is_err(), "a trap needs secs");
     }
 
     #[test]

@@ -47,3 +47,45 @@ test('a mage lays a Fire Wall and a Quagmire on a mission', async ({ page }, inf
   await page.screenshot({ path: info.outputPath('ground.png') });
   expect(errors).toEqual([]);
 });
+
+test('a swordsman provokes the wave and breaks it with fire', async ({ page }, info) => {
+  const errors = watchErrors(page);
+  await signUp(page, `/?mission=${MISSION}`);
+  await createCharacter(page, 'Swordsman');
+  await enterWorld(page);
+
+  await page.keyboard.press('KeyK');
+  await expect(page.locator('.ge-tree')).toBeVisible();
+  await learn(page, 'Bash', 5);
+  await learn(page, 'Magnum Break', 1);
+  await learn(page, 'Provoke', 5);
+  await learn(page, 'Endure', 1);
+  await slot(page, 'Provoke', 0);
+  await slot(page, 'Magnum Break', 1);
+  await slot(page, 'Endure', 2);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.ge-tree')).toBeHidden();
+
+  await page.getByRole('button', { name: 'Start' }).click();
+  await expect(page.locator('body')).toContainText(/· Stage-\d+ ·/);
+
+  const cast = async (key: string, name: string) => {
+    await expect
+      .poll(
+        async () => {
+          await page.keyboard.press(key);
+          return cooldown(page, name);
+        },
+        { timeout: 60_000, intervals: [500] },
+      )
+      .toBeGreaterThan(0);
+  };
+  // A self buff needs no target; the taunt and the nova wait for monsters.
+  await cast('KeyR', 'Endure');
+  await cast('KeyQ', 'Provoke');
+  await cast('KeyE', 'Magnum Break');
+  await page.waitForTimeout(600);
+  await info.attach('melee', { body: await page.screenshot(), contentType: 'image/png' });
+  await page.screenshot({ path: info.outputPath('melee.png') });
+  expect(errors).toEqual([]);
+});

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:js_interop';
 
 import 'package:game_client/src/api.dart';
+import 'package:game_client/src/classes.dart';
 import 'package:game_client/src/engine.dart';
 import 'package:game_client/src/protocol.dart' show Look;
 import 'package:web/web.dart' as web;
@@ -123,11 +124,18 @@ Future<Map<String, Object?>> _chooseCharacter(Api api, GameView view) {
               'title': ?((c['stats'] as Map<String, Object?>?)?['title']),
               'level': c['level'],
               'location': _places[c['last_location_id']] ?? c['last_location_id'],
-              'look': Look.fromJson(c['look']).toUi(),
+              'look': {
+                ...Look.fromJson(c['look']).toUi(),
+                // The class body at the character's tier.
+                'job': bodyJob('${c['archetype']}', tierOfLevel((c['level'] as num?)?.toInt() ?? 1)),
+              },
             },
         ],
         'maxSlots': maxCharacters,
-        'classes': _classes,
+        // Creation shows each class's tier-1 body.
+        'classes': [
+          for (final c in _classes) {...c, 'job': bodyJob('${c['id']}')},
+        ],
         'selected': ?selected,
         'busy': busy,
         'error': ?error,

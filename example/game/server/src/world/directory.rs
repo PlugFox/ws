@@ -66,6 +66,8 @@ pub enum HubCommand {
     Resync { user_id: u32 },
     /// Restyle at a stylist NPC.
     Restyle { user_id: u32, look: Look },
+    /// Forget every skill, at a skill master NPC.
+    SkillReset { user_id: u32 },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -361,6 +363,7 @@ pub(crate) async fn run_instance(mut hub: HubInstance, mut commands: mpsc::Recei
                     }
                     HubCommand::Resync { user_id } => hub.resync(user_id),
                     HubCommand::Restyle { user_id, look } => hub.restyle(user_id, look, &mut out),
+                    HubCommand::SkillReset { user_id } => hub.skill_reset(user_id, &mut out),
                 }
             }
             _ = interval.tick() => hub.tick(&mut out),

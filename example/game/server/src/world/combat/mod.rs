@@ -5,6 +5,7 @@
 //! clocks; randomness comes in through [`Dice`], seeded per instance so a
 //! stage replays the same rolls in tests.
 
+pub mod buffs;
 pub mod class;
 pub mod conditions;
 pub mod dice;
@@ -14,6 +15,7 @@ pub mod rules;
 pub mod skills;
 pub mod weapon;
 
+pub use buffs::Mods;
 pub use class::{Class, Save};
 pub use conditions::{Condition, Status, CONDITIONS};
 pub use dice::{Dice, Rng};

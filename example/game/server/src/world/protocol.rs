@@ -127,10 +127,14 @@ pub mod kind {
     pub const PROGRESS: u8 = 0x2C;
     pub const SKILLS: u8 = 0x2D;
     pub const CAST: u8 = 0x2E;
+    pub const ZONE_END: u8 = 0x2F;
     pub const STAGE_JOINED: u8 = 0x30;
     pub const LOBBY_STATE: u8 = 0x31;
     pub const LOBBY_LEFT: u8 = 0x32;
     pub const LOBBY_ERROR: u8 = 0x33;
+    pub const STAGE_END: u8 = 0x34;
+    pub const BOSS: u8 = 0x35;
+    pub const BUFFS: u8 = 0x36;
 
     pub const PING: u8 = 0x40;
     pub const HUB_JOIN: u8 = 0x41;
@@ -277,6 +281,8 @@ pub struct PlayerInfo {
     pub y: f32,
     pub facing: u8,
     pub look: Look,
+    /// Character level (the client draws the body of its tier).
+    pub level: u32,
 }
 
 impl PlayerInfo {
@@ -288,6 +294,7 @@ impl PlayerInfo {
         b.put_pos(self.y);
         b.put_u8(self.facing);
         self.look.put(b);
+        b.put_var(self.level.into());
     }
 
     fn read(r: &mut Reader<'_>) -> Option<Self> {
@@ -299,6 +306,7 @@ impl PlayerInfo {
             y: r.pos()?,
             facing: r.u8()?,
             look: Look::read(r)?,
+            level: r.var32()?,
         })
     }
 }
@@ -340,6 +348,9 @@ pub mod hit {
     pub const MISS: u8 = 2;
     pub const KILL: u8 = 4;
     pub const HEAL: u8 = 8;
+    /// Blocked by a ward, a shield or a ranged ward (MISS and HEAL never
+    /// come together otherwise).
+    pub const GUARD: u8 = MISS | HEAL;
 }
 
 /// A number to show over `target` (damage, heal or "Miss").
@@ -388,6 +399,48 @@ fn read_list<T>(r: &mut Reader<'_>, mut read: impl FnMut(&mut Reader<'_>) -> Opt
         return None;
     }
     (0..n).map(|_| read(r)).collect()
+}
+
+/// A skill area on the ground (cells).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Telegraph {
+    /// Lasting ground (ended early by `zone_end`); 0 = a one-off strike.
+    pub id: u32,
+    /// 0 circle (`a` radius), 1 box (`a` along `dir` × `b` across,
+    /// centred on `x, y`), 2 cone (apex `x, y`, `a` radius, `b` degrees).
+    pub shape: u8,
+    /// How it looks ([`look`]).
+    pub look: u8,
+    pub x: f32,
+    pub y: f32,
+    /// Direction in 1/256 turns, counter-clockwise from +x.
+    pub dir: u8,
+    pub a: f32,
+    pub b: f32,
+    /// How long it acts after the wind-up (hits, ground).
+    pub span_ms: u32,
+    /// Entity it moves with (0 = none): the caster's aura, a homing hit.
+    pub follow: u32,
+}
+
+/// [`Telegraph::look`] values.
+pub mod look {
+    pub const DAMAGE: u8 = 0;
+    pub const HEAL: u8 = 1;
+    pub const FIRE: u8 = 2;
+    pub const SWAMP: u8 = 3;
+    pub const WARD: u8 = 4;
+    pub const COLD: u8 = 5;
+    pub const LIGHTNING: u8 = 6;
+    pub const HOLY: u8 = 7;
+    pub const TRAP: u8 = 8;
+    pub const TAUNT: u8 = 9;
+    pub const BARRIER: u8 = 10;
+    pub const BUFF: u8 = 11;
+    pub const EARTH: u8 = 12;
+    pub const CURSE: u8 = 13;
+    pub const POISON: u8 = 14;
+    pub const DARK: u8 = 15;
 }
 
 /// Server → client control messages.
@@ -439,7 +492,9 @@ pub enum ServerMsg {
     PlayerLook { entity_id: u32, look: Look },
     /// Health and spell points of a player on the recipient's map (stages);
     /// sent on join and whenever they change.
-    PlayerVitals { entity_id: u32, hp: u32, max_hp: u32, sp: u32, max_sp: u32, state: u8 },
+    /// `status`: condition bits (as on monsters); `light`: extra light
+    /// radius from buffs, cells.
+    PlayerVitals { entity_id: u32, hp: u32, max_hp: u32, sp: u32, max_sp: u32, state: u8, status: u32, temp_hp: u32, light: u32, level: u32 },
     /// Attacks and numbers of one tick on the recipient's map.
     Combat { swings: Vec<Swing>, hits: Vec<HitEvent> },
     /// The recipient's level and experience into it; `gained` since the
@@ -448,9 +503,20 @@ pub enum ServerMsg {
     /// The recipient's learned skills, unspent points and hotbar (on join
     /// and after every change).
     Skills { level: u32, points: u32, skills: Vec<(String, u8)>, hotbar: Vec<String> },
-    /// A player starts a skill: the telegraph at `x, y` for `cast_ms`, then
-    /// `cooldown_ms`. An empty `skill` cancels the caster's wind-up.
-    Cast { caster: u32, skill: String, x: f32, y: f32, cast_ms: u32, cooldown_ms: u32 },
+    /// A player starts a skill aimed at `x, y`: wind-up `cast_ms`, then
+    /// `cooldown_ms`; `areas` are where its effects will land, as the server
+    /// resolved them. An empty `skill` cancels the caster's wind-up.
+    /// `level`: the skill level (how many hits a storm shows; 1 for monsters).
+    Cast { caster: u32, skill: String, x: f32, y: f32, cast_ms: u32, cooldown_ms: u32, areas: Vec<Telegraph>, level: u8 },
+    /// Ground `id` (a ward, a trap) ended before its time.
+    ZoneEnd { id: u32 },
+    /// The mission is over for the recipient's map: the result screen, and
+    /// everyone leaves through the exit after `leave_ms`.
+    StageEnd { victory: bool, secs: u32, kills: u32, exp: u64, leave_ms: u32 },
+    /// The boss's bar (`hp` 0: it is gone).
+    Boss { entity_id: u32, name: String, hp: u32, max_hp: u32 },
+    /// The recipient's running buffs: skill id and time left.
+    Buffs { buffs: Vec<(String, u32)> },
     /// The recipient joined a stage instance; `map_enter` follows. Sent
     /// instead of `hub_joined` (the hub membership has ended).
     StageJoined {
@@ -557,12 +623,15 @@ impl ServerMsg {
                 b.put_var((*entity_id).into());
                 look.put(&mut b);
             }
-            ServerMsg::PlayerVitals { entity_id, hp, max_hp, sp, max_sp, state } => {
+            ServerMsg::PlayerVitals { entity_id, hp, max_hp, sp, max_sp, state, status, temp_hp, light, level } => {
                 b.put_u8(kind::PLAYER_VITALS);
                 for v in [*entity_id, *hp, *max_hp, *sp, *max_sp] {
                     b.put_var(v.into());
                 }
                 b.put_u8(*state);
+                for v in [*status, *temp_hp, *light, *level] {
+                    b.put_var(v.into());
+                }
             }
             ServerMsg::Combat { swings, hits } => {
                 b.put_u8(kind::COMBAT);
@@ -593,7 +662,7 @@ impl ServerMsg {
                 });
                 put_list(&mut b, hotbar, |b, id| b.put_str(id));
             }
-            ServerMsg::Cast { caster, skill, x, y, cast_ms, cooldown_ms } => {
+            ServerMsg::Cast { caster, skill, x, y, cast_ms, cooldown_ms, areas, level } => {
                 b.put_u8(kind::CAST);
                 b.put_var((*caster).into());
                 b.put_str(skill);
@@ -601,6 +670,45 @@ impl ServerMsg {
                 b.put_pos(*y);
                 b.put_var((*cast_ms).into());
                 b.put_var((*cooldown_ms).into());
+                put_list(&mut b, areas, |b, t| {
+                    b.put_var(t.id.into());
+                    b.put_u8(t.shape);
+                    b.put_u8(t.look);
+                    b.put_pos(t.x);
+                    b.put_pos(t.y);
+                    b.put_u8(t.dir);
+                    b.put_pos(t.a);
+                    b.put_pos(t.b);
+                    b.put_var(t.span_ms.into());
+                    b.put_var(t.follow.into());
+                });
+                b.put_u8(*level);
+            }
+            ServerMsg::StageEnd { victory, secs, kills, exp, leave_ms } => {
+                b.put_u8(kind::STAGE_END);
+                b.put_bool(*victory);
+                b.put_var((*secs).into());
+                b.put_var((*kills).into());
+                b.put_var(*exp);
+                b.put_var((*leave_ms).into());
+            }
+            ServerMsg::Boss { entity_id, name, hp, max_hp } => {
+                b.put_u8(kind::BOSS);
+                b.put_var((*entity_id).into());
+                b.put_str(name);
+                b.put_var((*hp).into());
+                b.put_var((*max_hp).into());
+            }
+            ServerMsg::Buffs { buffs } => {
+                b.put_u8(kind::BUFFS);
+                put_list(&mut b, buffs, |b, (skill, ms)| {
+                    b.put_str(skill);
+                    b.put_var((*ms).into());
+                });
+            }
+            ServerMsg::ZoneEnd { id } => {
+                b.put_u8(kind::ZONE_END);
+                b.put_var((*id).into());
             }
             ServerMsg::StageJoined { stage_id, mission, tick_rate, entity_id, monsters, light_radius } => {
                 b.put_u8(kind::STAGE_JOINED);
@@ -694,6 +802,10 @@ impl ServerMsg {
                 sp: r.var32()?,
                 max_sp: r.var32()?,
                 state: r.u8()?,
+                status: r.var32()?,
+                temp_hp: r.var32()?,
+                light: r.var32()?,
+                level: r.var32()?,
             },
             kind::COMBAT => ServerMsg::Combat {
                 swings: read_list(&mut r, |r| Some(Swing { entity_id: r.var32()?, facing: r.u8()? }))?,
@@ -713,7 +825,32 @@ impl ServerMsg {
                 y: r.pos()?,
                 cast_ms: r.var32()?,
                 cooldown_ms: r.var32()?,
+                areas: read_list(&mut r, |r| {
+                    Some(Telegraph {
+                        id: r.var32()?,
+                        shape: r.u8()?,
+                        look: r.u8()?,
+                        x: r.pos()?,
+                        y: r.pos()?,
+                        dir: r.u8()?,
+                        a: r.pos()?,
+                        b: r.pos()?,
+                        span_ms: r.var32()?,
+                        follow: r.var32()?,
+                    })
+                })?,
+                level: r.u8()?,
             },
+            kind::ZONE_END => ServerMsg::ZoneEnd { id: r.var32()? },
+            kind::STAGE_END => ServerMsg::StageEnd {
+                victory: r.bool()?,
+                secs: r.var32()?,
+                kills: r.var32()?,
+                exp: r.var()?,
+                leave_ms: r.var32()?,
+            },
+            kind::BOSS => ServerMsg::Boss { entity_id: r.var32()?, name: r.str()?, hp: r.var32()?, max_hp: r.var32()? },
+            kind::BUFFS => ServerMsg::Buffs { buffs: read_list(&mut r, |r| Some((r.str()?, r.var32()?)))? },
             kind::STAGE_JOINED => ServerMsg::StageJoined {
                 stage_id: r.var32()?,
                 mission: r.str()?,
@@ -1092,7 +1229,7 @@ mod tests {
     #[test]
     fn server_messages_round_trip() {
         let mission = missions::MISSIONS[0].clone();
-        let player = PlayerInfo { entity_id: 5, name: "Ann".into(), archetype: "novice".into(), x: 10.5, y: 3.25, facing: 2, look: Look { gender: 1, hair: 7, hair_color: 3, body_color: 5 } };
+        let player = PlayerInfo { entity_id: 5, name: "Ann".into(), archetype: "novice".into(), x: 10.5, y: 3.25, facing: 2, look: Look { gender: 1, hair: 7, hair_color: 3, body_color: 5 }, level: 31 };
         let all = vec![
             ServerMsg::Connected { user_id: 9, session_id: Uuid::from_u128(0x1234) },
             ServerMsg::Pong { ts: 1_700_000_000_000 },
@@ -1141,15 +1278,28 @@ mod tests {
             ServerMsg::HubLeft { reason: "evicted".into() },
             ServerMsg::HubError { code: "bad_message".into(), message: "nope".into() },
             ServerMsg::PlayerLook { entity_id: 5, look: Look { gender: 0, hair: 3, hair_color: 9, body_color: 2 } },
-            ServerMsg::PlayerVitals { entity_id: 5, hp: 40, max_hp: 122, sp: 0, max_sp: 131, state: 1 },
+            ServerMsg::PlayerVitals { entity_id: 5, hp: 40, max_hp: 122, sp: 0, max_sp: 131, state: 1, status: 640, temp_hp: 3, light: 4, level: 31 },
+            ServerMsg::StageEnd { victory: true, secs: 421, kills: 1234, exp: 98765, leave_ms: 10000 },
+            ServerMsg::Boss { entity_id: 0x800005, name: "Baphomet".into(), hp: 2000, max_hp: 2790 },
+            ServerMsg::Buffs { buffs: vec![("haste".into(), 4500), ("endure".into(), 900)] },
             ServerMsg::Combat {
                 swings: vec![Swing { entity_id: 5, facing: 3 }],
                 hits: vec![HitEvent { target: MONSTER_ENTITY_BASE + 7, amount: 13, flags: hit::CRITICAL | hit::KILL | 0x30 }],
             },
             ServerMsg::Progress { level: 31, exp: 87_000, exp_to_next: 97_000, gained: 353 },
             ServerMsg::Skills { level: 12, points: 3, skills: vec![("bolt".into(), 4), ("slide".into(), 1)], hotbar: vec!["bolt".into(), String::new()] },
-            ServerMsg::Cast { caster: 300, skill: "bolt".into(), x: 10.5, y: 3.25, cast_ms: 540, cooldown_ms: 1000 },
-            ServerMsg::Cast { caster: 300, skill: String::new(), x: 0.0, y: 0.0, cast_ms: 0, cooldown_ms: 0 },
+            ServerMsg::Cast {
+                caster: 300,
+                skill: "bolt".into(),
+                x: 10.5,
+                y: 3.25,
+                cast_ms: 540,
+                cooldown_ms: 1000,
+                areas: vec![Telegraph { id: 9, shape: 1, look: look::FIRE, x: 10.5, y: 3.25, dir: 64, a: 8.0, b: 1.0, span_ms: 6000, follow: 0 }],
+                level: 3,
+            },
+            ServerMsg::Cast { caster: 300, skill: String::new(), x: 0.0, y: 0.0, cast_ms: 0, cooldown_ms: 0, areas: vec![], level: 0 },
+            ServerMsg::ZoneEnd { id: 9 },
             ServerMsg::StageJoined {
                 stage_id: 4,
                 mission: mission.id.into(),
@@ -1244,6 +1394,7 @@ pub(crate) mod golden {
                         y: 4.0,
                         facing: 6,
                         look: Look { gender: 1, hair: 4, hair_color: 2, body_color: 3 },
+                        level: 31,
                     }],
                 }
                 .encode(),
@@ -1268,7 +1419,7 @@ pub(crate) mod golden {
                 ServerMsg::PlayerLook { entity_id: 300, look: Look { gender: 0, hair: 12, hair_color: 15, body_color: 7 } }
                     .encode(),
             ),
-            ("player_vitals", ServerMsg::PlayerVitals { entity_id: 300, hp: 40, max_hp: 122, sp: 7, max_sp: 131, state: 1 }.encode()),
+            ("player_vitals", ServerMsg::PlayerVitals { entity_id: 300, hp: 40, max_hp: 122, sp: 7, max_sp: 131, state: 1, status: 640, temp_hp: 3, light: 4, level: 31 }.encode()),
             (
                 "combat",
                 ServerMsg::Combat {
@@ -1285,7 +1436,24 @@ pub(crate) mod golden {
                 "skills",
                 ServerMsg::Skills { level: 12, points: 3, skills: vec![("bolt".into(), 4)], hotbar: vec!["bolt".into(), String::new()] }.encode(),
             ),
-            ("cast", ServerMsg::Cast { caster: 300, skill: "bolt".into(), x: 10.5, y: 3.25, cast_ms: 540, cooldown_ms: 1000 }.encode()),
+            (
+                "cast",
+                ServerMsg::Cast {
+                    caster: 300,
+                    skill: "bolt".into(),
+                    x: 10.5,
+                    y: 3.25,
+                    cast_ms: 540,
+                    cooldown_ms: 1000,
+                    areas: vec![Telegraph { id: 9, shape: 1, look: look::FIRE, x: 10.5, y: 3.25, dir: 64, a: 8.0, b: 1.0, span_ms: 6000, follow: 300 }],
+                    level: 3,
+                }
+                .encode(),
+            ),
+            ("zone_end", ServerMsg::ZoneEnd { id: 9 }.encode()),
+            ("stage_end", ServerMsg::StageEnd { victory: true, secs: 421, kills: 1234, exp: 98765, leave_ms: 10000 }.encode()),
+            ("boss", ServerMsg::Boss { entity_id: 0x800005, name: "Baph".into(), hp: 2000, max_hp: 2790 }.encode()),
+            ("buffs", ServerMsg::Buffs { buffs: vec![("haste".into(), 4500)] }.encode()),
         ]
     }
 
@@ -1338,7 +1506,7 @@ pub(crate) mod golden {
         ("stage_joined", "30ac02016d14070206706f72696e6705666162726500002042"),
         (
             "map_enter",
-            "210166054669656c64029003020000003f00000034c200002041000020420000a04106612e6f676702006000900000010902426f066e6f76696365c00000010601040203",
+            "210166054669656c64029003020000003f00000034c200002041000020420000a04106612e6f676702006000900000010902426f066e6f76696365c000000106010402031f",
         ),
         (
             "lobby_state",
@@ -1347,11 +1515,15 @@ pub(crate) mod golden {
         ("lobby_left", "32ff06637573746f6d"),
         ("pong", "1105"),
         ("player_look", "29ac02000c0f07"),
-        ("player_vitals", "2aac02287a07830101"),
+        ("player_vitals", "2aac02287a07830101800503041f"),
         ("combat", "2b01ac02060287808004c80115ac020002"),
         ("progress", "2c1fd8a705e8f505e102"),
         ("skills", "2d0c030104626f6c74040204626f6c7400"),
-        ("cast", "2eac0204626f6c74a002d0009c04e807"),
+        ("cast", "2eac0204626f6c74a002d0009c04e80701090102a002d0004000024000f02eac0203"),
+        ("zone_end", "2f09"),
+        ("stage_end", "3401a503d209cd8306904e"),
+        ("boss", "35858080040442617068d00fe615"),
+        ("buffs", "36010568617374659423"),
         ("hub_join_2", "4103"),
         ("hub_join_any", "4100"),
         ("mission_select", "45026d3101"),

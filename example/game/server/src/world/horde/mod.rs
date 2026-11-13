@@ -5,7 +5,9 @@
 //! * [`storage`]: struct-of-arrays pool, FIFO free queue, generations.
 //! * [`field`]: one lazy, time-sliced multi-source flow field per stage
 //!   (distance to the nearest player) that every monster descends.
-//! * [`grid`]: counting-sort spatial hash for monster-vs-monster push-out.
+//! * [`grid`]: counting-sort spatial hash for monster-vs-monster push-out,
+//!   and a second, coarser one over every live monster that skills and
+//!   attacks query ([`Horde::near_box`]).
 //! * [`director`]: the wave game master: buys each wave with the points
 //!   the mission's difficulty grants and releases it around the players.
 //!
@@ -37,7 +39,7 @@ use field::{FlowField, UNREACHABLE};
 use grid::SpatialGrid;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use crate::world::combat::MonsterBlock;
+use crate::world::combat::{Condition, MonsterBlock};
 use std::sync::Arc;
 use storage::{HordeStorage, FLAG_BOSS, FLAG_FULL, FLAG_LOS};
 /// A player as the horde sees it: position and light radius (cells).
@@ -47,7 +49,51 @@ pub struct PlayerView {
     pub y: f32,
     /// Monsters are visible to this player within this radius.
     pub light: f32,
+    /// Who it is (user id): taunted monsters hunt their taunter.
+    pub id: u32,
 }
+
+/// A flow field toward one taunting player.
+struct TauntField {
+    id: u32,
+    field: FlowField,
+    requested: (i32, i32),
+}
+
+/// Taunt fields kept at most (a party is four).
+const MAX_TAUNT_FIELDS: usize = 4;
+
+/// The query index over every live monster: a counting-sort grid built
+/// once per tick, right after the horde moves (everything moves, so it
+/// cannot be kept up to date incrementally; the build is O(n), ~22 µs for
+/// 3000 monsters). Changes later in the tick need no rebuild:
+/// * a monster moved by a skill widens every query by its drift from where
+///   it was indexed (`slack`); the exact test reads current positions;
+/// * a monster spawned since the build sits in `fresh`, scanned linearly;
+/// * a grid entry whose slot was freed and reused (another generation) is
+///   skipped; dead ones (HP 0) and despawned ones are skipped too.
+///
+/// It is rebuilt early, on the spot, only when the slack outgrows a bucket
+/// or `fresh` outgrows [`MAX_FRESH`]. Queries are plain reads (`&self`).
+struct QueryIndex {
+    grid: SpatialGrid,
+    /// Generation and position of each slot at the build.
+    built_gen: Vec<u8>,
+    built_x: Vec<f32>,
+    built_y: Vec<f32>,
+    fresh: Vec<u16>,
+    slack: f32,
+    /// Inside the horde step: it builds at its end, spawns wait for that.
+    hold: bool,
+    builds: u64,
+}
+
+/// Spawns since the build kept in the linear list.
+const MAX_FRESH: usize = 64;
+
+/// Bucket shift of the query index: 4×4 cells (2 m), about the size of a
+/// small skill area, so a query reads a handful of buckets.
+const INDEX_SHIFT: u32 = 2;
 
 pub use catalog::{CatalogError, MonsterDef};
 
@@ -166,6 +212,11 @@ pub struct Horde {
     store: HordeStorage,
     field: FlowField,
     grid: SpatialGrid,
+    /// Every live monster, for area and nearest queries ([`QueryIndex`]).
+    index: QueryIndex,
+    /// One flow field per taunting player, built while a monster is
+    /// taunted by them (COMBAT.md §4.4: at most one per party member).
+    taunt_fields: Vec<TauntField>,
     director: Director,
     rng: StdRng,
     max_radius: f32,
@@ -190,6 +241,16 @@ impl Horde {
         let walk = &world.map(map).walk;
         let field = FlowField::new(walk);
         let grid = SpatialGrid::new(walk.width(), walk.height(), 1, config.pool);
+        let index = QueryIndex {
+            grid: SpatialGrid::new(walk.width(), walk.height(), INDEX_SHIFT, config.pool),
+            built_gen: vec![0; config.pool],
+            built_x: vec![0.0; config.pool],
+            built_y: vec![0.0; config.pool],
+            fresh: Vec::with_capacity(MAX_FRESH),
+            slack: 0.0,
+            hold: false,
+            builds: 0,
+        };
         let director = Director::new(config.waves.clone());
         let rng = match config.seed {
             Some(s) => StdRng::seed_from_u64(s),
@@ -211,6 +272,8 @@ impl Horde {
             map,
             field,
             grid,
+            index,
+            taunt_fields: Vec::new(),
             director,
             rng,
             max_radius,
@@ -253,6 +316,14 @@ impl Horde {
         &self.field
     }
 
+    /// The mission is over: no more waves, and every monster leaves.
+    pub fn halt(&mut self) {
+        self.config.director_enabled = false;
+        while let Some(&slot) = self.store.alive().last() {
+            self.despawn(slot);
+        }
+    }
+
     pub fn director_elapsed(&self) -> f32 {
         self.director.elapsed()
     }
@@ -287,6 +358,13 @@ impl Horde {
         // Stagger first swings so a surround does not land in one tick.
         self.store.cooldown[s] = slot % 8;
         self.stats.spawned += 1;
+        if !self.index.hold {
+            if self.index.fresh.len() >= MAX_FRESH {
+                self.rebuild_index();
+            } else if !self.index.fresh.contains(&slot) {
+                self.index.fresh.push(slot);
+            }
+        }
         Some(slot)
     }
 
@@ -324,6 +402,114 @@ impl Horde {
         self.store.despawn(slot);
     }
 
+    /// Largest monster body radius of the catalog (cells).
+    pub fn max_radius(&self) -> f32 {
+        self.max_radius
+    }
+
+    /// Moves a monster (knockback, pull); the query index follows.
+    pub fn place(&mut self, slot: u16, x: f32, y: f32) {
+        let s = slot as usize;
+        (self.store.x[s], self.store.y[s]) = (x, y);
+        let idx = &mut self.index;
+        if idx.hold || idx.built_gen[s] != self.store.generation[s] {
+            return; // built at the end of the step, or in `fresh`
+        }
+        let drift = ((x - idx.built_x[s]).powi(2) + (y - idx.built_y[s]).powi(2)).sqrt();
+        idx.slack = idx.slack.max(drift);
+        if idx.slack > idx.grid.bucket_size() {
+            self.rebuild_index();
+        }
+    }
+
+    /// Builds the query index from the current positions (the horde step
+    /// does it; public for benches).
+    pub fn rebuild_index(&mut self) {
+        let s = &self.store;
+        let idx = &mut self.index;
+        let entries = s
+            .alive()
+            .iter()
+            .filter(|&&slot| s.hp[slot as usize] > 0)
+            .map(|&slot| (slot, s.x[slot as usize], s.y[slot as usize]));
+        idx.grid.rebuild(entries);
+        for &slot in s.alive() {
+            let i = slot as usize;
+            (idx.built_gen[i], idx.built_x[i], idx.built_y[i]) = (s.generation[i], s.x[i], s.y[i]);
+        }
+        idx.fresh.clear();
+        idx.slack = 0.0;
+        idx.builds += 1;
+    }
+
+    /// Full index builds so far (tests and stats).
+    pub fn index_builds(&self) -> u64 {
+        self.index.builds
+    }
+
+    /// Live monsters (HP above 0) whose body may reach the box
+    /// `[x0, x1] × [y0, y1]`: the box is grown by the largest body and the
+    /// drift since the build. Candidates only; the caller runs the exact
+    /// shape test. Cost: the buckets the box covers, never the whole horde.
+    pub fn near_box(&self, x0: f32, y0: f32, x1: f32, y1: f32, out: &mut Vec<u16>) {
+        let s = &self.store;
+        let idx = &self.index;
+        let m = self.max_radius + idx.slack;
+        let (bx0, by0) = idx.grid.bucket_of(x0 - m, y0 - m);
+        let (bx1, by1) = idx.grid.bucket_of(x1 + m, y1 + m);
+        let live = |slot: u16| s.is_alive(slot) && s.hp[slot as usize] > 0;
+        for by in by0..=by1 {
+            for bx in bx0..=bx1 {
+                for &slot in idx.grid.bucket(bx, by) {
+                    // Killed, or freed and reused since the build.
+                    if live(slot) && idx.built_gen[slot as usize] == s.generation[slot as usize] {
+                        out.push(slot);
+                    }
+                }
+            }
+        }
+        let mf = self.max_radius;
+        for &slot in &idx.fresh {
+            let i = slot as usize;
+            if live(slot) && s.x[i] >= x0 - mf && s.x[i] <= x1 + mf && s.y[i] >= y0 - mf && s.y[i] <= y1 + mf {
+                out.push(slot);
+            }
+        }
+    }
+
+    /// Nearest live monster to `(x, y)` whose body is within `range`:
+    /// `(slot, gap)`, the gap measured to its body. Searches outward ring by
+    /// ring of index buckets and stops once a ring cannot beat the best.
+    pub fn nearest_to(&self, x: f32, y: f32, range: f32, skip: impl Fn(u16) -> bool) -> Option<(u16, f32)> {
+        let bucket = self.index.grid.bucket_size();
+        let mut best: Option<(u16, f32)> = None;
+        let mut buf = Vec::new();
+        let mut r = 0.0f32;
+        loop {
+            let reach = (r + bucket).min(range);
+            buf.clear();
+            // Whole box each ring: simple, and rings stay small (a few buckets).
+            self.near_box(x - reach, y - reach, x + reach, y + reach, &mut buf);
+            for &s in &buf {
+                if skip(s) {
+                    continue;
+                }
+                let i = s as usize;
+                let body = self.catalog.get(self.store.kind[i]).radius;
+                let (dx, dy) = (self.store.x[i] - x, self.store.y[i] - y);
+                let gap = (dx * dx + dy * dy).sqrt() - body;
+                if gap <= range && best.is_none_or(|(b, g)| gap < g || (gap == g && s < b)) {
+                    best = Some((s, gap));
+                }
+            }
+            // Everything within `reach` of the point has been seen.
+            if best.is_some_and(|(_, g)| g <= reach) || reach >= range {
+                return best;
+            }
+            r = reach * 2.0;
+        }
+    }
+
     /// Default light radius (cells).
     pub fn light_radius(&self) -> f32 {
         self.config.light_radius
@@ -334,7 +520,7 @@ impl Horde {
         let light = self.config.light_radius;
         let mut views = std::mem::take(&mut self.players);
         views.clear();
-        views.extend(players.iter().map(|&(x, y)| PlayerView { x, y, light }));
+        views.extend(players.iter().map(|&(x, y)| PlayerView { x, y, light, id: 0 }));
         self.tick_views(tick, tick_hz, &views);
         self.players = views;
     }
@@ -353,6 +539,7 @@ impl Horde {
             return;
         }
         let dt = 1.0 / tick_hz as f32;
+        self.index.hold = true;
         self.store.tick_conditions();
         self.update_field();
         self.plan_steps(tick, dt);
@@ -364,6 +551,9 @@ impl Horde {
         }
         self.stats.alive = self.store.len();
         self.stats.field_builds = self.field.builds();
+        // Everything moved: one build for the rest of the tick.
+        self.index.hold = false;
+        self.rebuild_index();
     }
 
     fn update_field(&mut self) {
@@ -377,6 +567,55 @@ impl Horde {
             self.requested.clone_from(&self.player_cells);
         }
         self.field.step(self.config.field_budget);
+        self.update_taunt_fields();
+    }
+
+    /// Steps the field of every player some monster is taunted by.
+    fn update_taunt_fields(&mut self) {
+        let mut ids: [u32; MAX_TAUNT_FIELDS] = [0; MAX_TAUNT_FIELDS];
+        let mut n = 0;
+        let s = &self.store;
+        for &slot in s.alive() {
+            let i = slot as usize;
+            if s.status[i] & Condition::Taunted.bit() == 0 {
+                continue;
+            }
+            let id = s.taunter[i];
+            if n < MAX_TAUNT_FIELDS && id != 0 && !ids[..n].contains(&id) {
+                ids[n] = id;
+                n += 1;
+            }
+        }
+        for &id in &ids[..n] {
+            let Some(p) = self.players.iter().find(|p| p.id == id) else { continue };
+            let cell = (p.x.floor() as i32, p.y.floor() as i32);
+            let at = match self.taunt_fields.iter().position(|f| f.id == id) {
+                Some(at) => at,
+                None if self.taunt_fields.len() < MAX_TAUNT_FIELDS => {
+                    let field = FlowField::new(&self.world.map(self.map).walk);
+                    self.taunt_fields.push(TauntField { id, field, requested: (i32::MIN, 0) });
+                    self.taunt_fields.len() - 1
+                }
+                // Reuse the field of a player nobody is taunted by any more.
+                None => match self.taunt_fields.iter().position(|f| !ids[..n].contains(&f.id)) {
+                    Some(at) => {
+                        self.taunt_fields[at].id = id;
+                        self.taunt_fields[at].requested = (i32::MIN, 0);
+                        at
+                    }
+                    None => continue,
+                },
+            };
+            let f = &mut self.taunt_fields[at];
+            if !f.field.is_ready() && f.requested != cell {
+                f.field.build_now(&[cell]);
+                f.requested = cell;
+            } else if f.requested != cell {
+                f.field.request(&[cell]);
+                f.requested = cell;
+            }
+            f.field.step(self.config.field_budget / 2);
+        }
     }
 
     /// Nearest player: `(dx, dy, d²)` from the monster to the player.
@@ -431,7 +670,19 @@ impl Horde {
                 continue; // frozen, stunned, petrified or rooted
             }
             let def = self.catalog.get(s.kind[k]);
-            let (ndx, ndy, nd2) = Self::nearest(&self.players, x, y);
+            // A taunted monster hunts its taunter while they are here.
+            let hunted = if status.has(Condition::Taunted) {
+                self.players.iter().find(|p| p.id != 0 && p.id == s.taunter[k])
+            } else {
+                None
+            };
+            let (ndx, ndy, nd2) = match hunted {
+                Some(p) => {
+                    let (dx, dy) = (p.x - x, p.y - y);
+                    (dx, dy, dx * dx + dy * dy)
+                }
+                None => Self::nearest(&self.players, x, y),
+            };
             let contact = def.radius + c.player_radius;
             if nd2 <= contact * contact {
                 continue; // touching: Phase 6 turns this into attacks
@@ -443,6 +694,12 @@ impl Horde {
             let nd = nd2.sqrt();
             let dir = if full && nd2 < los_r2 && s.flags[k] & FLAG_LOS != 0 {
                 Some((ndx / nd, ndy / nd))
+            } else if let Some(p) = hunted {
+                self.taunt_fields
+                    .iter()
+                    .find(|f| f.id == p.id && f.field.is_ready())
+                    .and_then(|f| f.field.descent(x, y))
+                    .or_else(|| self.field.descent(x, y))
             } else {
                 self.field.descent(x, y)
             };

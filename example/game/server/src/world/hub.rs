@@ -20,8 +20,12 @@ use uuid::Uuid;
 
 pub type MapIdx = u8;
 
+mod aim;
+mod area;
+mod brain;
 mod cast;
 mod fight;
+mod mission;
 pub use fight::{Fighter, Vital};
 
 /// Where a portal leads.
@@ -202,6 +206,7 @@ impl HubPlayer {
             y: self.y,
             facing: self.facing,
             look: self.profile.look,
+            level: self.fighter.as_ref().map_or(self.profile.level, |f| f.level),
         }
     }
 }
@@ -224,6 +229,9 @@ pub enum HubEvent {
     /// Internal: level or experience changed; the socket task updates the
     /// session's character (persisted by the flusher).
     Progress { level: u32, exp: u64 },
+    /// Internal: the player stands at a skill master; the socket task
+    /// resets the loadout.
+    SkillResetApproved,
 }
 
 /// What an instance simulates.
@@ -272,15 +280,27 @@ pub struct HubInstance {
     last_wave: u32,
     /// The skill table (empty without assets).
     skills: Arc<SkillBook>,
-    /// Hits of cast skills still to land.
-    pending: Vec<cast::PendingHit>,
-    /// Swamps, walls and wards on the ground.
-    zones: Vec<cast::Zone>,
+    /// Skill areas in flight and on the ground.
+    lives: Vec<cast::Live>,
+    /// Next telegraph id of lasting ground.
+    next_zone: u32,
+    /// Monster skills: per-slot memory, wind-ups, effects on the ground,
+    /// skill indices per monster kind.
+    minds: Vec<brain::Mind>,
+    mob_casts: Vec<brain::MobCast>,
+    hazards: Vec<brain::Hazard>,
+    kind_skills: Vec<Vec<u16>>,
+    /// Monsters the party killed this stage, the boss bar, the outcome.
+    kills: u32,
+    boss: Option<mission::BossBar>,
+    outcome: mission::Outcome,
 }
 
 pub const MISSION_BOARD: &str = "mission_board";
 /// NPC kind that restyles hair and dyes (`style_set`).
 pub const STYLIST: &str = "stylist";
+/// NPC kind that resets learned skills (`skill_reset`).
+pub const SKILL_MASTER: &str = "skill_master";
 
 fn hub_error(code: &str, message: impl Into<String>) -> ServerMsg {
     ServerMsg::HubError { code: code.into(), message: message.into() }
@@ -320,8 +340,15 @@ impl HubInstance {
             dice: combat::Rng::new(rand::random()),
             last_wave: 0,
             skills: Arc::new(SkillBook::default()),
-            pending: Vec::new(),
-            zones: Vec::new(),
+            lives: Vec::new(),
+            next_zone: 1,
+            minds: Vec::new(),
+            mob_casts: Vec::new(),
+            hazards: Vec::new(),
+            kind_skills: Vec::new(),
+            kills: 0,
+            boss: None,
+            outcome: mission::Outcome::Running,
             horde_players: Vec::new(),
             monster_buf: BytesMut::new(),
         }
@@ -563,6 +590,19 @@ impl HubInstance {
         out.push((user_id, HubEvent::Control(reply)));
     }
 
+    /// A skill reset is allowed only next to a skill master.
+    pub fn skill_reset(&mut self, user_id: u32, out: &mut Outgoing) {
+        let Some(i) = self.find(user_id) else { return };
+        let p = &self.players[i];
+        let near = self.world.map(p.map).manifest.npcs.iter().any(|n| n.kind == SKILL_MASTER && n.in_reach(p.x, p.y));
+        let event = if near {
+            HubEvent::SkillResetApproved
+        } else {
+            HubEvent::Control(hub_error("npc_too_far", "talk to a skill master to reset your skills"))
+        };
+        out.push((user_id, event));
+    }
+
     /// Restyles a player standing at a stylist: hair style and dyes change,
     /// the gender is kept. Everyone on the map (the player too) gets
     /// `player_look`; the socket task persists it via [`HubEvent::LookChanged`].
@@ -619,7 +659,20 @@ impl HubInstance {
                 p.dir = (0.0, 0.0);
             }
             let map = world.map(p.map);
-            let (dx, dy) = p.dir;
+            let (mut dx, mut dy) = p.dir;
+            // Buffs and conditions change the pace; moving ends playing dead.
+            let step = match p.fighter.as_mut() {
+                Some(f) => {
+                    if !f.status.can_move() {
+                        (dx, dy) = (0.0, 0.0);
+                    }
+                    if dx != 0.0 || dy != 0.0 {
+                        f.unhide();
+                    }
+                    step * f.mods.pace() * f.status.speed()
+                }
+                None => step,
+            };
             if dx != 0.0 || dy != 0.0 {
                 // Axis-separated moves let the player slide along walls. The
                 // step (0.3 cells at defaults) is below one cell, so a move
@@ -649,15 +702,14 @@ impl HubInstance {
             self.use_portal(idx, portal, out);
         }
         if let Some(horde) = &mut self.horde {
-            // Everyone has the default light radius until upgrades exist.
             let light = horde.light_radius();
             self.horde_players.clear();
-            // Downed and dead players are no longer hunted.
+            // Downed, dead and hidden players are no longer hunted.
             self.horde_players.extend(
                 self.players
                     .iter()
-                    .filter(|p| p.map == horde.map() && p.fighter.as_ref().is_none_or(Fighter::is_up))
-                    .map(|p| PlayerView { x: p.x, y: p.y, light }),
+                    .filter(|p| p.map == horde.map() && p.fighter.as_ref().is_none_or(Fighter::hunted))
+                    .map(|p| PlayerView { x: p.x, y: p.y, light: light + p.fighter.as_ref().map_or(0.0, |f| f.mods.light), id: p.profile.user_id }),
             );
             horde.tick_views(self.tick, self.config.tick_hz, &self.horde_players);
         }
@@ -750,7 +802,8 @@ impl HubInstance {
                 let frame = match horde {
                     Some(h) => {
                         self.monster_buf.clear();
-                        let viewer = PlayerView { x: p.x, y: p.y, light: h.light_radius() };
+                        let light = h.light_radius() + p.fighter.as_ref().map_or(0.0, |f| f.mods.light);
+                        let viewer = PlayerView { x: p.x, y: p.y, light, id: p.profile.user_id };
                         let view = p.monsters.get_or_insert_with(|| Box::new(MonsterView::new(h.capacity())));
                         h.write_delta(view, &viewer, self.tick, &mut self.monster_buf);
                         body.stage_frame(p.map_epoch, self.tick, p.last_seq, &self.monster_buf)
@@ -1312,9 +1365,22 @@ mod tests {
     /// A roomy field (20 × 9 cells) with a stage of the test skill table;
     /// player 1 joins at `level` with `skills` learned and slotted in order.
     fn skill_stage(archetype: &str, level: u32, skills: &[(&str, u8)]) -> HubInstance {
+        skill_stage_with(archetype, level, skills, &[], &[])
+    }
+
+    /// [`skill_stage`] whose blob (kind 0) and king (kind 1, the boss)
+    /// carry these monster skills.
+    fn skill_stage_with(
+        archetype: &str,
+        level: u32,
+        skills: &[(&str, u8)],
+        blob_skills: &[&str],
+        king_skills: &[&str],
+    ) -> HubInstance {
         use crate::world::combat::skills::tests::book;
-        use crate::world::horde::catalog::{test_def, MonsterCatalog};
+        use crate::world::horde::catalog::{test_def, MonsterCatalog, MonsterDef};
         use crate::world::horde::{Horde, HordeConfig};
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let row = format!("#{}#", ".".repeat(20));
         let wall = "#".repeat(22);
         let mut rows = vec![wall.as_str()];
@@ -1328,8 +1394,13 @@ mod tests {
             vec![portal("to_town", [1, 1, 1], "town", [3, 3])],
         );
         let world = Arc::new(HubWorld::new(vec![field], "field").unwrap());
-        let catalog =
-            Arc::new(MonsterCatalog::new(vec![test_def("blob", 2.0, 1, 0.0, false), test_def("king", 2.0, 50, 0.0, true)]).unwrap());
+        let catalog = Arc::new(
+            MonsterCatalog::new(vec![
+                MonsterDef { skills: ids(blob_skills), ..test_def("blob", 2.0, 1, 0.0, false) },
+                MonsterDef { skills: ids(king_skills), ..test_def("king", 2.0, 50, 0.0, true) },
+            ])
+            .unwrap(),
+        );
         let cfg = HordeConfig { light_radius: 12.0, director_enabled: false, seed: Some(1), ..HordeConfig::default() };
         let horde = Horde::new(Arc::clone(&world), catalog, cfg);
         let mut stage =
@@ -1464,7 +1535,7 @@ mod tests {
         stage.set_loadout(1, loadout, &mut out);
         let f = fighter(&stage, 1);
         assert_eq!(f.hotbar[1], stage.skills.find("bolt").map(|(i, _)| i));
-        assert!((f.sp_regen - 0.01).abs() < 1e-6, "Focus 5 = +1% SP/s");
+        assert!((f.mods.sp_regen - 0.01).abs() < 1e-6, "Focus 5 = +1% SP/s");
         assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Skills { points, .. } if *points == 9 - 7)));
     }
 
@@ -1519,14 +1590,14 @@ mod tests {
         stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
         stage.players[0].fighter.as_mut().unwrap().hp = 1;
         let mut out = Vec::new();
-        for _ in 0..400 {
+        for _ in 0..600 {
             stage.tick(&mut out);
             if stage.position_of(1).is_none() {
                 break;
             }
         }
         assert!(stage.position_of(1).is_none(), "the defeated party leaves the stage");
-        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Notification { .. })));
+        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::StageEnd { victory: false, leave_ms: 5000, .. })));
         assert!(out.iter().any(|(u, e)| *u == 1 && matches!(e, HubEvent::Transfer { target_map, .. } if target_map == "town")));
     }
 
@@ -1643,7 +1714,7 @@ mod tests {
         let mut out = Vec::new();
         stage.act(1, [0, 0], 1);
         stage.tick(&mut out);
-        assert_eq!(stage.zones.len(), 1);
+        assert_eq!(stage.lives.len(), 1);
         let status = |stage: &mut HubInstance| stage.horde_mut().unwrap().store().status_of(slot);
         for _ in 0..10 {
             stage.tick(&mut out);
@@ -1654,7 +1725,7 @@ mod tests {
         for _ in 0..80 {
             stage.tick(&mut out);
         }
-        assert!(stage.zones.is_empty(), "4 s are over");
+        assert!(stage.lives.is_empty(), "4 s are over");
         assert_eq!(status(&mut stage), combat::Status(0), "the swamp's hold runs out");
     }
 
@@ -1668,7 +1739,7 @@ mod tests {
         let mut out = Vec::new();
         stage.act(1, [24, 0], 1); // aim 3 m east, onto the monster
         stage.tick(&mut out);
-        assert_eq!(stage.zones.len(), 1);
+        assert_eq!(stage.lives.len(), 1);
         let x = stage.horde_mut().unwrap().store().x[slot as usize];
         assert!(x >= px + 7.0, "pushed 1 m away from the caster: {x}");
         let fire = DamageType::Fire as u8;
@@ -1709,8 +1780,8 @@ mod tests {
         let mut out = Vec::new();
         stage.act(1, [0, 0], 1);
         stage.tick(&mut out);
-        let held = |stage: &HubInstance| match stage.zones[..] {
-            [cast::Zone { kind: cast::ZoneKind::Ward { hits, .. }, .. }] => hits,
+        let held = |stage: &HubInstance| match &stage.lives[..] {
+            [cast::Live { load: cast::Load::Ward { hits, .. }, .. }] => *hits,
             _ => 0,
         };
         let max = fighter(&stage, 1).max_hp;
@@ -1730,8 +1801,405 @@ mod tests {
             stage.tick(&mut out);
         }
         assert_eq!(fighter(&stage, 1).hp, max, "two blows land on the ward");
-        assert!(stage.zones.is_empty() || matches!(stage.zones[0].kind, cast::ZoneKind::Ward { hits: 0, .. }));
+        assert!(stage.lives.is_empty() || matches!(stage.lives[0].load, cast::Load::Ward { hits: 0, .. }));
         stage.tick(&mut out);
-        assert!(stage.zones.is_empty(), "a spent ward is gone");
+        assert!(stage.lives.is_empty(), "a spent ward is gone");
+    }
+
+    fn tough(stage: &mut HubInstance, x: f32, y: f32) -> u16 {
+        let slot = stage.horde_mut().unwrap().spawn(0, x, y).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        slot
+    }
+
+    fn hit_slots(out: &Outgoing) -> Vec<u16> {
+        use crate::world::protocol::MONSTER_ENTITY_BASE;
+        let mut v: Vec<u16> = monster_hits(out).iter().map(|h| (h.0 - MONSTER_ENTITY_BASE) as u16).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    #[test]
+    fn taunted_monsters_hunt_the_taunter_past_a_nearer_player() {
+        use crate::world::combat::Condition;
+        let mut stage = skill_stage("swordsman", 10, &[("taunt", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let mut out = Vec::new();
+        stage.join(profile(2), Uuid::nil(), None, 0, &mut out);
+        let i2 = stage.find(2).unwrap();
+        stage.players[i2].x = px + 12.0;
+        let slot = tough(&mut stage, px + 3.0, py);
+        stage.horde_mut().unwrap().store_mut().afflict(slot, Condition::Stunned, 5); // its save fails
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        let st = stage.horde_mut().unwrap().store();
+        assert!(st.status_of(slot).has(Condition::Taunted), "a failed Mind save taunts it");
+        assert_eq!(st.taunter[slot as usize], 1);
+        // Put player 2 right next to it: it still walks to player 1.
+        stage.players[i2].x = px + 4.0;
+        stage.players[i2].y = py;
+        let before = (stage.horde_mut().unwrap().store().x[slot as usize] - px).abs();
+        for _ in 0..30 {
+            stage.tick(&mut out);
+        }
+        let after = (stage.horde_mut().unwrap().store().x[slot as usize] - px).abs();
+        assert!(after < before - 1.0, "closes in on its taunter: {before} -> {after}");
+    }
+
+    #[test]
+    fn a_chain_hops_to_the_nearest_new_monster_within_its_jump() {
+        let mut stage = skill_stage("mage", 10, &[("chain", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let a = tough(&mut stage, px + 3.0, py);
+        let b = tough(&mut stage, px + 5.5, py);
+        let c = tough(&mut stage, px + 8.0, py);
+        let far = tough(&mut stage, px + 8.0, py + 3.5);
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        let hit = hit_slots(&out);
+        assert!(hit.contains(&a) && hit.contains(&b) && hit.contains(&c), "{hit:?}");
+        assert!(!hit.contains(&far), "3.5 cells is beyond a 3-cell jump");
+    }
+
+    #[test]
+    fn a_line_with_a_limit_stops_at_the_first_monster_and_knocks_it_back() {
+        let mut stage = skill_stage("archer", 10, &[("arrow", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let near = tough(&mut stage, px + 4.0, py);
+        let back = tough(&mut stage, px + 8.0, py);
+        let mut out = Vec::new();
+        stage.act(1, [32, 0], 1); // aim 4 m east
+        stage.tick(&mut out);
+        assert_eq!(hit_slots(&out), vec![near], "only the first along the line");
+        let x = stage.horde_mut().unwrap().store().x[near as usize];
+        assert!(x >= px + 5.5, "pushed along the shot: {x}");
+        let _ = back;
+    }
+
+    #[test]
+    fn a_trap_waits_for_a_monster_then_fires_once() {
+        use crate::world::combat::Condition;
+        let mut stage = skill_stage("archer", 10, &[("snare", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let mut out = Vec::new();
+        stage.act(1, [16, 0], 1); // 2 m east = 4 cells
+        stage.tick(&mut out);
+        let id = controls_for(&out, 1)
+            .iter()
+            .find_map(|m| match m {
+                ServerMsg::Cast { areas, .. } if !areas.is_empty() => Some(areas[0].id),
+                _ => None,
+            })
+            .unwrap();
+        assert!(id > 0, "a trap is lasting ground with an id");
+        for _ in 0..10 {
+            stage.tick(&mut out);
+        }
+        assert_eq!(stage.lives.len(), 1, "nothing stepped on it");
+        let slot = tough(&mut stage, px + 4.0, py);
+        stage.horde_mut().unwrap().store_mut().afflict(slot, Condition::Stunned, 10);
+        out.clear();
+        for _ in 0..3 {
+            stage.tick(&mut out);
+        }
+        assert!(stage.horde_mut().unwrap().store().status_of(slot).has(Condition::Rooted));
+        assert!(stage.lives.is_empty(), "sprung once");
+        assert!(controls_for(&out, 1).contains(&ServerMsg::ZoneEnd { id }), "clients drop its telegraph");
+    }
+
+    #[test]
+    fn a_barrier_keeps_monsters_out() {
+        let mut stage = skill_stage("mage", 10, &[("icewall", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = tough(&mut stage, px + 6.1, py);
+        stage.horde_mut().unwrap().store_mut().afflict(slot, crate::world::combat::Condition::Rooted, 1000);
+        let mut out = Vec::new();
+        stage.act(1, [24, 0], 1); // 3 m east: the wall across x = px + 6
+        stage.tick(&mut out);
+        let x = stage.horde_mut().unwrap().store().x[slot as usize];
+        assert!(x >= px + 6.6, "ejected out the far side: {x}");
+    }
+
+    #[test]
+    fn an_aura_moves_with_its_caster_and_keeps_its_buff_up() {
+        let mut stage = skill_stage("acolyte", 10, &[("chant", 1)]);
+        let base = fighter(&stage, 1).mods.ac;
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        assert_eq!(fighter(&stage, 1).mods.ac, base + 2);
+        let i = stage.find(1).unwrap();
+        stage.players[i].x += 3.0;
+        for _ in 0..12 {
+            stage.tick(&mut out);
+        }
+        let (x, _) = stage.lives[0].area.centre();
+        assert!((x - stage.players[i].x).abs() < 1e-3, "the aura follows");
+        assert_eq!(fighter(&stage, 1).mods.ac, base + 2, "held while inside");
+        for _ in 0..100 {
+            stage.tick(&mut out);
+        }
+        assert!(stage.lives.is_empty());
+        assert_eq!(fighter(&stage, 1).mods.ac, base, "and gone with it");
+    }
+
+    #[test]
+    fn buffs_quicken_the_party_and_run_out() {
+        let mut stage = skill_stage("acolyte", 10, &[("haste", 2)]);
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        let m = fighter(&stage, 1).mods;
+        assert_eq!((m.ac, m.haste, m.speed), (2, 0.5, 0.25));
+        let (_, x0, _) = stage.position_of(1).unwrap();
+        stage.input(1, 1, 1.0, 0.0);
+        stage.tick(&mut out);
+        let (_, x1, _) = stage.position_of(1).unwrap();
+        let step = HubSimConfig::default().walk_speed / HubSimConfig::default().tick_hz as f32;
+        assert!((x1 - x0 - step * 1.25).abs() < 1e-3, "25% faster: {}", x1 - x0);
+        stage.input(1, 2, 0.0, 0.0);
+        for _ in 0..200 {
+            stage.tick(&mut out);
+        }
+        assert_eq!(fighter(&stage, 1).mods.haste, 0.0, "10 s are over");
+    }
+
+    #[test]
+    fn temporary_hp_soaks_blows_first() {
+        let mut stage = skill_stage("swordsman", 10, &[("endure", 3)]);
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        let f = fighter(&stage, 1);
+        assert!(f.temp_hp >= 3 && f.temp_hp <= 30, "3d10: {}", f.temp_hp);
+        let (hp, temp) = (f.hp, f.temp_hp);
+        let i = stage.find(1).unwrap();
+        let f = stage.players[i].fighter.as_mut().unwrap();
+        f.take(temp + 2, true);
+        assert_eq!((f.temp_hp, f.hp), (0, hp - 2));
+    }
+
+    #[test]
+    fn a_homing_hit_flies_then_lands_on_its_moving_target() {
+        let mut stage = skill_stage("mage", 10, &[("homing", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = tough(&mut stage, px + 10.0, py);
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        assert!(hit_slots(&out).is_empty(), "10 cells at 10 cells/s: still flying");
+        let telegraph = controls_for(&out, 1).iter().find_map(|m| match m {
+            ServerMsg::Cast { areas, .. } => areas.first().copied(),
+            _ => None,
+        });
+        assert_eq!(telegraph.map(|t| t.follow), Some(crate::world::protocol::MONSTER_ENTITY_BASE + slot as u32));
+        stage.horde_mut().unwrap().place(slot, px + 6.0, py + 3.0);
+        for _ in 0..25 {
+            stage.tick(&mut out);
+        }
+        assert_eq!(hit_slots(&out), vec![slot], "it cannot miss");
+    }
+
+    #[test]
+    fn passives_add_up_and_pull_drags_monsters_in() {
+        let stage = skill_stage("swordsman", 10, &[("mastery", 4)]);
+        assert_eq!((fighter(&stage, 1).mods.to_hit, fighter(&stage, 1).mods.damage_flat), (2, 4));
+        let mut stage = skill_stage("mage", 10, &[("pull", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = tough(&mut stage, px + 6.0, py);
+        stage.horde_mut().unwrap().store_mut().afflict(slot, crate::world::combat::Condition::Rooted, 1000);
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        let x = stage.horde_mut().unwrap().store().x[slot as usize];
+        assert!((x - (px + 2.0)).abs() < 0.3, "pulled 4 cells in: {x}");
+    }
+
+    #[test]
+    fn a_downed_ally_is_raised() {
+        let mut stage = skill_stage("acolyte", 10, &[("raise", 1)]);
+        let mut out = Vec::new();
+        stage.join(PlayerProfile { archetype: "mage".into(), level: 10, ..profile(2) }, Uuid::nil(), None, 0, &mut out);
+        let i2 = stage.find(2).unwrap();
+        let f = stage.players[i2].fighter.as_mut().unwrap();
+        f.hp = 0;
+        f.state = fight::Vital::Downed { ticks: 400 };
+        let max = f.max_hp;
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        let f = fighter(&stage, 2);
+        assert!(f.is_up());
+        assert!(f.hp >= max / 2 - 1 && f.hp <= max / 2 + 1);
+    }
+
+    #[test]
+    fn a_nova_waits_for_monsters_but_a_self_buff_does_not() {
+        let mut stage = skill_stage("swordsman", 10, &[("taunt", 1), ("endure", 1)]);
+        let sp = fighter(&stage, 1).sp;
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        assert!(!controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Cast { .. })), "nothing to taunt");
+        assert_eq!(fighter(&stage, 1).sp, sp);
+        stage.act(1, [0, 0], 2);
+        stage.tick(&mut out);
+        assert!(fighter(&stage, 1).temp_hp > 0, "a buff on yourself needs no monster");
+    }
+
+    use crate::world::combat::Mods;
+    use crate::world::protocol::{hit, HitEvent};
+
+    fn hits_on(out: &Outgoing, user: u32, target: u32) -> Vec<HitEvent> {
+        controls_for(out, user)
+            .iter()
+            .flat_map(|m| match m {
+                ServerMsg::Combat { hits, .. } => hits.clone(),
+                _ => Vec::new(),
+            })
+            .filter(|h| h.target == target)
+            .collect()
+    }
+
+    #[test]
+    fn monsters_telegraph_and_land_their_skills_on_players() {
+        use crate::world::protocol::MONSTER_ENTITY_BASE;
+        let mut stage = skill_stage_with("swordsman", 40, &[], &["splash"], &[]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 1.5, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        let mut out = Vec::new();
+        for _ in 0..140 {
+            stage.tick(&mut out);
+        }
+        let cast = controls_for(&out, 1).into_iter().find_map(|m| match m {
+            ServerMsg::Cast { caster, skill, cast_ms, areas, .. } if skill == "splash" => Some((caster, cast_ms, areas)),
+            _ => None,
+        });
+        let (caster, cast_ms, areas) = cast.expect("the monster telegraphs its skill");
+        assert_eq!((caster, cast_ms), (MONSTER_ENTITY_BASE + slot as u32, 500));
+        assert_eq!((areas.len(), areas[0].a), (1, 3.0), "a 1.5 m splash around the monster");
+        let cold = hits_on(&out, 1, 101).iter().filter(|h| h.flags >> 4 == DamageType::Cold as u8).count();
+        assert!(cold >= 1, "the splash lands on the player ({cold} cold hits)");
+    }
+
+    #[test]
+    fn pneuma_turns_ranged_monster_skills_aside() {
+        let mut stage = skill_stage_with("mage", 40, &[("pneuma", 1)], &["cloud"], &[]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 6.0, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        for _ in 0..140 {
+            stage.tick(&mut out);
+        }
+        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Cast { skill, .. } if skill == "cloud")));
+        let hits = hits_on(&out, 1, 101);
+        assert!(hits.iter().any(|h| h.flags == hit::GUARD), "the ward guards against the cloud");
+        assert!(!hits.iter().any(|h| h.flags >> 4 == DamageType::Poison as u8 && h.amount > 0), "no poison gets through");
+        assert!(!fighter(&stage, 1).status.has(combat::Condition::Poisoned));
+    }
+
+    #[test]
+    fn a_stunned_player_neither_moves_nor_casts_and_poison_bites() {
+        use crate::world::combat::Condition;
+        let mut stage = skill_stage("mage", 10, &[("bolt", 3)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        stage.horde_mut().unwrap().spawn(0, px + 6.0, py).unwrap();
+        let f = stage.players[0].fighter.as_mut().unwrap();
+        f.afflict(Condition::Stunned, 20);
+        f.afflict(Condition::Poisoned, 60);
+        let hp = f.hp;
+        let mut out = Vec::new();
+        stage.input(1, 1, 1.0, 0.0);
+        stage.tick(&mut out);
+        assert_eq!(stage.position_of(1).unwrap().1, px, "stunned: no step");
+        stage.input(1, 2, 0.0, 0.0);
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        assert!(fighter(&stage, 1).casting.is_none(), "stunned: no cast");
+        for _ in 0..40 {
+            stage.tick(&mut out);
+        }
+        let f = fighter(&stage, 1);
+        assert!(!f.status.has(Condition::Stunned) && f.status.has(Condition::Poisoned));
+        assert!(f.hp < hp, "poison bites once a second");
+        assert!(
+            controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::PlayerVitals { entity_id: 101, status, .. } if status & Condition::Poisoned.bit() as u32 != 0)),
+            "the condition reaches the party"
+        );
+    }
+
+    #[test]
+    fn killing_the_boss_wins_and_everyone_leaves() {
+        let mut stage = skill_stage("swordsman", 40, &[]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let k = king(&mut stage);
+        let slot = stage.horde_mut().unwrap().spawn(k, px + 9.0, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 1_000_000;
+        let mut out = Vec::new();
+        for _ in 0..25 {
+            stage.tick(&mut out);
+        }
+        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Boss { hp: 1_000_000, .. })), "the boss bar shows up");
+        stage.horde_mut().unwrap().place(slot, px + 1.5, py);
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 1;
+        stage.horde_mut().unwrap().spawn(0, px - 6.0, py).unwrap();
+        out.clear();
+        for _ in 0..30 {
+            stage.tick(&mut out);
+        }
+        let msgs = controls_for(&out, 1);
+        assert!(msgs.iter().any(|m| matches!(m, ServerMsg::Boss { hp: 0, .. })), "the bar goes away");
+        assert!(msgs.iter().any(|m| matches!(m, ServerMsg::StageEnd { victory: true, kills: 1, .. })), "victory");
+        assert_eq!(stage.horde_mut().unwrap().store().len(), 0, "the field empties");
+        assert!(stage.position_of(1).is_some(), "the result screen stays up for a while");
+        for _ in 0..260 {
+            stage.tick(&mut out);
+        }
+        assert!(stage.position_of(1).is_none(), "then everyone leaves");
+    }
+
+    #[test]
+    fn buffs_reach_the_hud_and_energy_coat_spends_sp_first() {
+        let mut stage = skill_stage("swordsman", 10, &[("endure", 1)]);
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        for _ in 0..20 {
+            stage.tick(&mut out);
+        }
+        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Buffs { buffs } if buffs.iter().any(|(id, ms)| id == "endure" && *ms > 0))));
+        let f = stage.players[0].fighter.as_mut().unwrap();
+        f.temp_hp = 0;
+        f.toggle(999, Mods { mana_shield: true, ..Mods::default() });
+        let (hp, sp) = (f.hp, f.sp);
+        f.take(10, false);
+        assert_eq!((f.hp, f.sp), (hp, sp - 5), "1 SP per 2 HP");
+        f.toggle(999, Mods::default());
+        f.take(4, false);
+        assert_eq!(f.hp, hp - 4, "toggled off");
+    }
+
+    #[test]
+    fn a_channel_lasts_while_held_and_ends_when_let_go() {
+        let mut stage = skill_stage("mage", 30, &[("gravity", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 4.0, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        let mut out = Vec::new();
+        for _ in 0..12 {
+            stage.act(1, [0, 0], 1);
+            stage.tick(&mut out);
+        }
+        assert!(fighter(&stage, 1).channel.is_some(), "channelling while held");
+        assert!(!stage.lives.is_empty());
+        out.clear();
+        for _ in 0..8 {
+            stage.tick(&mut out);
+        }
+        assert!(fighter(&stage, 1).channel.is_none() && stage.lives.is_empty(), "let go: the field ends");
+        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::ZoneEnd { .. })));
     }
 }

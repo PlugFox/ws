@@ -43,6 +43,8 @@ pub struct HordeStorage {
     pub burn_k: Vec<u8>,
     /// Failed saves it may still turn into successes (bosses).
     pub legendary: Vec<u8>,
+    /// User id of whoever taunted it (meaningful while Taunted).
+    pub taunter: Vec<u32>,
     /// Dense list of live slots (iteration order).
     alive: Vec<u16>,
     /// Position of a slot in `alive` (`u16::MAX` when free).
@@ -70,6 +72,7 @@ impl HordeStorage {
             status: vec![0; capacity],
             burn_k: vec![0; capacity],
             legendary: vec![0; capacity],
+            taunter: vec![0; capacity],
             alive: Vec::with_capacity(capacity),
             alive_pos: vec![u16::MAX; capacity],
             free: (0..capacity as u16).collect(),
@@ -114,6 +117,7 @@ impl HordeStorage {
         self.status[s] = 0;
         self.burn_k[s] = 0;
         self.legendary[s] = 0;
+        self.taunter[s] = 0;
         self.alive_pos[s] = self.alive.len() as u16;
         self.alive.push(slot);
         Some(slot)

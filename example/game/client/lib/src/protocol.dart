@@ -69,10 +69,14 @@ abstract final class Kind {
   static const progress = 0x2C;
   static const skills = 0x2D;
   static const cast = 0x2E;
+  static const zoneEnd = 0x2F;
   static const stageJoined = 0x30;
   static const lobbyState = 0x31;
   static const lobbyLeft = 0x32;
   static const lobbyError = 0x33;
+  static const stageEnd = 0x34;
+  static const boss = 0x35;
+  static const buffs = 0x36;
 
   static const ping = 0x40;
   static const hubJoin = 0x41;
@@ -401,7 +405,7 @@ final class MapInfo {
 }
 
 final class PlayerInfo {
-  PlayerInfo._(this.entityId, this.name, this.archetype, this.x, this.y, this.facing, this.look);
+  PlayerInfo._(this.entityId, this.name, this.archetype, this.x, this.y, this.facing, this.look, this.level);
   final int entityId;
   final String name;
   final String archetype;
@@ -410,8 +414,11 @@ final class PlayerInfo {
   final int facing;
   final Look look;
 
+  /// Character level (its tier picks the body).
+  final int level;
+
   static PlayerInfo _read(WireReader r) =>
-      PlayerInfo._(r.varint(), r.str(), r.str(), r.pos(), r.pos(), r.u8(), Look._read(r));
+      PlayerInfo._(r.varint(), r.str(), r.str(), r.pos(), r.pos(), r.u8(), Look._read(r), r.varint());
 }
 
 final class MissionInfo {
@@ -475,7 +482,18 @@ sealed class ServerMsg {
       Kind.hubLeft => HubLeft(r.code()),
       Kind.hubError => HubError(r.code(), r.str()),
       Kind.playerLook => PlayerLook(r.varint(), Look._read(r)),
-      Kind.playerVitals => PlayerVitals(r.varint(), r.varint(), r.varint(), r.varint(), r.varint(), r.u8()),
+      Kind.playerVitals => PlayerVitals(
+        r.varint(),
+        r.varint(),
+        r.varint(),
+        r.varint(),
+        r.varint(),
+        r.u8(),
+        r.varint(),
+        r.varint(),
+        r.varint(),
+        r.varint(),
+      ),
       Kind.combat => Combat(
         r.list((r) => Swing._(r.varint(), r.u8())),
         r.list((r) => Hit._(r.varint(), r.varint(), r.u8())),
@@ -487,7 +505,11 @@ sealed class ServerMsg {
         {for (final (id, lvl) in r.list((r) => (r.str(), r.u8()))) id: lvl},
         r.list((r) => r.str()),
       ),
-      Kind.cast => Cast(r.varint(), r.str(), r.pos(), r.pos(), r.varint(), r.varint()),
+      Kind.cast => Cast(r.varint(), r.str(), r.pos(), r.pos(), r.varint(), r.varint(), r.list(Telegraph._read), r.u8()),
+      Kind.zoneEnd => ZoneEnd(r.varint()),
+      Kind.stageEnd => StageEnd(r.boolean(), r.varint(), r.varint(), r.varint(), r.varint()),
+      Kind.boss => Boss(r.varint(), r.str(), r.varint(), r.varint()),
+      Kind.buffs => Buffs([for (final (id, ms) in r.list((r) => (r.str(), r.varint()))) (skill: id, ms: ms)]),
       Kind.stageJoined => StageJoined(r.varint(), r.str(), r.varint(), r.varint(), r.list((r) => r.str()), r.f32()),
       Kind.lobbyState => LobbyState(
         LobbyInfo._(
@@ -600,7 +622,18 @@ final class PlayerLook extends ServerMsg {
 
 /// Health and spell points of a player on the map (stages).
 final class PlayerVitals extends ServerMsg {
-  const PlayerVitals(this.entityId, this.hp, this.maxHp, this.sp, this.maxSp, this.state);
+  const PlayerVitals(
+    this.entityId,
+    this.hp,
+    this.maxHp,
+    this.sp,
+    this.maxSp,
+    this.state, [
+    this.status = 0,
+    this.tempHp = 0,
+    this.light = 0,
+    this.level = 0,
+  ]);
   final int entityId;
   final int hp;
   final int maxHp;
@@ -609,6 +642,14 @@ final class PlayerVitals extends ServerMsg {
 
   /// 0 up, 1 downed (an ally can revive), 2 dead (back at the next wave).
   final int state;
+
+  /// Condition bits ([MobStatus], as on monsters).
+  final int status;
+  final int tempHp;
+
+  /// Extra light radius from buffs, cells.
+  final int light;
+  final int level;
 }
 
 /// Entity id of a monster in combat events (= its engine id).
@@ -634,9 +675,11 @@ final class Hit {
   static const heal = 8;
 
   bool get isCritical => flags & critical != 0;
-  bool get isMiss => flags & miss != 0;
+  /// Blocked by a ward, a shield or a ranged ward (MISS and HEAL together).
+  bool get isGuard => flags & (miss | heal) == (miss | heal);
+  bool get isMiss => flags & miss != 0 && !isGuard;
   bool get isKill => flags & kill != 0;
-  bool get isHeal => flags & heal != 0;
+  bool get isHeal => flags & heal != 0 && !isGuard;
 
   /// Damage type (server `DamageType` order): 0 physical, 1 fire, 2 cold,
   /// 3 lightning, 4 earth, 5 poison, 6 radiant, 7 necrotic, 8 force.
@@ -672,17 +715,86 @@ final class Skills extends ServerMsg {
   final List<String> hotbar;
 }
 
-/// A player starts a skill: telegraph at [x], [y] (cells) for [castMs], then
-/// [cooldownMs]. An empty [skill] cancels the caster's wind-up.
+/// A player starts a skill aimed at [x], [y] (cells): wind-up [castMs], then
+/// [cooldownMs]; [areas] are where its effects land, as the server resolved
+/// them. An empty [skill] cancels the caster's wind-up.
 final class Cast extends ServerMsg {
-  const Cast(this.caster, this.skill, this.x, this.y, this.castMs, this.cooldownMs);
+  const Cast(this.caster, this.skill, this.x, this.y, this.castMs, this.cooldownMs, [this.areas = const [], this.level = 1]);
   final int caster;
   final String skill;
   final double x;
   final double y;
   final int castMs;
   final int cooldownMs;
+  final List<Telegraph> areas;
+
+  /// Skill level (1 for monsters; 0 on a cancel).
+  final int level;
   bool get isCancel => skill.isEmpty;
+}
+
+/// A skill area on the ground (cells).
+final class Telegraph {
+  const Telegraph(this.id, this.shape, this.look, this.x, this.y, this.dir, this.a, this.b, this.spanMs, this.follow);
+
+  static Telegraph _read(WireReader r) =>
+      Telegraph(r.varint(), r.u8(), r.u8(), r.pos(), r.pos(), r.u8(), r.pos(), r.pos(), r.varint(), r.varint());
+
+  /// Lasting ground (ended early by [ZoneEnd]); 0 = a one-off strike.
+  final int id;
+
+  /// 0 circle ([a] radius), 1 box ([a] along [dir] × [b] across, centred on
+  /// [x], [y]), 2 cone (apex [x], [y], [a] radius, [b] degrees).
+  final int shape;
+
+  /// 0 damage, 1 heal, 2 fire, 3 swamp, 4 ward, 5 cold, 6 lightning, 7 holy,
+  /// 8 trap, 9 taunt, 10 barrier, 11 buff, 12 earth, 13 curse.
+  final int look;
+  final double x;
+  final double y;
+
+  /// 1/256 turns, counter-clockwise from +x.
+  final int dir;
+  final double a;
+  final double b;
+  final int spanMs;
+
+  /// Entity it moves with (0 = none).
+  final int follow;
+
+  Map<String, Object> toJson() =>
+      {'id': id, 'shape': shape, 'look': look, 'x': x, 'y': y, 'dir': dir, 'a': a, 'b': b, 'spanMs': spanMs, 'follow': follow};
+}
+
+/// Ground [id] (a ward, a trap) ended before its time.
+final class ZoneEnd extends ServerMsg {
+  const ZoneEnd(this.id);
+  final int id;
+}
+
+/// The mission is over: the result screen; everyone leaves after [leaveMs].
+final class StageEnd extends ServerMsg {
+  const StageEnd(this.victory, this.secs, this.kills, this.exp, this.leaveMs);
+  final bool victory;
+  final int secs;
+  final int kills;
+  final int exp;
+  final int leaveMs;
+}
+
+/// The boss's bar ([hp] 0: gone).
+final class Boss extends ServerMsg {
+  const Boss(this.entityId, this.name, this.hp, this.maxHp);
+  final int entityId;
+  final String name;
+  final int hp;
+  final int maxHp;
+}
+
+/// Own running buffs: skill id and ms left (0 = until toggled off).
+final class Buffs extends ServerMsg {
+  const Buffs(this.buffs);
+  final List<({String skill, int ms})> buffs;
 }
 
 final class StageJoined extends ServerMsg {
@@ -741,6 +853,9 @@ abstract final class MobStatus {
 
   /// −2 AC in a swamp (drawn as [slowed], which comes with it).
   static const mired = 256;
+
+  /// Hunts whoever provoked it.
+  static const taunted = 512;
 
   /// Cannot move or act: the animation holds.
   static const held = frozen | stunned | petrified;

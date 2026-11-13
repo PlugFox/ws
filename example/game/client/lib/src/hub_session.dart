@@ -6,7 +6,10 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:game_client/src/api.dart';
+import 'package:game_client/src/classes.dart';
 import 'package:game_client/src/engine.dart';
+import 'package:game_client/src/input.dart';
+import 'package:game_client/src/input_devices.dart';
 import 'package:game_client/src/interpolation.dart';
 import 'package:game_client/src/prediction.dart';
 import 'package:game_client/src/protocol.dart';
@@ -89,14 +92,7 @@ final class _Mob {
   int status = 0;
 
   /// Engine row flags and animation speed of the conditions.
-  int get statusFlags =>
-      (status & MobStatus.frozen != 0 ? Row.flagFrozen : 0) |
-      (status & MobStatus.petrified != 0 ? Row.flagPetrified : 0) |
-      (status & MobStatus.stunned != 0 ? Row.flagStunned : 0) |
-      (status & MobStatus.slowed != 0 ? Row.flagSlowed : 0) |
-      (status & MobStatus.blinded != 0 ? Row.flagBlinded : 0) |
-      (status & MobStatus.burning != 0 ? Row.flagBurning : 0) |
-      (status & MobStatus.poisoned != 0 ? Row.flagPoisoned : 0);
+  int get statusFlags => statusRowFlags(status);
 
   /// Held monsters stop mid-frame; slowed ones animate at half speed.
   double get animSpeed => status & MobStatus.held != 0
@@ -121,11 +117,26 @@ final class _Mob {
   bool get moving => vx * vx + vy * vy >= 9;
 }
 
+/// Engine row flags of condition bits ([MobStatus]), for monsters and
+/// players alike.
+int statusRowFlags(int status) =>
+    (status & MobStatus.frozen != 0 ? Row.flagFrozen : 0) |
+    (status & MobStatus.petrified != 0 ? Row.flagPetrified : 0) |
+    (status & MobStatus.stunned != 0 ? Row.flagStunned : 0) |
+    (status & MobStatus.slowed != 0 ? Row.flagSlowed : 0) |
+    (status & MobStatus.blinded != 0 ? Row.flagBlinded : 0) |
+    (status & MobStatus.burning != 0 ? Row.flagBurning : 0) |
+    (status & MobStatus.poisoned != 0 ? Row.flagPoisoned : 0) |
+    (status & MobStatus.taunted != 0 ? Row.flagTaunted : 0);
+
 final class _Peer {
   _Peer(this.name, this.archetype, this.look);
   final String name;
   final String archetype;
   Look look;
+
+  /// Class tier (body sprite); 1 until the wire carries other players' tier.
+  int tier = 1;
 }
 
 /// One connected hub session: network, prediction, interpolation and the
@@ -137,9 +148,11 @@ final class HubSession {
     required this.assetsBase,
     required String characterName,
     String archetype = 'novice',
+    int level = 1,
     Look look = const Look(),
   }) : _myName = characterName,
        _myArchetype = archetype,
+       _myLevel = level,
        _myLook = look;
 
   final Api api;
@@ -153,6 +166,9 @@ final class HubSession {
   String _myName;
   String _myArchetype;
   Look _myLook;
+
+  /// Character level at sign-in; `Progress` / `Skills` carry the live one.
+  final int _myLevel;
 
   /// The stylist window is open (NPC id), and a restyle is in flight.
   String? _stylist;
@@ -188,6 +204,11 @@ final class HubSession {
   /// Own state from the vitals: 0 up, 1 downed, 2 dead.
   int get _myState => _vitals[_me]?.state ?? 0;
 
+  /// Light radius of the stage before buffs (cells), and the row flags last
+  /// sent per remote player (conditions).
+  double _baseLight = 0;
+  final _sentFlags = <int, int>{};
+
   /// Stage monsters by pool slot, and the kind table from `stage_joined`.
   final _mobs = <int, _Mob>{};
   var _monsterKinds = const <String>[];
@@ -205,6 +226,14 @@ final class HubSession {
   /// Keys pressed since the last input tick: a tap shorter than a tick
   /// (a slow frame, a quick finger) still casts.
   final _tapped = <String>{};
+
+  /// Gamepad and touch (COMBAT.md §4.2), polled once per tick; auto-cast
+  /// slots (bit i = slot i, persisted with the settings).
+  late final _input = GameInput(view)
+    ..onSettings = _toggleSettings
+    ..onInteract = _interactNearest
+    ..onAutoToggle = _toggleAutoCast;
+  int _autoCast = 0;
   int _stopSends = 0;
 
   /// Own skills (`skills` message) and the last pointer position (aim).
@@ -318,6 +347,18 @@ final class HubSession {
         _renderSkills();
       case final Cast c:
         _onCast(c);
+      case ZoneEnd(:final id):
+        view.endZone(id);
+      case final StageEnd e:
+        _onStageEnd(e);
+      case final Boss b:
+        view.setBoss(
+          b.hp <= 0
+              ? ''
+              : jsonEncode({'id': b.entityId, 'name': b.name, 'hp': b.hp, 'maxHp': b.maxHp}),
+        );
+      case Buffs(:final buffs):
+        view.setBuffs(jsonEncode([for (final b in buffs) {'skill': b.skill, 'ms': b.ms}]));
       case final Progress pr:
         final before = _progress?.level;
         _progress = pr;
@@ -333,6 +374,9 @@ final class HubSession {
         _tickHz = tickRate;
         _clock = ServerClock(tickHz: _tickHz);
         view.setLightRadius(0);
+        _baseLight = 0;
+        view.setBoss('');
+        view.setBuffs('[]');
         _vitals.clear();
         view.setStatus('');
         if (_inStage) {
@@ -347,6 +391,7 @@ final class HubSession {
         _clock = ServerClock(tickHz: _tickHz);
         _monsterKinds = msg.monsters;
         _vitals.clear();
+        _baseLight = msg.lightRadius;
         view.setLightRadius(msg.lightRadius);
         _inStage = true;
         _renderStagePanel();
@@ -458,10 +503,19 @@ final class HubSession {
   // ------------------------------------------------------------ combat
 
   void _onVitals(PlayerVitals v) {
-    final wasUp = (_vitals[v.entityId]?.state ?? 0) == 0;
+    final before = _vitals[v.entityId];
+    final wasUp = (before?.state ?? 0) == 0;
     _vitals[v.entityId] = v;
     _applyHealth(v);
+    if (v.level > 0) _peers[v.entityId]?.tier = tierOfLevel(v.level);
     if (v.entityId == _me) {
+      if (_inStage && (before?.light ?? 0) != v.light) view.setLightRadius(_baseLight + v.light);
+      // Predict what the server does: held or rooted stand, slowed walk at half.
+      _predictor?.pace = v.status & (MobStatus.held | MobStatus.rooted) != 0
+          ? 0
+          : v.status & MobStatus.slowed != 0
+          ? 0.5
+          : 1;
       if (wasUp && v.state == 1) view.toast('You are down! Stand by an ally to be revived.');
       _renderStatus();
     }
@@ -659,7 +713,7 @@ final class HubSession {
       _applyLook(id, p.look);
       return;
     }
-    _peers[id] = _Peer(name, archetype, p.look);
+    _peers[id] = _Peer(name, archetype, p.look)..tier = tierOfLevel(p.level);
     _applyLook(id, p.look);
     final t = _tracks[id] ??= RemoteTrack(id);
     if (t.isEmpty) {
@@ -696,7 +750,7 @@ final class HubSession {
       jsonEncode({
         'title': npc?.name ?? 'Stylist',
         'text': npc?.text ?? 'Pick a new style.',
-        'look': _myLook.toUi(),
+        'look': {..._myLook.toUi(), 'job': bodyJob(_myArchetype, _me == null ? 1 : _tierOf(_me!))},
         'busy': _styling,
         'error': ?error,
       }),
@@ -769,6 +823,7 @@ final class HubSession {
     }
     final missions = msg.missions;
     final isBoard = msg.kind == 'mission_board';
+    final isMaster = msg.kind == 'skill_master';
     final npc = _npcs.where((n) => n.id == msg.npc).firstOrNull;
     _settingsOpen = false;
     final inLobby = _lobby != null;
@@ -785,6 +840,12 @@ final class HubSession {
             ? 'You are already in a party. Leave it to pick another mission.'
             : 'Pick a mission. Parties of up to four.'),
         'options': [
+          if (isMaster)
+            {
+              'id': 'skill_reset',
+              'label': 'Forget every skill',
+              'detail': 'All skill points come back to spend again. Your hotbar is cleared.',
+            },
           if (isBoard && !inLobby)
             for (final m in missions) ...[
               {
@@ -896,6 +957,9 @@ final class HubSession {
         final option = e['option']! as String;
         if (option == 'code') {
           _send(ClientMsg.lobbyJoin('${e['value']}'));
+        } else if (option == 'skill_reset') {
+          _send(ClientMsg.skillReset());
+          view.toast('Your skills are forgotten: the points are yours to spend again (K).');
         } else if (option.startsWith('public:') || option.startsWith('private:')) {
           final i = option.indexOf(':');
           _send(ClientMsg.missionSelect(option.substring(i + 1), public: option.startsWith('public:')));
@@ -925,6 +989,10 @@ final class HubSession {
         _styling = false;
       case 'skill_learn':
         _send(ClientMsg.skillLearn(e['skill']! as String));
+      case 'skill_auto':
+        _toggleAutoCast((e['slot']! as num).toInt());
+      case 'open_settings':
+        _toggleSettings();
       case 'skill_slot':
         _send(ClientMsg.skillSlot((e['slot']! as num).toInt(), e['skill']! as String));
     }
@@ -947,6 +1015,24 @@ final class HubSession {
     );
   }
 
+  /// The mission is over: the result screen until the server moves
+  /// everyone back to town.
+  void _onStageEnd(StageEnd e) {
+    view.setBoss('');
+    final mins = e.secs ~/ 60, secs = (e.secs % 60).toString().padLeft(2, '0');
+    final back = (e.leaveMs / 1000).round();
+    view.showDialog(
+      jsonEncode({
+        'id': 'stage_end',
+        'title': e.victory ? 'Victory!' : 'Defeat',
+        'text': '${e.victory ? 'The island is safe for now.' : 'Your party has fallen (−1% experience).'}\n'
+            'Time $mins:$secs · Monsters slain ${e.kills} · Experience +${e.exp}\n'
+            'Back to town in $back s.',
+        'options': <Object>[],
+      }),
+    );
+  }
+
   void _onCast(Cast c) {
     final own = c.caster == _me;
     view.castSkill(
@@ -957,8 +1043,9 @@ final class HubSession {
         'y': c.y,
         'castMs': c.castMs,
         'cooldownMs': c.cooldownMs,
-        'level': own ? (_skills?.levels[c.skill] ?? 1) : 1,
+        'level': c.level > 0 ? c.level : 1,
         'own': own,
+        'areas': [for (final a in c.areas) a.toJson()],
       }),
     );
   }
@@ -976,11 +1063,26 @@ final class HubSession {
     for (var i = 0; i < 10; i++) {
       if (down('Digit${(i + 1) % 10}')) bits |= 1 << i;
     }
-    return bits;
+    // Gamepad / touch presses, and auto-cast slots every tick (the server
+    // ignores what it cannot honour: cooldown, SP, no target).
+    return bits | _input.state.slots | autoCastSlots(_autoCast, _skills?.hotbar ?? const []);
+  }
+
+  void _toggleAutoCast(int slot) {
+    final skill = _skills?.hotbar.elementAtOrNull(slot) ?? '';
+    if (skill.isEmpty) return;
+    _autoCast ^= 1 << slot;
+    view.setAutoCast(_autoCast);
+    _applySetting('autoCast', _autoCast);
+    view.toast('Auto-cast ${_autoCast & (1 << slot) != 0 ? 'on' : 'off'}: slot ${slot + 1}');
   }
 
   /// Pointer on the ground relative to the player, in 1/8 m (0,0 = none).
   (int, int) _aim() {
+    // Right stick / touch drag; a gamepad or touch press without one is auto.
+    final input = _input.state;
+    if (input.hasAim) return (input.aimX, input.aimY);
+    if (input.slots != 0 || _input.touchOn) return (0, 0);
     final ptr = _pointer, p = _predictor;
     if (ptr == null || p == null) return (0, 0);
     final g = view.pickGround(ptr.$1, ptr.$2);
@@ -1005,6 +1107,10 @@ final class HubSession {
     view.configure(jsonEncode(_settings));
     _frameCap = (_settings['frameCap'] as num?)?.toInt() ?? 0;
     _clock.bias = ((_settings['interpBiasMs'] as num?) ?? 0) / 1000;
+    _autoCast = (_settings['autoCast'] as num?)?.toInt() ?? 0;
+    view
+      ..setAutoCast(_autoCast)
+      ..setTouchControls((_settings['touchControls'] as num?)?.toInt() ?? -1);
   }
 
   void _applySetting(String id, Object? value) {
@@ -1014,6 +1120,8 @@ final class HubSession {
         _frameCap = (value! as num).toInt();
       case 'interpBiasMs':
         _clock.bias = (value! as num) / 1000;
+      case 'touchControls':
+        view.setTouchControls((value! as num).toInt());
       default:
         view.configure(jsonEncode({id: value}));
     }
@@ -1087,6 +1195,17 @@ final class HubSession {
           {'id': 'cutout', 'label': 'See-through buildings', 'type': 'toggle', 'value': e['cutout']},
           range('cutoutRadius', 'See-through radius, m', 0.5, 4, 0.1, e['cutoutRadius']),
           {'id': 'fog', 'label': 'Animated fog beyond the light', 'type': 'toggle', 'value': e['fog']},
+          {
+            'id': 'touchControls',
+            'label': 'Touch controls',
+            'type': 'select',
+            'value': (_settings['touchControls'] as num?)?.toInt() ?? -1,
+            'options': [
+              {'value': -1, 'label': 'Auto'},
+              {'value': 1, 'label': 'On'},
+              {'value': 0, 'label': 'Off'},
+            ],
+          },
         ],
       }),
     );
@@ -1100,11 +1219,16 @@ final class HubSession {
     if (_keys.contains('KeyS') || _keys.contains('ArrowDown')) sy -= 1;
     if (_keys.contains('KeyD') || _keys.contains('ArrowRight')) sx += 1;
     if (_keys.contains('KeyA') || _keys.contains('ArrowLeft')) sx -= 1;
-    if (sx == 0 && sy == 0) return (0, 0);
+    // Analog sticks (gamepad, touch joystick) when no key is down; their
+    // length is the speed. RT holds position.
+    if (sx == 0 && sy == 0) (sx, sy) = (_input.state.moveX, _input.state.moveY);
+    if (sx == 0 && sy == 0 || _input.state.hold) return (0, 0);
     if (view.dialogOpen()) return (0, 0);
     final len = math.sqrt(sx * sx + sy * sy);
-    sx /= len;
-    sy /= len;
+    if (len > 1) {
+      sx /= len;
+      sy /= len;
+    }
     final yaw = view.cameraYaw();
     final c = math.cos(yaw), s = math.sin(yaw);
     // Yaw is clockwise from north: rotate the screen vector clockwise.
@@ -1114,6 +1238,7 @@ final class HubSession {
   // ---------------------------------------------------------------- loop
 
   void _tick() {
+    _input.poll(hotbar: _skills?.hotbar ?? const [], inStage: _inStage);
     final p = _predictor;
     if (p == null || _loading) {
       _tapped.clear();
@@ -1171,9 +1296,9 @@ final class HubSession {
       y1: my,
       t1: 0,
       facing: !p.moving && now < (_attackUntil[me] ?? 0) ? _attackFacing[me]! : p.facing,
-      sprite: _spriteFor(me, _myArchetype, _myLook),
+      sprite: _spriteFor(me, _myArchetype, _myLook, tier: _tierOf(me)),
       action: _charAction(me, p.moving, now),
-      flags: Row.flagFocus | Row.flagHigh,
+      flags: Row.flagFocus | Row.flagHigh | statusRowFlags(_vitals[me]?.status ?? 0),
     );
 
     // Remote players: a row only when the bracketing snapshot pair, facing
@@ -1189,9 +1314,10 @@ final class HubSession {
       t.segment(rt);
       final action = _charAction(t.id, t.moving, now);
       final peer = _peers[t.id];
-      final sprite = _spriteFor(t.id, peer?.archetype ?? 'novice', peer?.look);
+      final sprite = _spriteFor(t.id, peer?.archetype ?? 'novice', peer?.look, tier: _tierOf(t.id));
       final still = t.x0 == t.x1 && t.y0 == t.y1;
-      if (t.sentFacing == t.facing && t.sentAction == action && t.sentSprite == sprite) {
+      final flags = Row.flagHigh | statusRowFlags(_vitals[t.id]?.status ?? 0);
+      if (t.sentFacing == t.facing && t.sentAction == action && t.sentSprite == sprite && _sentFlags[t.id] == flags) {
         if (still ? (t.sentX == t.x1 && t.sentY == t.y1) : (t.sentTick0 == t.tick0 && t.sentTick1 == t.tick1)) {
           continue;
         }
@@ -1207,8 +1333,9 @@ final class HubSession {
         facing: t.facing,
         sprite: sprite,
         action: action,
-        flags: Row.flagHigh,
+        flags: flags,
       );
+      _sentFlags[t.id] = flags;
       t
         ..sentTick0 = t.tick0
         ..sentTick1 = t.tick1
@@ -1305,12 +1432,19 @@ final class HubSession {
 
   final _spriteCache = <String, int>{};
 
-  /// Sprite for a character: the dyeable body of its gender (hair and dyes
-  /// come from `setLook`); without the customization pack,
+  /// Class tier of a character's body: the local player's from its level,
+  /// other players' from [_Peer.tier] (1 until the wire carries it).
+  int _tierOf(int id) =>
+      id == _me ? tierOfLevel(_progress?.level ?? _skills?.level ?? _myLevel) : (_peers[id]?.tier ?? 1);
+
+  /// Sprite for a character: the dyeable body of its class at [tier] and
+  /// its gender (hair and dyes come from `setLook`; the clothes dye rows
+  /// follow the body); without the customization pack,
   /// `<archetype>_m|_f` when the atlas has it, else the novice placeholder.
-  int _spriteFor(int id, String archetype, Look? look) {
+  int _spriteFor(int id, String archetype, Look? look, {int tier = 1}) {
     final gender = look?.gender ?? (id.isEven ? 0 : 1);
-    final body = _spriteCache['$_mapId:body:$gender'] ??= view.bodySpriteIndex(gender);
+    final job = bodyJob(archetype, tier);
+    final body = _spriteCache['$_mapId:body:$job:$gender'] ??= view.bodySpriteIndex(gender, job);
     if (body >= 0) return body;
     final g = gender == 0 ? 'm' : 'f';
     final key = '$_mapId:$archetype:$g';

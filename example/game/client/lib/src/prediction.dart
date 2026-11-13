@@ -15,7 +15,8 @@ final class MoveRules {
 
   double get step => walkSpeed / tickHz;
 
-  (double, double) apply(WalkGrid grid, double x, double y, double dx, double dy) {
+  /// One step; [pace] scales it (slowed: 0.5, held: 0).
+  (double, double) apply(WalkGrid grid, double x, double y, double dx, double dy, [double pace = 1]) {
     final lenSq = dx * dx + dy * dy;
     if (lenSq == 0) return (x, y);
     if (lenSq > 1) {
@@ -23,19 +24,21 @@ final class MoveRules {
       dx /= len;
       dy /= len;
     }
-    final nx = x + dx * step;
+    final d = step * pace;
+    final nx = x + dx * d;
     if (grid.isWalkable(nx, y)) x = nx;
-    final ny = y + dy * step;
+    final ny = y + dy * d;
     if (grid.isWalkable(x, ny)) y = ny;
     return (x, y);
   }
 }
 
 final class _Pending {
-  _Pending(this.seq, this.dx, this.dy);
+  _Pending(this.seq, this.dx, this.dy, this.pace);
   final int seq;
   final double dx;
   final double dy;
+  final double pace;
 }
 
 /// Client-side prediction of the local player with server reconciliation.
@@ -57,6 +60,9 @@ final class LocalPredictor {
   double prevY = 0;
   int facing = 4;
   bool moving = false;
+
+  /// Step scale the server applies now (conditions): 0 = cannot move.
+  double pace = 1;
 
   /// Visual correction still to be blended out.
   double errX = 0;
@@ -85,12 +91,12 @@ final class LocalPredictor {
     prevX = x;
     prevY = y;
     final seq = ++_seq;
-    _pending.add(_Pending(seq, dx, dy));
+    _pending.add(_Pending(seq, dx, dy, pace));
     // Bound memory if the server stops acknowledging.
     while (_pending.length > 64) {
       _pending.removeFirst();
     }
-    final (nx, ny) = rules.apply(grid, x, y, dx, dy);
+    final (nx, ny) = rules.apply(grid, x, y, dx, dy, pace);
     x = nx;
     y = ny;
     moving = dx != 0 || dy != 0;
@@ -112,7 +118,7 @@ final class LocalPredictor {
     }
     var rx = serverX, ry = serverY;
     for (final p in _pending) {
-      (rx, ry) = rules.apply(grid, rx, ry, p.dx, p.dy);
+      (rx, ry) = rules.apply(grid, rx, ry, p.dx, p.dy, p.pace);
     }
     final ex = x - rx, ey = y - ry;
     if (ex * ex + ey * ey > snapDistance * snapDistance) {

@@ -102,6 +102,8 @@ async fn start_with(stages: Vec<HubWorld>) -> (SocketAddr, AppState) {
         xp: 5,
         boss: false,
         pack: (6, 12),
+        skills: Vec::new(),
+        evil: false,
     };
     let monsters = MonsterCatalog::new(vec![poring]).unwrap();
     let (app, state) =

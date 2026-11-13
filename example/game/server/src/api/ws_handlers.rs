@@ -376,6 +376,7 @@ impl Conn {
                 }
                 Vec::new()
             }
+            Some(HubEvent::SkillResetApproved) => self.change_loadout(SkillChange::Reset).await,
             Some(HubEvent::Progress { level, exp }) => {
                 if let Some(ch) = self.session.character.write().await.as_mut() {
                     ch.set_progress(level, exp);
@@ -475,7 +476,9 @@ impl Conn {
                 if matches!(self.link, Some(Link { place: Place::Stage { .. }, .. })) {
                     return vec![hub_error("not_in_hub", "skills are reset in town")];
                 }
-                self.change_loadout(SkillChange::Reset).await
+                // The hub checks that a skill master is near, then hands
+                // it back as `SkillResetApproved`.
+                self.forward(HubCommand::SkillReset { user_id })
             }
             ClientMsg::Resync => {
                 if let Some(link) = &self.link {

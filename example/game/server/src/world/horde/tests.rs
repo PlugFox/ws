@@ -246,7 +246,7 @@ fn deltas_keep_the_client_within_the_error_bound() {
     for t in 0..400u32 {
         // The player circles, so the crowd keeps turning.
         let a = t as f32 * 0.02;
-        let p = PlayerView { x: 60.5 + a.cos() * 15.0, y: 60.5 + a.sin() * 15.0, light: 20.0 };
+        let p = PlayerView { x: 60.5 + a.cos() * 15.0, y: 60.5 + a.sin() * 15.0, light: 20.0, id: 0 };
         h.tick_views(t, 20, &[p]);
         let (stats, delta) = v.frame(&h, p, t);
         assert_eq!(delta.baseline, if t == 0 { 0 } else { 1 });
@@ -277,7 +277,7 @@ fn a_settled_crowd_costs_almost_nothing() {
     for i in 0..40 {
         h.spawn(0, 20.5 + (i % 8) as f32, 20.5 + (i / 8) as f32).unwrap();
     }
-    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0 };
+    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0, id: 0 };
     let mut bytes = Vec::new();
     for t in 0..600u32 {
         h.tick_views(t, 20, &[p]);
@@ -299,7 +299,7 @@ fn the_budget_spreads_a_burst_and_nearest_monsters_come_first() {
     for i in 0..300 {
         h.spawn(0, 25.5 + (i % 20) as f32 * 2.5, 25.5 + (i / 20) as f32 * 2.5).unwrap();
     }
-    let p = PlayerView { x: 50.5, y: 50.5, light: 30.0 };
+    let p = PlayerView { x: 50.5, y: 50.5, light: 30.0, id: 0 };
     h.tick_views(0, 20, &[p]);
     let (s0, d0) = v.frame(&h, p, 0);
     assert!(s0.bytes <= 200 && s0.deferred > 0, "{s0:?}");
@@ -329,7 +329,7 @@ fn a_lost_frame_resyncs_through_a_keyframe() {
     for i in 0..10 {
         h.spawn(0, 22.5 + i as f32, 25.5).unwrap();
     }
-    let p = PlayerView { x: 30.5, y: 40.5, light: 20.0 };
+    let p = PlayerView { x: 30.5, y: 40.5, light: 20.0, id: 0 };
     for t in 0..5 {
         h.tick_views(t, 20, &[p]);
         v.frame(&h, p, t);
@@ -358,7 +358,7 @@ fn a_reused_slot_is_a_new_monster_to_the_client() {
     cfg.pool = 2;
     let mut h = Horde::new(w, catalog(), cfg);
     let mut v = Viewer::new(&h);
-    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0 };
+    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0, id: 0 };
     let a = h.spawn(0, 25.5, 30.5).unwrap();
     h.tick_views(0, 20, &[p]);
     v.frame(&h, p, 0);
@@ -382,7 +382,7 @@ fn removed_and_dead_monsters_leave_the_view() {
     let mut v = Viewer::new(&h);
     let a = h.spawn(0, 15.5, 30.5).unwrap();
     h.spawn(0, 18.5, 30.5).unwrap();
-    let mut p = PlayerView { x: 10.5, y: 30.5, light: 10.0 };
+    let mut p = PlayerView { x: 10.5, y: 30.5, light: 10.0, id: 0 };
     h.tick_views(0, 20, &[p]);
     v.frame(&h, p, 0);
     assert_eq!(v.mirror.monsters.len(), 2);
@@ -443,7 +443,7 @@ fn status_changes_reach_the_client_even_standing_still() {
     let w = world(60, 60, None);
     let mut h = Horde::new(w, catalog(), config(20.0));
     let mut v = Viewer::new(&h);
-    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0 };
+    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0, id: 0 };
     let a = h.spawn(0, 25.5, 30.5).unwrap();
     let b = h.spawn(0, 35.5, 30.5).unwrap();
     h.store_mut().afflict(b, Condition::Stunned, 50);
@@ -477,4 +477,169 @@ fn status_changes_reach_the_client_even_standing_still() {
     h.tick_views(4, 20, &[p]);
     v.frame(&h, p, 4);
     assert_eq!(v.mirror.monsters[&a].status, Condition::Poisoned.bit() | Condition::Mired.bit());
+}
+
+#[test]
+fn the_query_index_agrees_with_a_full_scan() {
+    let w = world(120, 120, None);
+    let mut h = Horde::new(Arc::clone(&w), catalog(), config(30.0));
+    let mut rng = StdRng::seed_from_u64(11);
+    for _ in 0..1500 {
+        let (x, y) = (rng.gen_range(1.5..118.5f32), rng.gen_range(1.5..118.5f32));
+        h.spawn(rng.gen_range(0..2), x, y);
+    }
+    // Some die (HP 0 before the despawn), some move: the index follows.
+    let alive: Vec<u16> = h.store().alive().to_vec();
+    for &s in alive.iter().step_by(7) {
+        h.store_mut().hp[s as usize] = 0;
+    }
+    h.tick(1, 20, &[(60.0, 60.0)]);
+    for _ in 0..200 {
+        let (x, y, r) = (rng.gen_range(0.0..120.0f32), rng.gen_range(0.0..120.0f32), rng.gen_range(0.5..12.0f32));
+        let s = h.store();
+        let body = |i: usize| h.catalog().get(s.kind[i]).radius;
+        // Box candidates cover every body that reaches the box.
+        let mut got = Vec::new();
+        h.near_box(x - r, y - r, x + r, y + r, &mut got);
+        for &m in s.alive() {
+            let i = m as usize;
+            let reaches = s.hp[i] > 0 && (s.x[i] - x).abs() <= r + body(i) && (s.y[i] - y).abs() <= r + body(i);
+            assert!(!reaches || got.contains(&m), "missed {m}");
+        }
+        assert!(got.iter().all(|&m| s.hp[m as usize] > 0), "dead ones are skipped");
+        // Nearest by body gap, ring by ring.
+        let brute = s
+            .alive()
+            .iter()
+            .filter(|&&m| s.hp[m as usize] > 0)
+            .map(|&m| {
+                let i = m as usize;
+                (m, ((s.x[i] - x).powi(2) + (s.y[i] - y).powi(2)).sqrt() - body(i))
+            })
+            .filter(|m| m.1 <= r)
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        let fast = h.nearest_to(x, y, r, |_| false);
+        assert_eq!(fast.map(|f| f.0), brute.map(|b| b.0), "at {x},{y} r={r}");
+    }
+    // A move is seen at once.
+    let s0 = h.store().alive()[1];
+    h.place(s0, 3.0, 3.0);
+    let mut got = Vec::new();
+    h.near_box(2.5, 2.5, 3.5, 3.5, &mut got);
+    assert!(got.contains(&s0));
+}
+
+#[test]
+fn churn_inside_a_tick_needs_no_rebuild_and_stays_exact() {
+    let w = world(120, 120, None);
+    let mut h = Horde::new(Arc::clone(&w), catalog(), HordeConfig { pool: 2048, ..config(30.0) });
+    let mut rng = StdRng::seed_from_u64(21);
+    for _ in 0..1500 {
+        h.spawn(0, rng.gen_range(1.5..118.5f32), rng.gen_range(1.5..118.5f32));
+    }
+    h.tick(1, 20, &[(60.0, 60.0)]);
+    let mut buf = Vec::new();
+    let builds = h.index_builds();
+    // One tick of combat: knockbacks (up to 3 cells), kills, despawns and
+    // spawns that reuse the freed slots, with queries in between.
+    for round in 0..300 {
+        let alive = h.store().alive().to_vec();
+        let s = alive[rng.gen_range(0..alive.len())];
+        match round % 4 {
+            0 => {
+                let (x, y) = (h.store().x[s as usize], h.store().y[s as usize]);
+                let a = rng.gen_range(0.0..std::f32::consts::TAU);
+                let d = rng.gen_range(0.0..1.5f32);
+                h.place(s, (x + a.cos() * d).clamp(1.5, 118.5), (y + a.sin() * d).clamp(1.5, 118.5));
+            }
+            1 => h.store_mut().hp[s as usize] = 0,
+            2 => {
+                h.despawn(s);
+                h.spawn(0, rng.gen_range(1.5..118.5f32), rng.gen_range(1.5..118.5f32));
+            }
+            _ => {}
+        }
+        let (x, y, r) = (rng.gen_range(0.0..120.0f32), rng.gen_range(0.0..120.0f32), rng.gen_range(0.5..10.0f32));
+        buf.clear();
+        h.near_box(x - r, y - r, x + r, y + r, &mut buf);
+        let mut sorted = buf.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), buf.len(), "no monster twice");
+        let st = h.store();
+        for &m in st.alive() {
+            let i = m as usize;
+            let b = h.catalog().get(st.kind[i]).radius;
+            let reaches = st.hp[i] > 0 && (st.x[i] - x).abs() <= r + b && (st.y[i] - y).abs() <= r + b;
+            assert!(!reaches || buf.contains(&m), "round {round}: missed {m}");
+        }
+    }
+    // 75 spawns overflow the fresh list once; knockbacks alone never do.
+    assert!(h.index_builds() - builds <= 2, "{} rebuilds in one tick", h.index_builds() - builds);
+    // A new tick moves everything and builds once, whatever the director
+    // spawned during the step; queries never build.
+    let before = h.index_builds();
+    h.tick(2, 20, &[(60.0, 60.0)]);
+    for _ in 0..50 {
+        h.near_box(10.0, 10.0, 20.0, 20.0, &mut buf);
+    }
+    assert_eq!(h.index_builds(), before + 1);
+}
+
+/// `cargo test --release --lib query_cost -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn query_cost() {
+    let w = world(400, 400, None);
+    let mut h = Horde::new(Arc::clone(&w), catalog(), HordeConfig { pool: 4096, ..config(30.0) });
+    let mut rng = StdRng::seed_from_u64(5);
+    // A dense crowd around a player plus a sparse field: the survivors case.
+    for i in 0..3000 {
+        let (x, y) = if i % 2 == 0 {
+            (200.0 + rng.gen_range(-25.0..25.0f32), 200.0 + rng.gen_range(-25.0..25.0f32))
+        } else {
+            (rng.gen_range(2.0..398.0f32), rng.gen_range(2.0..398.0f32))
+        };
+        h.spawn(0, x, y);
+    }
+    let n = 20_000;
+    let pts: Vec<(f32, f32)> = (0..n).map(|_| (200.0 + rng.gen_range(-20.0..20.0f32), 200.0 + rng.gen_range(-20.0..20.0f32))).collect();
+    let mut buf = Vec::new();
+    let t = std::time::Instant::now();
+    let mut found = 0;
+    for &(x, y) in &pts {
+        buf.clear();
+        h.near_box(x - 6.0, y - 6.0, x + 6.0, y + 6.0, &mut buf);
+        found += buf.len();
+    }
+    let idx = t.elapsed();
+    let t = std::time::Instant::now();
+    let mut brute = 0;
+    for &(x, y) in &pts {
+        let s = h.store();
+        brute += s.alive().iter().filter(|&&m| (s.x[m as usize] - x).abs() <= 6.35 && (s.y[m as usize] - y).abs() <= 6.35).count();
+    }
+    let scan = t.elapsed();
+    let t = std::time::Instant::now();
+    for &(x, y) in &pts {
+        std::hint::black_box(h.nearest_to(x, y, 10.0, |_| false));
+    }
+    let near = t.elapsed();
+    // After real ticks (positions as the crowd spreads them).
+    let mut rebuild = std::time::Duration::ZERO;
+    for k in 0..100 {
+        h.tick(k, 20, &[(200.0, 200.0)]);
+        let t0 = std::time::Instant::now();
+        h.rebuild_index();
+        rebuild += t0.elapsed();
+    }
+    let rebuild = rebuild / 100;
+    eprintln!(
+        "3000 monsters, 6-cell box: index {:.2} µs/query ({} hits), full scan {:.2} µs/query ({brute}); nearest {:.2} µs; rebuild {:.1} µs",
+        idx.as_secs_f64() * 1e6 / n as f64,
+        found,
+        scan.as_secs_f64() * 1e6 / n as f64,
+        near.as_secs_f64() * 1e6 / n as f64,
+        rebuild.as_secs_f64() * 1e6,
+    );
 }

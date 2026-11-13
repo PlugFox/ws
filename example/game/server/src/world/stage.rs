@@ -275,9 +275,9 @@ mod tests {
     use crate::world::OUTBOX_CAPACITY;
 
     static MISSION: MissionInfo =
-        MissionInfo { id: "m1", name: "M1", description: "", map: "field", max_players: 4, waves: crate::world::horde::director::WaveRules::NORMAL };
+        MissionInfo { id: "m1", name: "M1", description: "", map: "field", max_players: 4, time_limit_secs: 900.0, waves: crate::world::horde::director::WaveRules::NORMAL };
     static MISSING: MissionInfo =
-        MissionInfo { id: "m2", name: "M2", description: "", map: "nowhere", max_players: 4, waves: crate::world::horde::director::WaveRules::NORMAL };
+        MissionInfo { id: "m2", name: "M2", description: "", map: "nowhere", max_players: 4, time_limit_secs: 900.0, waves: crate::world::horde::director::WaveRules::NORMAL };
 
     fn stages(max: usize) -> StageDirectory {
         let field = map(

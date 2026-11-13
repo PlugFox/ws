@@ -271,7 +271,7 @@ fn horde_on_prt_fild08_spawns_chases_and_stays_on_walkable_ground() {
     // anything close walked there).
     assert!(nearest_seen < 3.0, "closest monster is {nearest_seen} cells away");
     let mut buf = bytes::BytesMut::new();
-    let viewer = game_server::world::horde::PlayerView { x: sx, y: sy, light: horde.light_radius() };
+    let viewer = game_server::world::horde::PlayerView { x: sx, y: sy, light: horde.light_radius(), id: 0 };
     let mut view = game_server::world::horde::view::MonsterView::new(horde.capacity());
     let stats = horde.write_delta(&mut view, &viewer, 75 * hz, &mut buf);
     assert!(stats.spawns > 0 && stats.spawns as usize <= horde.len(), "{stats:?}");
@@ -288,11 +288,28 @@ fn baked_skill_table_loads() {
     let book = SkillBook::load(&dir).expect("skills.json parses");
     assert!(book.len() > 20);
     let castable = book.iter().filter(|(_, s)| s.ready()).count();
-    assert!(castable > 10, "{castable} castable skills");
+    assert!(castable > 60, "{castable} castable skills");
+    // The pipeline and the server agree on what is castable.
+    let raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("server/skills.json")).unwrap()).unwrap();
+    for s in raw["skills"].as_array().unwrap() {
+        let id = s["id"].as_str().unwrap();
+        let (_, def) = book.find(id).unwrap();
+        assert_eq!(def.ready(), s["ready"].as_bool().unwrap(), "{id}");
+    }
     // Every class can open its tree from level 2.
     for class in Class::ALL {
         let opener = book.iter().find(|(_, s)| s.class == Some(class) && s.requires.is_empty() && s.tier == 1);
         let (_, s) = opener.unwrap_or_else(|| panic!("{class:?} has a first skill"));
         book.can_learn(class, 2, &Loadout::default(), &s.id).unwrap();
     }
+    // Every monster's skills are in the table (COMBAT.md §4.4).
+    let catalog = game_server::world::horde::catalog::MonsterCatalog::load(&dir).expect("monsters.json loads");
+    let mut with_skills = 0;
+    for d in catalog.defs() {
+        for id in &d.skills {
+            assert!(book.find_monster(id).is_some(), "{}: unknown monster skill {id}", d.id);
+        }
+        with_skills += usize::from(!d.skills.is_empty());
+    }
+    assert!(with_skills >= 4, "{with_skills} monster kinds use skills");
 }
