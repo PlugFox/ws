@@ -67,5 +67,18 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    // Appearance columns (added after the first schema): ALTER only when
+    // missing, so existing databases upgrade in place.
+    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('characters')")
+        .fetch_all(pool)
+        .await?;
+    for (name, default) in [("gender", 0), ("hair_style", 1), ("hair_color", 0), ("body_color", 0)] {
+        if !columns.iter().any(|c| c == name) {
+            sqlx::query(&format!("ALTER TABLE characters ADD COLUMN {name} INTEGER NOT NULL DEFAULT {default}"))
+                .execute(pool)
+                .await?;
+        }
+    }
+
     Ok(())
 }

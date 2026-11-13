@@ -51,8 +51,10 @@ final class Api {
     return (list as List).cast<Map<String, Object?>>();
   }
 
-  Future<Map<String, Object?>> createCharacter(String name, String archetype) =>
-      _call('POST', '/api/characters', {'name': name, 'archetype': archetype});
+  /// Appearance fields as in the REST API (`gender`, `hair_style`,
+  /// `hair_color`, `body_color`).
+  Future<Map<String, Object?>> createCharacter(String name, String archetype, {Map<String, int> look = const {}}) =>
+      _call('POST', '/api/characters', {'name': name, 'archetype': archetype, ...look});
 
   Future<void> select(int id) => _call('POST', '/api/characters/$id/select');
 

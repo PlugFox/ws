@@ -8,7 +8,8 @@
 
 use super::map::{MapData, MapError};
 use super::missions;
-use super::protocol::{MapInfo, PlayerInfo, ServerMsg, SnapshotBody};
+use super::protocol::{Look, MapInfo, PlayerInfo, ServerMsg, SnapshotBody};
+use super::horde::view::MonsterView;
 use super::horde::{Horde, PlayerView};
 use bytes::{Bytes, BytesMut};
 use std::path::Path;
@@ -146,6 +147,7 @@ pub struct PlayerProfile {
     pub character_id: u32,
     pub name: String,
     pub archetype: String,
+    pub look: Look,
 }
 
 #[derive(Debug)]
@@ -166,6 +168,8 @@ struct HubPlayer {
     /// placed inside the return trigger (as in the baked recipe) would bounce
     /// the player straight back.
     portal_guard: bool,
+    /// What this player's client knows about the horde (stages only).
+    monsters: Option<Box<MonsterView>>,
 }
 
 impl HubPlayer {
@@ -177,6 +181,7 @@ impl HubPlayer {
             x: self.x,
             y: self.y,
             facing: self.facing,
+            look: self.profile.look,
         }
     }
 }
@@ -193,6 +198,9 @@ pub enum HubEvent {
     /// owned by someone else (stage → hub). The instance has already removed
     /// the player; the socket task joins the target.
     Transfer { target_map: String, arrival: (f32, f32) },
+    /// Internal: the player restyled; the socket task persists the look
+    /// (`player_look` goes out separately).
+    LookChanged(Look),
 }
 
 /// What an instance simulates.
@@ -232,12 +240,14 @@ pub struct HubInstance {
     /// Stage monsters (on the world's entry map); `None` in hubs.
     horde: Option<Horde>,
     /// Scratch: player positions on the horde map, and one recipient's
-    /// encoded monster entries.
+    /// encoded monster section.
     horde_players: Vec<PlayerView>,
     monster_buf: BytesMut,
 }
 
 pub const MISSION_BOARD: &str = "mission_board";
+/// NPC kind that restyles hair and dyes (`style_set`).
+pub const STYLIST: &str = "stylist";
 
 fn hub_error(code: &str, message: impl Into<String>) -> ServerMsg {
     ServerMsg::HubError { code: code.into(), message: message.into() }
@@ -367,6 +377,7 @@ impl HubInstance {
             has_seq: false,
             last_input_tick: self.tick,
             portal_guard: true,
+            monsters: None,
         };
         let joined = match &self.kind {
             InstanceKind::Hub { channel } => ServerMsg::HubJoined {
@@ -459,6 +470,30 @@ impl HubInstance {
             },
         };
         out.push((user_id, HubEvent::Control(reply)));
+    }
+
+    /// Restyles a player standing at a stylist: hair style and dyes change,
+    /// the gender is kept. Everyone on the map (the player too) gets
+    /// `player_look`; the socket task persists it via [`HubEvent::LookChanged`].
+    pub fn restyle(&mut self, user_id: u32, look: Look, out: &mut Outgoing) {
+        let Some(i) = self.find(user_id) else { return };
+        let p = &self.players[i];
+        let look = Look { gender: p.profile.look.gender, ..look };
+        if !look.is_valid() {
+            out.push((user_id, HubEvent::Control(hub_error("bad_message", "no such style"))));
+            return;
+        }
+        let at_stylist = self.world.map(p.map).manifest.npcs.iter().any(|n| n.kind == STYLIST && n.in_reach(p.x, p.y));
+        if !at_stylist {
+            out.push((user_id, HubEvent::Control(hub_error("npc_too_far", "stand next to a stylist to restyle"))));
+            return;
+        }
+        let (map, entity_id) = (p.map, p.profile.character_id);
+        self.players[i].profile.look = look;
+        for o in self.players.iter().filter(|o| o.map == map) {
+            out.push((o.profile.user_id, HubEvent::Control(ServerMsg::PlayerLook { entity_id, look })));
+        }
+        out.push((user_id, HubEvent::LookChanged(look)));
     }
 
     /// Validates a mission choice made at a board (position and mission id);
@@ -574,6 +609,7 @@ impl HubInstance {
                 let p = &mut self.players[idx];
                 p.map = *map;
                 p.map_epoch = p.map_epoch.wrapping_add(1);
+                p.monsters = None;
                 (p.x, p.y) = *arrival;
                 p.dir = (0.0, 0.0);
                 p.portal_guard = true;
@@ -610,28 +646,36 @@ impl HubInstance {
 
     fn emit_snapshots(&mut self, out: &mut Outgoing) {
         for map in 0..self.world.map_count() as MapIdx {
-            let on_map = || self.players.iter().filter(move |p| p.map == map);
-            let count = on_map().count();
+            let count = self.players.iter().filter(|p| p.map == map).count();
             if count == 0 {
                 continue;
             }
             let mut body = SnapshotBody::with_capacity(count);
-            for p in on_map() {
+            for p in self.players.iter().filter(|p| p.map == map) {
                 body.push(p.profile.character_id, p.x, p.y, p.facing);
             }
             let horde = self.horde.as_ref().filter(|h| h.map() == map);
-            for p in on_map() {
+            for p in self.players.iter_mut().filter(|p| p.map == map) {
                 let frame = match horde {
                     Some(h) => {
                         self.monster_buf.clear();
                         let viewer = PlayerView { x: p.x, y: p.y, light: h.light_radius() };
-                        let n = h.write_visible(&viewer, &mut self.monster_buf);
-                        body.stage_frame(p.map_epoch, self.tick, p.last_seq, &self.monster_buf, n)
+                        let view = p.monsters.get_or_insert_with(|| Box::new(MonsterView::new(h.capacity())));
+                        h.write_delta(view, &viewer, self.tick, &mut self.monster_buf);
+                        body.stage_frame(p.map_epoch, self.tick, p.last_seq, &self.monster_buf)
                     }
                     None => body.frame(p.map_epoch, self.tick, p.last_seq),
                 };
                 out.push((p.profile.user_id, HubEvent::Snapshot(frame)));
             }
+        }
+    }
+
+    /// The player's last snapshot never reached them (outbox full) or their
+    /// client could not apply a monster delta: the next frame is a keyframe.
+    pub fn resync(&mut self, user_id: u32) {
+        if let Some(view) = self.players.iter_mut().find(|p| p.profile.user_id == user_id).and_then(|p| p.monsters.as_mut()) {
+            view.reset();
         }
     }
 }
@@ -702,6 +746,16 @@ pub(crate) mod test_support {
             facing: 4,
             interact_radius: 1.5,
         });
+        town.manifest.npcs.push(crate::world::map::NpcDef {
+            id: "stylist".into(),
+            sprite: "4w_m_01".into(),
+            name: "Stylist".into(),
+            kind: STYLIST.into(),
+            x: 8,
+            y: 5,
+            facing: 4,
+            interact_radius: 1.5,
+        });
         HubWorld::new(vec![town, house], "town").unwrap()
     }
 }
@@ -714,7 +768,7 @@ mod tests {
     use crate::world::protocol::Snapshot;
 
     fn profile(user_id: u32) -> PlayerProfile {
-        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into() }
+        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: Look::default() }
     }
 
     fn controls_for(out: &Outgoing, user: u32) -> Vec<ServerMsg> {
@@ -796,6 +850,52 @@ mod tests {
             matches!(&out[..], [(1, HubEvent::MissionChosen { mission, public: false })] if mission == "poring_island_survival"),
             "{out:?}"
         );
+    }
+
+    #[test]
+    fn stylist_restyles_hair_and_dyes_but_keeps_gender() {
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
+        let mut out = Vec::new();
+        let her = PlayerProfile { look: Look { gender: 1, hair: 2, hair_color: 0, body_color: 0 }, ..profile(1) };
+        hub.join(her, Uuid::nil(), None, 0, &mut out);
+        hub.join(profile(2), Uuid::nil(), None, 0, &mut out);
+        out.clear();
+        let wanted = Look { gender: 0, hair: 9, hair_color: 14, body_color: 3 };
+        let code = |out: &Outgoing| match controls_for(out, 1).last() {
+            Some(ServerMsg::HubError { code, .. }) => code.clone(),
+            other => format!("{other:?}"),
+        };
+
+        hub.restyle(1, wanted, &mut out);
+        assert_eq!(code(&out), "npc_too_far", "away from the stylist");
+
+        // Walk north-east to the stylist at (8,5).
+        let mut seq = 0;
+        assert!(walk_until(&mut hub, 1, &mut seq, (1.0, 1.0), 40, &mut out, |h| {
+            h.position_of(1).is_some_and(|(_, x, y)| (x - 8.5).hypot(y - 5.5) < 1.0)
+        }));
+        out.clear();
+        hub.restyle(1, Look { hair: 13, ..wanted }, &mut out);
+        assert_eq!(code(&out), "bad_message", "no such style");
+        out.clear();
+
+        hub.restyle(1, wanted, &mut out);
+        let kept = Look { gender: 1, ..wanted };
+        for user in [1, 2] {
+            assert!(
+                controls_for(&out, user).iter().any(|m| matches!(m, ServerMsg::PlayerLook { entity_id: 101, look } if *look == kept)),
+                "user {user} sees the new look: {out:?}"
+            );
+        }
+        assert!(out.iter().any(|(u, e)| *u == 1 && matches!(e, HubEvent::LookChanged(l) if *l == kept)));
+        // Newcomers get it through player_appeared / map_enter.
+        out.clear();
+        hub.join(profile(3), Uuid::nil(), None, 0, &mut out);
+        let seen = controls_for(&out, 3).iter().find_map(|m| match m {
+            ServerMsg::MapEnter { players, .. } => players.iter().find(|p| p.entity_id == 101).map(|p| p.look),
+            _ => None,
+        });
+        assert_eq!(seen, Some(kept));
     }
 
     #[test]
@@ -1010,7 +1110,9 @@ mod tests {
     #[test]
     fn stage_with_horde_sends_monsters_in_view() {
         use crate::world::horde::catalog::{test_def, MonsterCatalog};
+        use crate::world::horde::view::DeltaEntry;
         use crate::world::horde::{Horde, HordeConfig};
+        use crate::world::protocol::decode_pos;
         let world = Arc::new(stage_world());
         let catalog = Arc::new(MonsterCatalog::new(vec![test_def("blob", 2.0, 1, 0.0, false)]).unwrap());
         let cfg = HordeConfig { light_radius: 3.0, director_enabled: false, seed: Some(1), ..HordeConfig::default() };
@@ -1024,9 +1126,23 @@ mod tests {
         out.clear();
         stage.tick(&mut out);
         let snap = last_snapshot(&out, 1).unwrap();
-        assert_eq!(snap.monsters.len(), 1);
-        assert_eq!(snap.monsters[0].slot, near);
-        assert!(snap.monsters[0].x < px + 2.0, "it moved towards the player");
+        let delta = snap.monsters.expect("stage snapshot");
+        assert_eq!(delta.baseline, 0, "the first frame is a keyframe");
+        match delta.entries[..] {
+            [DeltaEntry::Spawn { slot, x, vx, .. }] => {
+                assert_eq!(slot, near);
+                assert!(decode_pos(x) < px + 2.0 && vx < 0, "it moves towards the player");
+            }
+            ref other => panic!("{other:?}"),
+        }
+        // A dropped frame (or a client resync) makes the next one a keyframe.
+        stage.resync(1);
+        out.clear();
+        stage.tick(&mut out);
+        assert_eq!(last_snapshot(&out, 1).unwrap().monsters.unwrap().baseline, 0);
+        out.clear();
+        stage.tick(&mut out);
+        assert_eq!(last_snapshot(&out, 1).unwrap().monsters.unwrap().baseline, 1);
         // Monsters stand still while nobody is on the map.
         stage.leave(1, Uuid::nil(), &mut out);
         let before: Vec<_> = stage.horde().unwrap().monsters().collect();

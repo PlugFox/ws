@@ -1,3 +1,4 @@
+use crate::world::protocol::Look;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Pool, Sqlite};
 
@@ -13,8 +14,27 @@ pub struct CharacterRecord {
     pub unlocked_skills_json: String,
     pub inventory_json: String,
     pub last_location_id: String,
+    pub gender: i64,
+    pub hair_style: i64,
+    pub hair_color: i64,
+    pub body_color: i64,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl CharacterRecord {
+    /// Stored appearance; out-of-range values (hand-edited rows) fall back
+    /// to the default look.
+    pub fn look(&self) -> Look {
+        let byte = |v: i64| u8::try_from(v).unwrap_or(u8::MAX);
+        let look = Look {
+            gender: byte(self.gender),
+            hair: byte(self.hair_style),
+            hair_color: byte(self.hair_color),
+            body_color: byte(self.body_color),
+        };
+        if look.is_valid() { look } else { Look { gender: look.gender.min(1), ..Look::default() } }
+    }
 }
 
 pub struct CharacterRepo;
@@ -29,6 +49,7 @@ impl CharacterRepo {
         unlocked_skills_json: &str,
         inventory_json: &str,
         last_location_id: &str,
+        look: Look,
     ) -> Result<CharacterRecord, sqlx::Error> {
         let user_id_i64 = user_id as i64;
 
@@ -36,9 +57,10 @@ impl CharacterRepo {
             r#"
             INSERT INTO characters (
                 user_id, name, archetype, level, base_exp,
-                stats_json, unlocked_skills_json, inventory_json, last_location_id
+                stats_json, unlocked_skills_json, inventory_json, last_location_id,
+                gender, hair_style, hair_color, body_color
             )
-            VALUES (?, ?, ?, 1, 0, ?, ?, ?, ?)
+            VALUES (?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             "#,
         )
@@ -49,12 +71,23 @@ impl CharacterRepo {
         .bind(unlocked_skills_json)
         .bind(inventory_json)
         .bind(last_location_id)
+        .bind(i64::from(look.gender))
+        .bind(i64::from(look.hair))
+        .bind(i64::from(look.hair_color))
+        .bind(i64::from(look.body_color))
         .fetch_one(pool)
         .await?;
 
         Self::find_by_id(pool, id as u32)
             .await?
             .ok_or(sqlx::Error::RowNotFound)
+    }
+
+    pub async fn count_by_user_id(pool: &Pool<Sqlite>, user_id: u32) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM characters WHERE user_id = ?")
+            .bind(user_id as i64)
+            .fetch_one(pool)
+            .await
     }
 
     pub async fn list_by_user_id(
@@ -66,6 +99,7 @@ impl CharacterRepo {
             r#"
             SELECT id, user_id, name, archetype, level, base_exp,
                    stats_json, unlocked_skills_json, inventory_json, last_location_id,
+                   gender, hair_style, hair_color, body_color,
                    created_at, updated_at
             FROM characters
             WHERE user_id = ?
@@ -86,6 +120,7 @@ impl CharacterRepo {
             r#"
             SELECT id, user_id, name, archetype, level, base_exp,
                    stats_json, unlocked_skills_json, inventory_json, last_location_id,
+                   gender, hair_style, hair_color, body_color,
                    created_at, updated_at
             FROM characters
             WHERE id = ?
@@ -107,6 +142,7 @@ impl CharacterRepo {
             r#"
             SELECT id, user_id, name, archetype, level, base_exp,
                    stats_json, unlocked_skills_json, inventory_json, last_location_id,
+                   gender, hair_style, hair_color, body_color,
                    created_at, updated_at
             FROM characters
             WHERE user_id = ? AND id = ?
@@ -127,6 +163,7 @@ impl CharacterRepo {
         unlocked_skills_json: &str,
         inventory_json: &str,
         last_location_id: &str,
+        look: Look,
     ) -> Result<(), sqlx::Error> {
         let char_id_i64 = character_id as i64;
         let level_i64 = level as i64;
@@ -141,6 +178,10 @@ impl CharacterRepo {
                 unlocked_skills_json = ?,
                 inventory_json = ?,
                 last_location_id = ?,
+                gender = ?,
+                hair_style = ?,
+                hair_color = ?,
+                body_color = ?,
                 updated_at = datetime('now')
             WHERE id = ?
             "#,
@@ -151,6 +192,10 @@ impl CharacterRepo {
         .bind(unlocked_skills_json)
         .bind(inventory_json)
         .bind(last_location_id)
+        .bind(i64::from(look.gender))
+        .bind(i64::from(look.hair))
+        .bind(i64::from(look.hair_color))
+        .bind(i64::from(look.body_color))
         .bind(char_id_i64)
         .execute(pool)
         .await?;

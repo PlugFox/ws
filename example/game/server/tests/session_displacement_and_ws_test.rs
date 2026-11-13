@@ -11,6 +11,7 @@ use game_server::{
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use game_server::world::{ClientMsg, ServerMsg};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::frame::coding::CloseCode};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -124,21 +125,16 @@ async fn test_websocket_connection_and_displacement_close_code() {
     let (mut ws_stream_1, _) = connect_async(&ws_url_1).await.expect("WS 1 connect failed");
 
     // Read connected welcome frame
-    let welcome_msg = ws_stream_1.next().await.unwrap().unwrap();
-    let welcome_val: Value = serde_json::from_str(&welcome_msg.to_string()).unwrap();
-    assert_eq!(welcome_val["type"], "connected");
-    assert_eq!(welcome_val["user_id"], user_id);
+    let welcome = server_msg(ws_stream_1.next().await.unwrap().unwrap());
+    assert!(matches!(welcome, ServerMsg::Connected { user_id: id, .. } if id == user_id), "{welcome:?}");
 
     // Send a ping and expect a pong
-    let ping_msg = json!({ "type": "ping" });
     ws_stream_1
-        .send(tokio_tungstenite::tungstenite::Message::Text(ping_msg.to_string().into()))
+        .send(tokio_tungstenite::tungstenite::Message::Binary(ClientMsg::Ping.encode()))
         .await
         .unwrap();
-
-    let pong_msg = ws_stream_1.next().await.unwrap().unwrap();
-    let pong_val: Value = serde_json::from_str(&pong_msg.to_string()).unwrap();
-    assert_eq!(pong_val["type"], "pong");
+    let pong = server_msg(ws_stream_1.next().await.unwrap().unwrap());
+    assert!(matches!(pong, ServerMsg::Pong { .. }), "{pong:?}");
 
     // 2. User logs in from tab 2 and connects WebSocket Connection 2
     let login_url = format!("http://{}/api/auth/login", local_addr);
@@ -158,14 +154,12 @@ async fn test_websocket_connection_and_displacement_close_code() {
     let ws_url_2 = format!("ws://{}/api/ws?token={}", local_addr, access_token_2);
     let (mut ws_stream_2, _) = connect_async(&ws_url_2).await.expect("WS 2 connect failed");
 
-    let welcome_2 = ws_stream_2.next().await.unwrap().unwrap();
-    let welcome_2_val: Value = serde_json::from_str(&welcome_2.to_string()).unwrap();
-    assert_eq!(welcome_2_val["type"], "connected");
+    let welcome_2 = server_msg(ws_stream_2.next().await.unwrap().unwrap());
+    assert!(matches!(welcome_2, ServerMsg::Connected { .. }));
 
-    // 3. Verify WebSocket 1 receives displacement JSON frame and is closed with code 4009
-    let displaced_text = ws_stream_1.next().await.unwrap().unwrap();
-    let displaced_val: Value = serde_json::from_str(&displaced_text.to_string()).unwrap();
-    assert_eq!(displaced_val["type"], "displaced");
+    // 3. Verify WebSocket 1 receives the displacement frame and is closed with code 4009
+    let displaced = server_msg(ws_stream_1.next().await.unwrap().unwrap());
+    assert!(matches!(displaced, ServerMsg::Displaced { .. }), "{displaced:?}");
 
     // Next message on WS 1 must be Close with code 4009
     let close_msg = ws_stream_1.next().await.unwrap().unwrap();
@@ -178,4 +172,11 @@ async fn test_websocket_connection_and_displacement_close_code() {
 
     // Verify session registry only has 1 active session
     assert_eq!(state.session_registry.active_count(), 1);
+}
+
+fn server_msg(m: tokio_tungstenite::tungstenite::Message) -> ServerMsg {
+    match m {
+        tokio_tungstenite::tungstenite::Message::Binary(b) => ServerMsg::decode(&b).expect("control message"),
+        other => panic!("expected a binary frame, got {other:?}"),
+    }
 }

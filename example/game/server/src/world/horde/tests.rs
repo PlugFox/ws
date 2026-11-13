@@ -195,20 +195,206 @@ fn game_master_waves_land_just_outside_the_light_in_random_directions() {
     assert!(h.monsters().any(|m| m.2 == 1), "the boss is bought once affordable");
 }
 
+/// One player's view driven tick by tick, with the client mirror applying
+/// every section.
+struct Viewer {
+    view: view::MonsterView,
+    mirror: view::MonsterMirror,
+    buf: bytes::BytesMut,
+}
+
+impl Viewer {
+    fn new(h: &Horde) -> Self {
+        Self { view: view::MonsterView::new(h.capacity()), mirror: Default::default(), buf: Default::default() }
+    }
+
+    fn frame(&mut self, h: &Horde, p: PlayerView, tick: u32) -> (view::DeltaStats, view::MonsterDelta) {
+        self.buf.clear();
+        let stats = h.write_delta(&mut self.view, &p, tick, &mut self.buf);
+        assert_eq!(stats.bytes, self.buf.len());
+        let mut r = crate::world::wire::Reader::new(&self.buf);
+        let delta = view::MonsterDelta::decode(&mut r).expect("section decodes");
+        assert!(r.is_empty());
+        self.mirror.apply(tick, &delta).expect("delta applies");
+        (stats, delta)
+    }
+
+    /// Worst distance between where the client draws a monster and where it is.
+    fn worst_error(&self, h: &Horde, tick: u32) -> f32 {
+        let mut worst = 0.0f32;
+        for (slot, generation, _, x, y) in h.monsters() {
+            if let Some(m) = self.mirror.monsters.get(&slot) {
+                assert_eq!(m.generation, generation, "mirror holds a stale monster in slot {slot}");
+                let (px, py) = view::predict(&m.rec, tick as f64);
+                worst = worst.max(((px - x).powi(2) + (py - y).powi(2)).sqrt());
+            }
+        }
+        worst
+    }
+}
+
 #[test]
-fn visible_entries_are_within_view_and_decode() {
-    let w = world(120, 40, None);
+fn deltas_keep_the_client_within_the_error_bound() {
+    let w = world(120, 120, None);
+    let mut h = Horde::new(w, catalog(), config(20.0));
+    let mut v = Viewer::new(&h);
+    for i in 0..60 {
+        let a = i as f32 * 0.37;
+        h.spawn(0, 60.5 + a.cos() * (6.0 + i as f32 * 0.3), 60.5 + a.sin() * (6.0 + i as f32 * 0.3)).unwrap();
+    }
+    let edge = h.config.view.edge_error;
+    for t in 0..400u32 {
+        // The player circles, so the crowd keeps turning.
+        let a = t as f32 * 0.02;
+        let p = PlayerView { x: 60.5 + a.cos() * 15.0, y: 60.5 + a.sin() * 15.0, light: 20.0 };
+        h.tick_views(t, 20, &[p]);
+        let (stats, delta) = v.frame(&h, p, t);
+        assert_eq!(delta.baseline, if t == 0 { 0 } else { 1 });
+        assert!(stats.bytes <= h.config.view.budget, "{stats:?}");
+        assert_eq!(stats.deferred, 0, "60 monsters fit the budget");
+        // Everything within reach is known; nothing far beyond it is.
+        let reach = p.light + h.config.aoi_margin;
+        for (slot, _, _, x, y) in h.monsters() {
+            let d = ((x - p.x).powi(2) + (y - p.y).powi(2)).sqrt();
+            if d < reach - 0.5 {
+                assert!(v.mirror.monsters.contains_key(&slot), "t={t}: slot {slot} at {d:.1} is missing");
+            }
+            if d > reach + 3.0 {
+                assert!(!v.mirror.monsters.contains_key(&slot), "t={t}: slot {slot} at {d:.1} lingers");
+            }
+        }
+        // The prediction never drifts past the (edge) threshold plus one
+        // tick of quantisation.
+        assert!(v.worst_error(&h, t) <= edge + 0.02, "t={t}: {}", v.worst_error(&h, t));
+    }
+}
+
+#[test]
+fn a_settled_crowd_costs_almost_nothing() {
+    let w = world(60, 60, None);
+    let mut h = Horde::new(w, catalog(), config(20.0));
+    let mut v = Viewer::new(&h);
+    for i in 0..40 {
+        h.spawn(0, 20.5 + (i % 8) as f32, 20.5 + (i / 8) as f32).unwrap();
+    }
+    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0 };
+    let mut bytes = Vec::new();
+    for t in 0..600u32 {
+        h.tick_views(t, 20, &[p]);
+        bytes.push(v.frame(&h, p, t).0.bytes);
+    }
+    let first: usize = bytes[..20].iter().sum();
+    let last: usize = bytes[500..].iter().sum();
+    // Two bytes per frame is the empty section (baseline + count).
+    assert!(last <= 100 * 2 + 40, "settled: {last} bytes in 100 frames (first second: {first})");
+}
+
+#[test]
+fn the_budget_spreads_a_burst_and_nearest_monsters_come_first() {
+    let w = world(100, 100, None);
+    let mut cfg = config(30.0);
+    cfg.view.budget = 200;
+    let mut h = Horde::new(w, catalog(), cfg);
+    let mut v = Viewer::new(&h);
+    for i in 0..300 {
+        h.spawn(0, 25.5 + (i % 20) as f32 * 2.5, 25.5 + (i / 20) as f32 * 2.5).unwrap();
+    }
+    let p = PlayerView { x: 50.5, y: 50.5, light: 30.0 };
+    h.tick_views(0, 20, &[p]);
+    let (s0, d0) = v.frame(&h, p, 0);
+    assert!(s0.bytes <= 200 && s0.deferred > 0, "{s0:?}");
+    // The first frame holds the monsters nearest to the player.
+    let dist = |slot: u16| {
+        let m = h.monsters().find(|m| m.0 == slot).unwrap();
+        ((m.3 - p.x).powi(2) + (m.4 - p.y).powi(2)).sqrt()
+    };
+    let sent: Vec<f32> = d0.entries.iter().map(|e| match e { view::DeltaEntry::Spawn { slot, .. } => dist(*slot), _ => unreachable!() }).collect();
+    let nearest_left = h.monsters().filter(|m| !v.mirror.monsters.contains_key(&m.0)).map(|m| dist(m.0)).fold(f32::MAX, f32::min);
+    assert!(sent.iter().all(|&d| d <= nearest_left + 0.01), "sent {sent:?}, nearest unsent {nearest_left}");
+    let mut t = 1;
+    while v.mirror.monsters.len() < 300 {
+        h.tick_views(t, 20, &[p]);
+        let (s, _) = v.frame(&h, p, t);
+        assert!(s.bytes <= 200);
+        t += 1;
+        assert!(t < 200, "the view fills up: {} known", v.mirror.monsters.len());
+    }
+}
+
+#[test]
+fn a_lost_frame_resyncs_through_a_keyframe() {
+    let w = world(60, 60, None);
+    let mut h = Horde::new(w, catalog(), config(20.0));
+    let mut v = Viewer::new(&h);
+    for i in 0..10 {
+        h.spawn(0, 22.5 + i as f32, 25.5).unwrap();
+    }
+    let p = PlayerView { x: 30.5, y: 40.5, light: 20.0 };
+    for t in 0..5 {
+        h.tick_views(t, 20, &[p]);
+        v.frame(&h, p, t);
+    }
+    // Frame 5 is lost on the way: frame 6 no longer applies.
+    h.tick_views(5, 20, &[p]);
+    v.buf.clear();
+    h.write_delta(&mut v.view, &p, 5, &mut v.buf);
+    h.tick_views(6, 20, &[p]);
+    v.buf.clear();
+    h.write_delta(&mut v.view, &p, 6, &mut v.buf);
+    let delta = view::MonsterDelta::decode(&mut crate::world::wire::Reader::new(&v.buf)).unwrap();
+    assert!(v.mirror.apply(6, &delta).is_err(), "a gap is detected");
+    // The instance resets the view; the next frame is a keyframe.
+    v.view.reset();
+    h.tick_views(7, 20, &[p]);
+    let (_, d) = v.frame(&h, p, 7);
+    assert_eq!(d.baseline, 0);
+    assert_eq!(v.mirror.monsters.len(), 10);
+}
+
+#[test]
+fn a_reused_slot_is_a_new_monster_to_the_client() {
+    let w = world(60, 60, None);
+    let mut cfg = config(20.0);
+    cfg.pool = 2;
+    let mut h = Horde::new(w, catalog(), cfg);
+    let mut v = Viewer::new(&h);
+    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0 };
+    let a = h.spawn(0, 25.5, 30.5).unwrap();
+    h.tick_views(0, 20, &[p]);
+    v.frame(&h, p, 0);
+    // Free the slot and refill both (FIFO: the second spawn reuses `a`).
+    h.despawn(a);
+    let b = h.spawn(0, 35.5, 30.5).unwrap();
+    let c = h.spawn(0, 30.5, 25.5).unwrap();
+    assert_ne!(b, a);
+    assert_eq!(c, a);
+    h.tick_views(1, 20, &[p]);
+    let (_, d) = v.frame(&h, p, 1);
+    assert!(d.entries.iter().all(|e| !matches!(e, view::DeltaEntry::Remove { .. })), "SPAWN supersedes REMOVE: {d:?}");
+    assert_eq!(v.mirror.monsters.len(), 2);
+    assert!(v.worst_error(&h, 1) < 0.1, "the new monster is where it stands, not where the old one was");
+}
+
+#[test]
+fn removed_and_dead_monsters_leave_the_view() {
+    let w = world(100, 60, None);
     let mut h = Horde::new(w, catalog(), config(10.0));
-    let near = h.spawn(0, 15.5, 20.5).unwrap();
-    h.spawn(0, 100.5, 20.5).unwrap();
-    h.tick(0, 20, &[(10.5, 20.5)]);
-    let mut buf = BytesMut::new();
-    assert_eq!(h.write_visible(&PlayerView { x: 10.5, y: 20.5, light: 10.0 }, &mut buf), 1);
-    assert_eq!(buf.len(), MONSTER_ENTRY_LEN);
-    assert_eq!(u16::from_le_bytes([buf[0], buf[1]]), near);
-    assert_eq!(buf[3], 0, "kind");
-    let x = u16::from_le_bytes([buf[4], buf[5]]) as f32 / 64.0;
-    assert!((x - 15.5).abs() < 1.0);
+    let mut v = Viewer::new(&h);
+    let a = h.spawn(0, 15.5, 30.5).unwrap();
+    h.spawn(0, 18.5, 30.5).unwrap();
+    let mut p = PlayerView { x: 10.5, y: 30.5, light: 10.0 };
+    h.tick_views(0, 20, &[p]);
+    v.frame(&h, p, 0);
+    assert_eq!(v.mirror.monsters.len(), 2);
+    h.despawn(a);
+    h.tick_views(1, 20, &[p]);
+    let (s, _) = v.frame(&h, p, 1);
+    assert_eq!((s.removes, v.mirror.monsters.len()), (1, 1));
+    // The player teleports away: the rest drops out of the light.
+    p.x = 80.5;
+    h.tick_views(2, 20, &[p]);
+    v.frame(&h, p, 2);
+    assert!(v.mirror.monsters.is_empty());
 }
 
 #[test]

@@ -57,34 +57,32 @@ Future<void> _bot(Uri server, String name, int index, int count, String party) a
   final ws = WebSocketClient.binary();
   double? x, y;
   double cx = 0, cy = 0;
-  void send(Map<String, Object?> msg) => ws.push(Uint8List.fromList(utf8.encode(jsonEncode(msg)))).ignore();
+  void send(Uint8List frame) => ws.push(frame).ignore();
   var ready = false;
   ws.messages.listen((m) {
-    if (m.isNotEmpty && m[0] == 0x7B) {
-      final msg = jsonDecode(utf8.decode(m)) as Map<String, Object?>;
-      switch (msg['type']) {
-        case 'map_enter':
-          x = (msg['x']! as num).toDouble();
-          y = (msg['y']! as num).toDouble();
-          cx = x!;
-          cy = y! - 4;
-          // Join the party once, from the hub.
-          if (party.isNotEmpty && msg['map'] is Map && (msg['map']! as Map)['kind'] == 'hub' && !ready) {
-            send({'type': 'lobby_join', 'code': party});
-          }
-        case 'lobby_state' when !ready:
-          ready = true;
-          send({'type': 'lobby_ready', 'ready': true});
-        case 'stage_joined':
-          stdout.writeln('$name entered Stage-${msg['stage_id']}');
-        case 'lobby_error':
-          stderr.writeln('$name: ${msg['message']}');
-      }
+    if (m.isEmpty || Snapshot.isSnapshot(m[0])) return;
+    switch (ServerMsg.decode(m)) {
+      case MapEnter(:final map, x: final ex, y: final ey):
+        x = ex;
+        y = ey;
+        cx = ex;
+        cy = ey - 4;
+        // Join the party once, from the hub.
+        if (party.isNotEmpty && map.kind == 'hub' && !ready) send(ClientMsg.lobbyJoin(party));
+      case LobbyState() when !ready:
+        ready = true;
+        send(ClientMsg.lobbyReady(true));
+      case StageJoined(:final stageId):
+        stdout.writeln('$name entered Stage-$stageId');
+      case LobbyError(:final message):
+        stderr.writeln('$name: $message');
+      default:
+        break;
     }
   });
   final wsUri = server.replace(scheme: server.scheme == 'https' ? 'wss' : 'ws', path: '/api/ws', query: 'token=$token');
   await ws.connect(wsUri.toString());
-  await ws.push(Uint8List.fromList(utf8.encode('{"type":"hub_join"}')));
+  await ws.push(ClientMsg.hubJoin());
   stdout.writeln('$name joined');
 
   var seq = 0;

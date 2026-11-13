@@ -28,10 +28,9 @@ pub mod director;
 pub mod field;
 pub mod grid;
 pub mod storage;
+pub mod view;
 
 use super::hub::{HubWorld, MapIdx};
-use super::protocol::encode_pos;
-use bytes::{BufMut, BytesMut};
 use catalog::MonsterCatalog;
 use director::{Director, Formation, Pack, WaveRules};
 use field::{FlowField, UNREACHABLE};
@@ -50,8 +49,6 @@ pub struct PlayerView {
 }
 
 pub use catalog::{CatalogError, MonsterDef};
-
-pub use super::protocol::MONSTER_ENTRY_LEN;
 
 /// Longest distance a monster moves per sub-step (cells). Below one cell,
 /// so axis-separated wall checks cannot skip a one-cell wall.
@@ -95,8 +92,8 @@ pub struct HordeConfig {
     pub max_contacts: usize,
     /// Player body radius: monsters stop at `radius + this` (contact).
     pub player_radius: f32,
-    /// Most monsters in one snapshot.
-    pub max_visible: usize,
+    /// What each player's snapshots carry (`view`).
+    pub view: view::ViewConfig,
     /// Wave rules of the mission (difficulty, spawn margins).
     pub waves: WaveRules,
     /// Game master on/off (benchmarks place monsters by hand).
@@ -124,7 +121,7 @@ impl Default for HordeConfig {
             damping: 0.7,
             max_contacts: 16,
             player_radius: 0.4,
-            max_visible: 1024,
+            view: view::ViewConfig::default(),
             waves: WaveRules::default(),
             director_enabled: true,
             seed: None,
@@ -232,6 +229,16 @@ impl Horde {
 
     pub fn len(&self) -> usize {
         self.store.len()
+    }
+
+    /// Byte budget of each player's monster section (tools and benches).
+    pub fn set_view_budget(&mut self, budget: usize) {
+        self.config.view.budget = budget;
+    }
+
+    /// Pool size (slots).
+    pub fn capacity(&self) -> usize {
+        self.store.capacity()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -661,32 +668,6 @@ impl Horde {
         placed
     }
 
-    /// Appends the monsters within `viewer`'s light radius (plus the AoI
-    /// margin) as snapshot entries (`u16 slot, u8 generation, u8 kind,
-    /// u16 x, u16 y`). Returns the count.
-    pub fn write_visible(&self, viewer: &PlayerView, buf: &mut BytesMut) -> u16 {
-        let reach = viewer.light + self.config.aoi_margin;
-        let s = &self.store;
-        let mut count = 0usize;
-        for &slot in s.alive() {
-            let k = slot as usize;
-            let (dx, dy) = (s.x[k] - viewer.x, s.y[k] - viewer.y);
-            // Anything a player can see was classified full this tick.
-            if s.flags[k] & FLAG_FULL == 0 || !in_radius(dx, dy, reach) {
-                continue;
-            }
-            buf.put_u16_le(slot);
-            buf.put_u8(s.generation[k]);
-            buf.put_u8(s.kind[k]);
-            buf.put_u16_le(encode_pos(s.x[k]));
-            buf.put_u16_le(encode_pos(s.y[k]));
-            count += 1;
-            if count >= self.config.max_visible {
-                break;
-            }
-        }
-        count as u16
-    }
 }
 
 /// Whether the straight segment stays on walkable cells (sampled every half

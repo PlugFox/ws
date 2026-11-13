@@ -1,7 +1,7 @@
 use super::state::AppState;
 use crate::session::{ActiveSession, SessionSignal, StateFlusher};
 use crate::world::map::LocationKind;
-use crate::world::protocol::{decode_input, INPUT_KIND};
+use crate::world::protocol::ClientDecodeError;
 use crate::world::{
     Arrival, ClientMsg, HubCommand, HubEvent, HubTicket, JoinError, LobbyError, LobbyEvent, PlayerProfile, ServerMsg,
     LOBBY_CHANNEL_CAPACITY, OUTBOX_CAPACITY,
@@ -16,7 +16,6 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -93,12 +92,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
     };
 
     // Send welcome / connected frame
-    let welcome = json!({
-        "type": "connected",
-        "user_id": user_id,
-        "session_id": session_id.to_string(),
-    });
-    let _ = ws_tx.send(Message::Text(welcome.to_string().into())).await;
+    let welcome = ServerMsg::Connected { user_id, session_id };
+    let _ = ws_tx.send(Message::Binary(welcome.encode())).await;
 
     // Pump: session signals, events from the current instance (hub channel
     // or stage), lobby events and client frames.
@@ -109,11 +104,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
                 match signal_res {
                     Ok(SessionSignal::Displaced { reason }) => {
                         warn!("User {} session displaced: {}", user_id, reason);
-                        let msg = json!({
-                            "type": "displaced",
-                            "reason": reason
-                        });
-                        let _ = ws_tx.send(Message::Text(msg.to_string().into())).await;
+                        let msg = ServerMsg::Displaced { reason: reason.clone() };
+                        let _ = ws_tx.send(Message::Binary(msg.encode())).await;
                         // Close frame with custom code 4009 (Session Displaced)
                         let close_frame = axum::extract::ws::CloseFrame {
                             code: 4009,
@@ -132,8 +124,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
                         break;
                     }
                     Ok(SessionSignal::Notification { message }) => {
-                        let note = json!({ "type": "notification", "message": message });
-                        if let Err(e) = ws_tx.send(Message::Text(note.to_string().into())).await {
+                        let note = ServerMsg::Notification { message };
+                        if let Err(e) = ws_tx.send(Message::Binary(note.encode())).await {
                             error!("Error sending notification: {}", e);
                             break;
                         }
@@ -151,11 +143,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
             // Messages received from client
             msg_res = ws_rx.next() => {
                 match msg_res {
-                    Some(Ok(Message::Text(text))) => {
-                        debug!("Received WS text from user {}: {}", user_id, text);
-                        conn.on_text(&text).await
-                    }
-                    Some(Ok(Message::Binary(bin))) => conn.on_binary(&bin).await,
+                    // The protocol is binary; text frames are not part of it.
+                    Some(Ok(Message::Text(_))) => vec![hub_error("bad_message", "text frames are not supported")],
+                    Some(Ok(Message::Binary(bin))) => conn.on_frame(&bin).await,
                     Some(Ok(Message::Ping(payload))) => {
                         let _ = ws_tx.send(Message::Pong(payload)).await;
                         Vec::new()
@@ -176,7 +166,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
         let mut failed = false;
         for out in replies {
             let frame = match out {
-                Out::Msg(msg) => Message::Text(to_json(&msg).into()),
+                Out::Msg(msg) => Message::Binary(msg.encode()),
                 Out::Binary(bytes) => Message::Binary(bytes),
             };
             if ws_tx.send(frame).await.is_err() {
@@ -247,10 +237,6 @@ struct Conn {
     stranded: bool,
 }
 
-fn to_json(msg: &ServerMsg) -> String {
-    serde_json::to_string(msg).expect("ServerMsg serializes")
-}
-
 fn hub_error(code: &str, message: impl Into<String>) -> Out {
     Out::Msg(ServerMsg::HubError { code: code.into(), message: message.into() })
 }
@@ -275,6 +261,7 @@ impl Conn {
             character_id: ch.id,
             name: ch.name.clone(),
             archetype: ch.archetype.clone(),
+            look: ch.look,
         })
     }
 
@@ -378,6 +365,12 @@ impl Conn {
                 }
                 vec![Out::Msg(msg)]
             }
+            Some(HubEvent::LookChanged(look)) => {
+                if let Some(ch) = self.session.character.write().await.as_mut() {
+                    ch.set_look(look);
+                }
+                Vec::new()
+            }
             Some(HubEvent::MissionChosen { mission, public }) => {
                 let (Some(lobbies), Some(profile)) = (self.state.lobbies.clone(), self.profile().await) else {
                     return vec![lobby_error("mission_unavailable", "missions are not available on this server")];
@@ -439,61 +432,16 @@ impl Conn {
         }
     }
 
-    /// Handles one client binary frame: a movement input packet, or a JSON
-    /// control message (first byte `{`) from clients that send everything as
-    /// binary.
-    async fn on_binary(&mut self, bin: &[u8]) -> Vec<Out> {
-        match bin.first() {
-            Some(b'{') => match std::str::from_utf8(bin) {
-                Ok(text) => self.on_text(text).await,
-                Err(_) => vec![hub_error("bad_message", "JSON frame is not UTF-8")],
-            },
-            Some(&INPUT_KIND) => {
-                let Some((seq, dx, dy)) = decode_input(bin) else {
-                    return vec![hub_error("bad_message", "malformed input frame")];
-                };
-                if let Some(link) = &self.link {
-                    // Inputs are latest-wins; dropping one under backpressure is fine.
-                    let _ = link.commands.try_send(HubCommand::Input { user_id: self.user_id(), seq, dx, dy });
-                }
-                Vec::new()
-            }
-            // Unknown binary kinds are ignored, like unknown JSON types.
-            _ => Vec::new(),
-        }
-    }
-
-    /// Handles one client text frame; returns the direct replies.
-    async fn on_text(&mut self, text: &str) -> Vec<Out> {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-            return vec![hub_error("bad_message", "not JSON")];
-        };
-        // Unknown message types are ignored so older servers tolerate newer
-        // clients; known types with a bad shape are reported.
-        let known = matches!(
-            value.get("type").and_then(|t| t.as_str()),
-            Some(
-                "ping"
-                    | "hub_join"
-                    | "hub_leave"
-                    | "hub_channels"
-                    | "hub_input"
-                    | "npc_interact"
-                    | "mission_select"
-                    | "lobby_join"
-                    | "lobby_ready"
-                    | "lobby_start"
-                    | "lobby_leave"
-                    | "lobby_kick"
-                    | "stage_leave"
-            )
-        );
-        if !known {
-            return Vec::new();
-        }
-        let msg = match serde_json::from_value::<ClientMsg>(value) {
+    /// Handles one client frame; returns the direct replies.
+    async fn on_frame(&mut self, frame: &[u8]) -> Vec<Out> {
+        let msg = match ClientMsg::decode(frame) {
             Ok(msg) => msg,
-            Err(err) => return vec![hub_error("bad_message", err.to_string())],
+            // Unknown kinds are ignored so older servers tolerate newer clients.
+            Err(ClientDecodeError::Unknown) => return Vec::new(),
+            Err(ClientDecodeError::Malformed) => {
+                debug!("Malformed frame from user {}: {:02x?}", self.user_id(), &frame[..frame.len().min(32)]);
+                return vec![hub_error("bad_message", "malformed frame")];
+            }
         };
         let (user_id, session_id) = (self.user_id(), self.session_id());
         let lobby_result = |r: Result<(), LobbyError>| match r {
@@ -503,13 +451,22 @@ impl Conn {
 
         match msg {
             ClientMsg::Ping => vec![Out::Msg(ServerMsg::Pong { ts: chrono::Utc::now().timestamp_millis() })],
-            ClientMsg::HubInput { seq, dx, dy } => {
+            ClientMsg::Input { seq, dx, dy } => {
                 if let Some(link) = &self.link {
+                    // Inputs are latest-wins; dropping one under backpressure is fine.
                     let _ = link.commands.try_send(HubCommand::Input { user_id, seq, dx, dy });
                 }
                 Vec::new()
             }
+            ClientMsg::Resync => {
+                if let Some(link) = &self.link {
+                    // Must not be lost: without it the monsters stay frozen.
+                    let _ = link.commands.send(HubCommand::Resync { user_id }).await;
+                }
+                Vec::new()
+            }
             ClientMsg::NpcInteract { npc } => self.forward(HubCommand::Interact { user_id, npc }),
+            ClientMsg::StyleSet { look } => self.forward(HubCommand::Restyle { user_id, look }),
             ClientMsg::MissionSelect { mission, public } => {
                 if !self.in_hub() {
                     return vec![lobby_error("not_in_hub", "missions are picked at a board in the hub")];

@@ -1,6 +1,7 @@
 use super::middleware::AuthUser;
 use super::state::AppState;
-use crate::db::character_repo::CharacterRepo;
+use crate::db::character_repo::{CharacterRecord, CharacterRepo};
+use crate::world::protocol::Look;
 use crate::session::CharacterState;
 use axum::{
     extract::{Path, State},
@@ -11,10 +12,36 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+/// Character slots per account.
+pub const MAX_CHARACTERS: i64 = 6;
+
 #[derive(Deserialize)]
 pub struct CreateCharacterRequest {
     pub name: String,
     pub archetype: String,
+    /// Appearance; omitted fields take the default look.
+    #[serde(default)]
+    pub gender: Option<u8>,
+    #[serde(default)]
+    pub hair_style: Option<u8>,
+    #[serde(default)]
+    pub hair_color: Option<u8>,
+    #[serde(default)]
+    pub body_color: Option<u8>,
+}
+
+#[derive(Serialize)]
+pub struct LookDto {
+    pub gender: u8,
+    pub hair_style: u8,
+    pub hair_color: u8,
+    pub body_color: u8,
+}
+
+impl From<Look> for LookDto {
+    fn from(l: Look) -> Self {
+        Self { gender: l.gender, hair_style: l.hair, hair_color: l.hair_color, body_color: l.body_color }
+    }
 }
 
 #[derive(Serialize)]
@@ -29,7 +56,28 @@ pub struct CharacterDto {
     pub unlocked_skills: serde_json::Value,
     pub inventory: serde_json::Value,
     pub last_location_id: String,
+    pub look: LookDto,
     pub created_at: String,
+}
+
+impl CharacterDto {
+    fn of(r: CharacterRecord) -> Self {
+        let look = r.look().into();
+        Self {
+            id: r.id,
+            user_id: r.user_id,
+            stats: serde_json::from_str(&r.stats_json).unwrap_or(json!({})),
+            unlocked_skills: serde_json::from_str(&r.unlocked_skills_json).unwrap_or(json!([])),
+            inventory: serde_json::from_str(&r.inventory_json).unwrap_or(json!([])),
+            name: r.name,
+            archetype: r.archetype,
+            level: r.level,
+            base_exp: r.base_exp,
+            last_location_id: r.last_location_id,
+            look,
+            created_at: r.created_at,
+        }
+    }
 }
 
 fn initial_stats_for_archetype(archetype: &str) -> (serde_json::Value, serde_json::Value) {
@@ -72,28 +120,7 @@ pub async fn list_characters(
             )
         })?;
 
-    let characters: Vec<CharacterDto> = records
-        .into_iter()
-        .map(|r| {
-            let stats = serde_json::from_str(&r.stats_json).unwrap_or(json!({}));
-            let skills = serde_json::from_str(&r.unlocked_skills_json).unwrap_or(json!([]));
-            let inventory = serde_json::from_str(&r.inventory_json).unwrap_or(json!([]));
-
-            CharacterDto {
-                id: r.id,
-                user_id: r.user_id,
-                name: r.name,
-                archetype: r.archetype,
-                level: r.level,
-                base_exp: r.base_exp,
-                stats,
-                unlocked_skills: skills,
-                inventory,
-                last_location_id: r.last_location_id,
-                created_at: r.created_at,
-            }
-        })
-        .collect();
+    let characters: Vec<CharacterDto> = records.into_iter().map(CharacterDto::of).collect();
 
     Ok((StatusCode::OK, Json(characters)).into_response())
 }
@@ -131,6 +158,30 @@ pub async fn create_character(
         ));
     }
 
+    let defaults = Look::default();
+    let look = Look {
+        gender: payload.gender.unwrap_or(defaults.gender),
+        hair: payload.hair_style.unwrap_or(defaults.hair),
+        hair_color: payload.hair_color.unwrap_or(defaults.hair_color),
+        body_color: payload.body_color.unwrap_or(defaults.body_color),
+    };
+    if !look.is_valid() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Unknown gender, hairstyle or dye" })),
+        ));
+    }
+
+    let used = CharacterRepo::count_by_user_id(&state.pool, auth.user_id).await.map_err(|err| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": err.to_string() })))
+    })?;
+    if used >= MAX_CHARACTERS {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("All {MAX_CHARACTERS} character slots are taken") })),
+        ));
+    }
+
     let (initial_stats, initial_skills) = initial_stats_for_archetype(&archetype);
     let initial_inventory = json!([]);
     let initial_location = "hub_central";
@@ -144,6 +195,7 @@ pub async fn create_character(
         &initial_skills.to_string(),
         &initial_inventory.to_string(),
         initial_location,
+        look,
     )
     .await
     .map_err(|err| match err {
@@ -157,21 +209,7 @@ pub async fn create_character(
         ),
     })?;
 
-    let dto = CharacterDto {
-        id: record.id,
-        user_id: record.user_id,
-        name: record.name,
-        archetype: record.archetype,
-        level: record.level,
-        base_exp: record.base_exp,
-        stats: initial_stats,
-        unlocked_skills: initial_skills,
-        inventory: initial_inventory,
-        last_location_id: record.last_location_id,
-        created_at: record.created_at,
-    };
-
-    Ok((StatusCode::CREATED, Json(dto)).into_response())
+    Ok((StatusCode::CREATED, Json(CharacterDto::of(record))).into_response())
 }
 
 /// GET /api/characters/:id
@@ -195,25 +233,7 @@ pub async fn get_character(
             )
         })?;
 
-    let stats = serde_json::from_str(&record.stats_json).unwrap_or(json!({}));
-    let skills = serde_json::from_str(&record.unlocked_skills_json).unwrap_or(json!([]));
-    let inventory = serde_json::from_str(&record.inventory_json).unwrap_or(json!([]));
-
-    let dto = CharacterDto {
-        id: record.id,
-        user_id: record.user_id,
-        name: record.name,
-        archetype: record.archetype,
-        level: record.level,
-        base_exp: record.base_exp,
-        stats,
-        unlocked_skills: skills,
-        inventory,
-        last_location_id: record.last_location_id,
-        created_at: record.created_at,
-    };
-
-    Ok((StatusCode::OK, Json(dto)).into_response())
+    Ok((StatusCode::OK, Json(CharacterDto::of(record))).into_response())
 }
 
 /// POST /api/characters/:id/select
@@ -253,6 +273,7 @@ pub async fn select_character(
         skills.clone(),
         inventory.clone(),
         record.last_location_id.clone(),
+        record.look(),
     );
 
     if let Some(active_session) = state.session_registry.get(auth.user_id) {

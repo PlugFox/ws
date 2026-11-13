@@ -7,7 +7,7 @@
 //! goes straight between the socket task and the channel actor over mpsc.
 
 use super::hub::{Arrival, HubEvent, HubInstance, HubSimConfig, HubWorld, Outgoing, PlayerProfile};
-use super::protocol::ChannelInfo;
+use super::protocol::{ChannelInfo, Look};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -59,6 +59,10 @@ pub enum HubCommand {
     Input { user_id: u32, seq: u32, dx: f32, dy: f32 },
     Interact { user_id: u32, npc: String },
     SelectMission { user_id: u32, mission: String, public: bool },
+    /// The client could not apply a monster delta.
+    Resync { user_id: u32 },
+    /// Restyle at a stylist NPC.
+    Restyle { user_id: u32, look: Look },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -347,6 +351,8 @@ pub(crate) async fn run_instance(mut hub: HubInstance, mut commands: mpsc::Recei
                     HubCommand::SelectMission { user_id, mission, public } => {
                         hub.select_mission(user_id, &mission, public, &mut out)
                     }
+                    HubCommand::Resync { user_id } => hub.resync(user_id),
+                    HubCommand::Restyle { user_id, look } => hub.restyle(user_id, look, &mut out),
                 }
             }
             _ = interval.tick() => hub.tick(&mut out),
@@ -367,7 +373,9 @@ fn dispatch(hub: &mut HubInstance, outboxes: &mut HashMap<u32, mpsc::Sender<HubE
             let last = matches!(event, HubEvent::Transfer { .. });
             match tx.try_send(event) {
                 Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(HubEvent::Snapshot(_))) => {}
+                // Monster sections are deltas against the previous frame:
+                // the next one must be a keyframe.
+                Err(mpsc::error::TrySendError::Full(HubEvent::Snapshot(_))) => hub.resync(user_id),
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     warn!("Evicting user {user_id} from {}: outbox full", hub.name());
                     evict.push(user_id);
@@ -398,7 +406,7 @@ mod tests {
     }
 
     fn profile(user_id: u32) -> PlayerProfile {
-        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into() }
+        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: crate::world::protocol::Look::default() }
     }
 
     fn cfg(capacity: usize) -> HubConfig {

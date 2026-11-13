@@ -48,7 +48,117 @@ void main() {
         (s.mapEpoch, s.tick, s.ackSeq, s.ids[0], s.xs[0], s.ys[0], s.facings[0]),
         (3, 1234, 55, 42, 12.5, 300.25, 6),
       );
+      expect(s.mobBaseline, -1, reason: 'hub snapshots have no monster section');
       expect(Snapshot.decode(Uint8List.sublistView(b, 0, 21)), isNull);
+    });
+
+    // Golden frames: the same bytes are asserted by the server
+    // (`world/protocol.rs`, `golden`). Change both together.
+    Uint8List hex(String h) =>
+        Uint8List.fromList([for (var i = 0; i < h.length; i += 2) int.parse(h.substring(i, i + 2), radix: 16)]);
+    String toHex(Uint8List b) => b.map((v) => v.toRadixString(16).padLeft(2, '0')).join();
+
+    test('client frames match the server goldens', () {
+      expect(toHex(ClientMsg.hubJoin(2)), '4103');
+      expect(toHex(ClientMsg.hubJoin()), '4100');
+      expect(toHex(ClientMsg.missionSelect('m1', public: true)), '45026d3101');
+      expect(toHex(ClientMsg.lobbyKick(300)), '4aac02');
+      expect(toHex(ClientMsg.lobbyJoin('XY')), '46025859');
+      expect(toHex(ClientMsg.resync()), '4c');
+      expect(toHex(ClientMsg.styleSet(const Look(gender: 1, hair: 5, hairColor: 10, bodyColor: 6))), '4d01050a06');
+    });
+
+    test('server goldens decode', () {
+      final err = ServerMsg.decode(hex('280603666172'))! as HubError;
+      expect((err.code, err.message), ('npc_too_far', 'far'));
+
+      final joined = ServerMsg.decode(hex('30ac02016d14070206706f72696e6705666162726500002042'))! as StageJoined;
+      expect(
+        (joined.stageId, joined.mission, joined.tickRate, joined.entityId, joined.lightRadius),
+        (300, 'm', 20, 7, 40.0),
+      );
+      expect(joined.monsters, ['poring', 'fabre']);
+
+      final enter =
+          ServerMsg.decode(
+                hex(
+                  '210166054669656c64029003020000003f00000034c200002041000020420000a04106612e6f676702006000900000010902426f066e6f76696365c00000010601040203',
+                ),
+              )!
+              as MapEnter;
+      expect(
+        (enter.map.id, enter.map.name, enter.map.kind, enter.map.width, enter.map.height),
+        ('f', 'Field', 'field', 400, 2),
+      );
+      expect(enter.map.cellSize, 0.5);
+      expect(enter.map.camera, {
+        'type': 'free',
+        'pitch': -45.0,
+        'min_zoom': 10.0,
+        'max_zoom': 40.0,
+        'default_zoom': 20.0,
+      });
+      expect((enter.map.bgm, enter.mapEpoch, enter.x, enter.y, enter.viaPortal), ('a.ogg', 2, 1.5, 2.25, null));
+      final p = enter.players.single;
+      expect((p.entityId, p.name, p.archetype, p.x, p.y, p.facing), (9, 'Bo', 'novice', 3.0, 4.0, 6));
+      expect(p.look, const Look(gender: 1, hair: 4, hairColor: 2, bodyColor: 3));
+
+      final lobby =
+          (ServerMsg.decode(
+                    hex(
+                      '310105414232434416706f72696e675f69736c616e645f737572766976616c16506f72696e672049736c616e6420537572766976616c48486f6c64206f757420616761696e73742067726f77696e67207761766573206f6e20506f72696e672049736c616e6420756e74696c2074686520626f73732073686f77732075702e0a7072745f66696c6430380400010902426f066e6f7669636503',
+                    ),
+                  )!
+                  as LobbyState)
+              .lobby;
+      expect(
+        (lobby.lobbyId, lobby.code, lobby.public, lobby.mission.id, lobby.mission.maxPlayers),
+        (1, 'AB2CD', false, 'poring_island_survival', 4),
+      );
+      final m = lobby.members.single;
+      expect((m.entityId, m.name, m.ready, m.leader), (9, 'Bo', true, true));
+
+      expect(
+        (ServerMsg.decode(hex('32ff06637573746f6d'))! as LobbyLeft).reason,
+        'custom',
+        reason: 'unknown codes travel as strings',
+      );
+      expect((ServerMsg.decode(hex('1105'))! as Pong).ts, -3);
+      final look = ServerMsg.decode(hex('29ac02000c0f07'))! as PlayerLook;
+      expect((look.entityId, look.look), (300, const Look(hair: 12, hairColor: 15, bodyColor: 7)));
+    });
+
+    test('looks come from the REST character JSON', () {
+      expect(
+        Look.fromJson({'gender': 1, 'hair_style': 7, 'hair_color': 3, 'body_color': 2}),
+        const Look(gender: 1, hair: 7, hairColor: 3, bodyColor: 2),
+      );
+      expect(Look.fromJson(null), const Look(), reason: 'older servers: default look');
+    });
+
+    test('unknown kinds are ignored, malformed known ones throw', () {
+      expect(ServerMsg.decode(hex('7f0102')), isNull);
+      expect(() => ServerMsg.decode(hex('2806')), throwsA(isA<WireFormatError>()));
+      expect(() => ServerMsg.decode(hex('110500')), throwsA(isA<WireFormatError>()), reason: 'trailing bytes');
+    });
+
+    test('stage snapshot golden carries every monster op', () {
+      final s = Snapshot.decode(
+        hex('030400640000000c000000010009000000600080000201040e05018002000510f000fe0300808d01ffff00007f0103'),
+      )!;
+      expect((s.mapEpoch, s.tick, s.ackSeq, s.length, s.ids[0], s.xs[0], s.ys[0]), (4, 100, 12, 1, 9, 1.5, 2.0));
+      expect(s.mobBaseline, 1);
+      expect(s.mobOps, [MobOp.spawn, MobOp.nudge, MobOp.move, MobOp.remove]);
+      expect(s.mobSlots, [3, 4, 40, 41]);
+      expect(
+        (s.mobGenerations[0], s.mobKinds[0], s.mobXs[0], s.mobYs[0], s.mobVxs[0], s.mobVys[0]),
+        (5, 1, 640, 1280, 16, -16),
+      );
+      expect((s.mobXs[1], s.mobYs[1], s.mobVxs[1], s.mobVys[1]), (-2, 3, 0, -128));
+      expect((s.mobXs[2], s.mobYs[2], s.mobVxs[2], s.mobVys[2]), (65535, 0, 127, 1));
+      final b = hex('030400640000000c000000010009000000600080000201040e05018002000510f000fe0300808d01ffff00007f0103');
+      expect(Snapshot.decode(Uint8List.sublistView(b, 0, b.length - 1)), isNull);
+      expect(Snapshot.decode(Uint8List.fromList([...b, 0])), isNull, reason: 'trailing bytes');
     });
 
     test('facing matches the server convention', () {

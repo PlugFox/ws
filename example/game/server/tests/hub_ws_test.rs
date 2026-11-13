@@ -5,7 +5,8 @@ use game_server::world::map::{
     CameraConstraint, Dimensions, HeightBounds, Heightmap, LocationKind, LocationManifest, MapData, NpcDef, PortalDef,
     WalkGrid,
 };
-use game_server::world::{HubWorld, Snapshot};
+use game_server::world::protocol::{kind, MapInfo};
+use game_server::world::{ClientMsg, HubWorld, ServerMsg, Snapshot};
 use game_server::world::horde::catalog::{MonsterCatalog, MonsterDef};
 use game_server::{config::AppConfig, create_app_with_monsters, api::AppState};
 use serde_json::{json, Value};
@@ -150,48 +151,71 @@ async fn player(addr: SocketAddr, name: &str, select: bool) -> (String, u64) {
 
 async fn connect(addr: SocketAddr, token: &str) -> Ws {
     let (mut ws, _) = connect_async(format!("ws://{addr}/api/ws?token={token}")).await.unwrap();
-    let hello = next_json(&mut ws).await;
-    assert_eq!(hello["type"], "connected");
+    assert!(matches!(next_msg(&mut ws).await, ServerMsg::Connected { .. }));
     ws
 }
 
-async fn send(ws: &mut Ws, v: Value) {
-    ws.send(Message::Text(v.to_string().into())).await.unwrap();
+async fn send(ws: &mut Ws, m: ClientMsg) {
+    ws.send(Message::Binary(m.encode())).await.unwrap();
 }
 
-/// Next text frame, skipping binary snapshots.
-async fn next_json(ws: &mut Ws) -> Value {
+/// Next control message, skipping snapshots.
+async fn next_msg(ws: &mut Ws) -> ServerMsg {
     loop {
         let msg = tokio::time::timeout(Duration::from_secs(3), ws.next()).await.expect("timeout").unwrap().unwrap();
         match msg {
-            Message::Text(t) => return serde_json::from_str(&t).unwrap(),
-            Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Binary(b) if Snapshot::decode(&b).is_some() => continue,
+            Message::Binary(b) => return ServerMsg::decode(&b).unwrap_or_else(|| panic!("undecodable frame {b:02x?}")),
+            Message::Ping(_) | Message::Pong(_) => continue,
             other => panic!("unexpected frame {other:?}"),
         }
     }
 }
 
-/// Next text frame of type `ty`; fails after 5 s overall (snapshots keep
-/// arriving, so a per-frame timeout alone would never fire).
-async fn next_json_of(ws: &mut Ws, ty: &str) -> Value {
+/// Next control message matching `pred`; fails after 5 s overall
+/// (snapshots keep arriving, so a per-frame timeout alone would never fire).
+async fn next_where(ws: &mut Ws, what: &str, pred: impl Fn(&ServerMsg) -> bool) -> ServerMsg {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        assert!(tokio::time::Instant::now() < deadline, "no {ty} within 5 s");
-        let v = next_json(ws).await;
-        if v["type"] == ty {
-            return v;
+        assert!(tokio::time::Instant::now() < deadline, "no {what} within 5 s");
+        let m = next_msg(ws).await;
+        if pred(&m) {
+            return m;
         }
     }
+}
+
+macro_rules! next_of {
+    ($ws:expr, $variant:ident) => {
+        match next_where($ws, stringify!($variant), |m| matches!(m, ServerMsg::$variant { .. })).await {
+            ServerMsg::$variant { .. } => {}
+            _ => unreachable!(),
+        }
+    };
+    ($ws:expr, $variant:ident { $($field:ident),* }) => {
+        match next_where($ws, stringify!($variant), |m| matches!(m, ServerMsg::$variant { .. })).await {
+            ServerMsg::$variant { $($field,)* .. } => ($($field,)*),
+            _ => unreachable!(),
+        }
+    };
+}
+
+fn input(seq: u32, dx: f32, dy: f32) -> ClientMsg {
+    ClientMsg::Input { seq, dx, dy }
+}
+
+fn mission_select(public: bool) -> ClientMsg {
+    ClientMsg::MissionSelect { mission: "poring_island_survival".into(), public }
 }
 
 async fn next_snapshot(ws: &mut Ws, pred: impl Fn(&Snapshot) -> bool) -> Snapshot {
     loop {
         let msg = tokio::time::timeout(Duration::from_secs(3), ws.next()).await.expect("timeout").unwrap().unwrap();
-        if let Message::Binary(b) = msg {
-            let s = Snapshot::decode(&b).expect("valid snapshot");
-            if pred(&s) {
-                return s;
-            }
+        if let Message::Binary(b) = msg
+            && let Some(s) = Snapshot::decode(&b)
+            && pred(&s)
+        {
+            return s;
         }
     }
 }
@@ -201,18 +225,21 @@ async fn join_requires_selected_character() {
     let (addr, _state) = start().await;
     let (token, _) = player(addr, "nochar", false).await;
     let mut ws = connect(addr, &token).await;
-    send(&mut ws, json!({ "type": "hub_join" })).await;
-    let err = next_json(&mut ws).await;
-    assert_eq!(err["type"], "hub_error");
-    assert_eq!(err["code"], "no_character");
+    send(&mut ws, ClientMsg::HubJoin { channel: None }).await;
+    let (code,) = next_of!(&mut ws, HubError { code });
+    assert_eq!(code, "no_character");
 
     // Ping still works next to the hub protocol.
-    send(&mut ws, json!({ "type": "ping" })).await;
-    assert_eq!(next_json(&mut ws).await["type"], "pong");
+    send(&mut ws, ClientMsg::Ping).await;
+    next_of!(&mut ws, Pong);
 
-    // Malformed known message is reported, unknown types are ignored.
-    send(&mut ws, json!({ "type": "hub_input", "seq": "x" })).await;
-    assert_eq!(next_json(&mut ws).await["code"], "bad_message");
+    // A malformed known message is reported; unknown kinds and text frames
+    // are not part of the protocol.
+    ws.send(Message::Binary(vec![kind::LOBBY_READY, 7].into())).await.unwrap();
+    assert_eq!(next_of!(&mut ws, HubError { code }).0, "bad_message");
+    ws.send(Message::Binary(vec![0x7F, 1, 2].into())).await.unwrap();
+    ws.send(Message::Text("{\"type\":\"ping\"}".into())).await.unwrap();
+    assert_eq!(next_of!(&mut ws, HubError { code }).0, "bad_message", "the unknown kind was ignored");
 }
 
 #[tokio::test]
@@ -223,32 +250,28 @@ async fn hub_flow_join_move_portal_and_peers() {
     let mut a = connect(addr, &token_a).await;
     let mut b = connect(addr, &token_b).await;
 
-    send(&mut a, json!({ "type": "hub_join" })).await;
-    let joined = next_json(&mut a).await;
-    assert_eq!(joined["type"], "hub_joined");
-    assert_eq!(joined["channel_name"], "Hub-1");
-    assert_eq!(joined["entity_id"], char_a);
-    let enter = next_json(&mut a).await;
-    assert_eq!(enter["type"], "map_enter");
-    assert_eq!(enter["map"]["id"], "town");
-    assert_eq!(enter["map"]["camera"]["type"], "free");
-    assert_eq!(enter["map"]["camera"]["max_zoom"], 40.0);
-    let x0 = enter["x"].as_f64().unwrap() as f32;
+    send(&mut a, ClientMsg::HubJoin { channel: None }).await;
+    let ServerMsg::HubJoined { channel_name, entity_id, .. } = next_msg(&mut a).await else { panic!("hub_joined first") };
+    assert_eq!(channel_name, "Hub-1");
+    assert_eq!(entity_id as u64, char_a);
+    let ServerMsg::MapEnter { map, x: x0, .. } = next_msg(&mut a).await else { panic!("then map_enter") };
+    assert_eq!(map.id, "town");
+    assert!(matches!(map.camera, CameraConstraint::Free { max_zoom: 40.0, .. }), "{:?}", map.camera);
 
     // Bob joins: Alice sees him appear, Bob's map_enter lists Alice.
-    send(&mut b, json!({ "type": "hub_join", "channel": 1 })).await;
-    let b_enter = next_json_of(&mut b, "map_enter").await;
-    assert_eq!(b_enter["players"][0]["entity_id"], char_a);
-    let appeared = next_json_of(&mut a, "player_appeared").await;
-    assert_eq!(appeared["player"]["entity_id"], char_b);
+    send(&mut b, ClientMsg::HubJoin { channel: Some(1) }).await;
+    let (players,) = next_of!(&mut b, MapEnter { players });
+    assert_eq!(players[0].entity_id as u64, char_a);
+    let (player,) = next_of!(&mut a, PlayerAppeared { player });
+    assert_eq!(player.entity_id as u64, char_b);
 
-    send(&mut a, json!({ "type": "hub_channels" })).await;
-    let list = next_json_of(&mut a, "hub_channels").await;
-    assert_eq!(list["channels"][0]["population"], 2);
+    send(&mut a, ClientMsg::HubChannels).await;
+    let (channels,) = next_of!(&mut a, HubChannels { channels });
+    assert_eq!(channels[0].population, 2);
 
     // Alice walks east; the snapshot acks her input and shows her moving.
     for seq in 1..=3u32 {
-        send(&mut a, json!({ "type": "hub_input", "seq": seq, "dx": 1.0, "dy": 0.0 })).await;
+        send(&mut a, input(seq, 1.0, 0.0)).await;
     }
     let snap = next_snapshot(&mut a, |s| s.ack_seq == 3).await;
     let me = snap.entities.iter().find(|e| e.0 == char_a as u32).unwrap();
@@ -257,23 +280,22 @@ async fn hub_flow_join_move_portal_and_peers() {
 
     // Keep walking into the door: fixed indoor camera arrives over the wire.
     let mut seq = 3u32;
-    let indoor = loop {
+    let (indoor, via, epoch): (MapInfo, Option<String>, u16) = loop {
         seq += 1;
-        send(&mut a, json!({ "type": "hub_input", "seq": seq, "dx": 1.0, "dy": 0.0 })).await;
+        send(&mut a, input(seq, 1.0, 0.0)).await;
         let msg = tokio::time::timeout(Duration::from_secs(3), a.next()).await.unwrap().unwrap().unwrap();
-        if let Message::Text(t) = msg {
-            let v: Value = serde_json::from_str(&t).unwrap();
-            if v["type"] == "map_enter" {
-                break v;
-            }
+        if let Message::Binary(b) = msg
+            && let Some(ServerMsg::MapEnter { map, via_portal, map_epoch, .. }) = ServerMsg::decode(&b)
+        {
+            break (map, via_portal, map_epoch);
         }
         assert!(seq < 500, "never reached the door");
     };
-    assert_eq!(indoor["map"]["id"], "house");
-    assert_eq!(indoor["via_portal"], "to_house");
-    assert_eq!(indoor["map_epoch"], 1);
-    assert_eq!(indoor["map"]["camera"], json!({ "type": "fixed", "yaw": 0.0, "pitch": -45.0, "zoom": 18.0 }));
-    assert_eq!(next_json_of(&mut b, "player_vanished").await["entity_id"], char_a);
+    assert_eq!(indoor.id, "house");
+    assert_eq!(via.as_deref(), Some("to_house"));
+    assert_eq!(epoch, 1);
+    assert_eq!(indoor.camera, CameraConstraint::Fixed { yaw: 0.0, pitch: -45.0, zoom: 18.0 });
+    assert_eq!(next_of!(&mut b, PlayerVanished { entity_id }).0 as u64, char_a);
 
     // The location is tracked on the in-memory character (flushed later).
     let session = state.session_registry.all_sessions().into_iter().find(|s| {
@@ -300,8 +322,8 @@ async fn displaced_socket_leaves_hub_without_kicking_successor() {
     let (addr, state) = start().await;
     let (token_1, char_id) = player(addr, "carol", true).await;
     let mut ws1 = connect(addr, &token_1).await;
-    send(&mut ws1, json!({ "type": "hub_join" })).await;
-    next_json_of(&mut ws1, "map_enter").await;
+    send(&mut ws1, ClientMsg::HubJoin { channel: None }).await;
+    next_of!(&mut ws1, MapEnter);
 
     // Second login displaces the first session; select again and join.
     let http = reqwest::Client::new();
@@ -320,11 +342,11 @@ async fn displaced_socket_leaves_hub_without_kicking_successor() {
         .send()
         .await
         .unwrap();
-    assert_eq!(next_json_of(&mut ws1, "displaced").await["type"], "displaced");
+    next_of!(&mut ws1, Displaced);
 
     let mut ws2 = connect(addr, &token_2).await;
-    send(&mut ws2, json!({ "type": "hub_join" })).await;
-    next_json_of(&mut ws2, "map_enter").await;
+    send(&mut ws2, ClientMsg::HubJoin { channel: None }).await;
+    next_of!(&mut ws2, MapEnter);
     // Snapshots keep flowing to the new socket after the old one is gone.
     tokio::time::sleep(Duration::from_millis(200)).await;
     let snap = next_snapshot(&mut ws2, |_| true).await;
@@ -333,17 +355,15 @@ async fn displaced_socket_leaves_hub_without_kicking_successor() {
 }
 
 #[tokio::test]
-async fn binary_frames_and_mission_board() {
+async fn binary_input_and_mission_board() {
     let (addr, _state) = start().await;
     let (token, char_id) = player(addr, "dave", true).await;
     let mut ws = connect(addr, &token).await;
 
-    // JSON control message inside a binary frame.
-    ws.send(Message::Binary(json!({ "type": "hub_join" }).to_string().into_bytes().into())).await.unwrap();
-    let enter = next_json_of(&mut ws, "map_enter").await;
-    let x0 = enter["x"].as_f64().unwrap() as f32;
+    send(&mut ws, ClientMsg::HubJoin { channel: None }).await;
+    let (x0,) = next_of!(&mut ws, MapEnter { x });
 
-    // Binary input: u8 kind, u32 seq, i16 dx, i16 dy.
+    // Raw input frame: u8 kind, u32 seq, i16 dx, i16 dy.
     for seq in 1..=3u32 {
         let mut b = vec![0x02u8];
         b.extend_from_slice(&seq.to_le_bytes());
@@ -355,14 +375,14 @@ async fn binary_frames_and_mission_board() {
     let me = snap.entities.iter().find(|e| e.0 == char_id as u32).unwrap();
     assert!(me.1 > x0);
 
-    send(&mut ws, json!({ "type": "npc_interact", "npc": "board" })).await;
-    let dialog = next_json_of(&mut ws, "npc_dialog").await;
-    assert_eq!(dialog["kind"], "mission_board");
-    assert_eq!(dialog["missions"][0]["id"], "poring_island_survival");
+    send(&mut ws, ClientMsg::NpcInteract { npc: "board".into() }).await;
+    let (npc_kind, missions) = next_of!(&mut ws, NpcDialog { kind, missions });
+    assert_eq!(npc_kind, "mission_board");
+    assert_eq!(missions[0].id, "poring_island_survival");
 
     // This server has no stage maps loaded.
-    send(&mut ws, json!({ "type": "mission_select", "mission": "poring_island_survival" })).await;
-    assert_eq!(next_json_of(&mut ws, "lobby_error").await["code"], "mission_unavailable");
+    send(&mut ws, mission_select(true)).await;
+    assert_eq!(next_of!(&mut ws, LobbyError { code }).0, "mission_unavailable");
 }
 
 #[tokio::test]
@@ -373,91 +393,87 @@ async fn lobby_ready_check_stage_launch_and_return() {
     let mut a = connect(addr, &ta).await;
     let mut b = connect(addr, &tb).await;
     for ws in [&mut a, &mut b] {
-        send(ws, json!({ "type": "hub_join" })).await;
-        next_json_of(ws, "map_enter").await;
+        send(ws, ClientMsg::HubJoin { channel: None }).await;
+        next_of!(ws, MapEnter);
     }
 
     // Lobby messages only from the hub, and missions only at a board.
-    send(&mut a, json!({ "type": "lobby_ready", "ready": true })).await;
-    assert_eq!(next_json_of(&mut a, "lobby_error").await["code"], "not_in_lobby");
+    send(&mut a, ClientMsg::LobbyReady { ready: true }).await;
+    assert_eq!(next_of!(&mut a, LobbyError { code }).0, "not_in_lobby");
 
     // Both pick the public mission: they land in one lobby, erin leads.
-    send(&mut a, json!({ "type": "mission_select", "mission": "poring_island_survival" })).await;
-    let lobby = next_json_of(&mut a, "lobby_state").await["lobby"].clone();
-    assert_eq!(lobby["members"].as_array().unwrap().len(), 1);
-    send(&mut b, json!({ "type": "mission_select", "mission": "poring_island_survival", "public": true })).await;
-    let lobby = next_json_of(&mut b, "lobby_state").await["lobby"].clone();
-    let members = lobby["members"].as_array().unwrap();
-    assert_eq!(members.len(), 2);
-    assert_eq!(members[0]["entity_id"], a_id);
-    assert_eq!(members[0]["leader"], true);
+    send(&mut a, mission_select(true)).await;
+    assert_eq!(next_of!(&mut a, LobbyState { lobby }).0.members.len(), 1);
+    send(&mut b, mission_select(true)).await;
+    let (lobby,) = next_of!(&mut b, LobbyState { lobby });
+    assert_eq!(lobby.members.len(), 2);
+    assert_eq!(lobby.members[0].entity_id as u64, a_id);
+    assert!(lobby.members[0].leader);
 
     // Ready check: finn is not ready yet.
-    send(&mut a, json!({ "type": "lobby_start" })).await;
-    assert_eq!(next_json_of(&mut a, "lobby_error").await["code"], "not_ready");
-    send(&mut b, json!({ "type": "lobby_ready", "ready": true })).await;
+    send(&mut a, ClientMsg::LobbyStart).await;
+    assert_eq!(next_of!(&mut a, LobbyError { code }).0, "not_ready");
+    send(&mut b, ClientMsg::LobbyReady { ready: true }).await;
     loop {
-        let l = next_json_of(&mut a, "lobby_state").await;
-        if l["lobby"]["members"][1]["ready"] == true {
+        let (l,) = next_of!(&mut a, LobbyState { lobby });
+        if l.members[1].ready {
             break;
         }
     }
-    send(&mut a, json!({ "type": "lobby_start" })).await;
+    send(&mut a, ClientMsg::LobbyStart).await;
 
     // Both move to the same stage; epochs keep rising across instances.
     let mut stage_ids = Vec::new();
     for ws in [&mut a, &mut b] {
-        assert_eq!(next_json_of(ws, "lobby_left").await["reason"], "launched");
-        let joined = next_json_of(ws, "stage_joined").await;
-        assert_eq!(joined["mission"], "poring_island_survival");
-        assert_eq!(joined["monsters"], json!(["poring"]), "kind index → id table");
-        assert!(joined["light_radius"].as_f64().unwrap() > 0.0, "the client draws the light");
-        stage_ids.push(joined["stage_id"].as_u64().unwrap());
-        let enter = next_json_of(ws, "map_enter").await;
-        assert_eq!(enter["map"]["id"], "prt_fild08");
-        assert_eq!(enter["map"]["kind"], "field");
-        assert!(enter["map_epoch"].as_u64().unwrap() >= 1, "epoch continues after the hub's 0");
+        assert_eq!(next_of!(ws, LobbyLeft { reason }).0, "launched");
+        let (stage_id, mission, monsters, light_radius) =
+            next_of!(ws, StageJoined { stage_id, mission, monsters, light_radius });
+        assert_eq!(mission, "poring_island_survival");
+        assert_eq!(monsters, ["poring"], "kind index → id table");
+        assert!(light_radius > 0.0, "the client draws the light");
+        stage_ids.push(stage_id);
+        let (map, map_epoch) = next_of!(ws, MapEnter { map, map_epoch });
+        assert_eq!(map.id, "prt_fild08");
+        assert_eq!(map.kind, LocationKind::Field);
+        assert!(map_epoch >= 1, "epoch continues after the hub's 0");
     }
     assert_eq!(stage_ids[0], stage_ids[1]);
     let lobbies = state.lobbies.as_ref().unwrap();
     assert_eq!(lobbies.stages().active(), 1);
     assert_eq!(state.hub.as_ref().unwrap().channels()[0].population, 0, "the party left the hub");
-    // Stage snapshots carry the monster block (empty here: the synthetic
-    // field is smaller than the light radius).
-    let raw = loop {
-        if let Message::Binary(b) = tokio::time::timeout(Duration::from_secs(3), a.next()).await.unwrap().unwrap().unwrap() {
-            break b;
-        }
-    };
-    assert_eq!(raw[0], 0x03, "stage snapshot kind");
+    // Stage snapshots carry the monster section (empty here: the synthetic
+    // field has no monsters yet); the first one is a keyframe.
     let snap = next_snapshot(&mut a, |s| s.entities.len() == 2).await;
     assert!(snap.entities.iter().any(|e| e.0 == b_id as u32));
+    assert!(snap.monsters.is_some(), "stage snapshot kind");
+    // A resync request is accepted (the next delta is a keyframe).
+    send(&mut a, ClientMsg::Resync).await;
+    next_snapshot(&mut a, |s| s.monsters.as_ref().is_some_and(|m| m.baseline == 0)).await;
 
     // finn walks west into the exit and returns to the town at (3,3).
     // Paced like a client (one input per tick), so the held direction never
     // times out on the way.
     let mut seq = 0u32;
-    let joined = loop {
+    let channel = loop {
         seq += 1;
         assert!(seq < 100, "never reached the exit");
-        send(&mut b, json!({ "type": "hub_input", "seq": seq, "dx": -1, "dy": 0 })).await;
-        if let Ok(Some(Ok(Message::Text(t)))) = tokio::time::timeout(Duration::from_millis(50), b.next()).await {
-            let v: Value = serde_json::from_str(&t).unwrap();
-            if v["type"] == "hub_joined" {
-                break v;
-            }
+        send(&mut b, input(seq, -1.0, 0.0)).await;
+        if let Ok(Some(Ok(Message::Binary(f)))) = tokio::time::timeout(Duration::from_millis(50), b.next()).await
+            && let Some(ServerMsg::HubJoined { channel, .. }) = ServerMsg::decode(&f)
+        {
+            break channel;
         }
     };
-    assert_eq!(joined["channel"], 1, "back to the channel they came from");
-    let enter = next_json_of(&mut b, "map_enter").await;
-    assert_eq!(enter["map"]["id"], "town");
-    assert_eq!((enter["x"].as_f64().unwrap(), enter["y"].as_f64().unwrap()), (3.5, 3.5));
-    assert_eq!(next_json_of(&mut a, "player_vanished").await["entity_id"], b_id);
+    assert_eq!(channel, 1, "back to the channel they came from");
+    let (map, x, y) = next_of!(&mut b, MapEnter { map, x, y });
+    assert_eq!(map.id, "town");
+    assert_eq!((x, y), (3.5, 3.5));
+    assert_eq!(next_of!(&mut a, PlayerVanished { entity_id }).0 as u64, b_id);
 
     // erin abandons the stage from the panel: the stage ends.
-    send(&mut a, json!({ "type": "stage_leave" })).await;
-    next_json_of(&mut a, "hub_joined").await;
-    assert_eq!(next_json_of(&mut a, "map_enter").await["map"]["id"], "town");
+    send(&mut a, ClientMsg::StageLeave).await;
+    next_of!(&mut a, HubJoined);
+    assert_eq!(next_of!(&mut a, MapEnter { map }).0.id, "town");
     assert_eq!(lobbies.stages().active(), 0, "the stage ended with its last player");
     assert_eq!(state.hub.as_ref().unwrap().channels()[0].population, 2);
 }
@@ -470,29 +486,26 @@ async fn private_lobby_by_code_and_disconnect_promotes() {
     let mut a = connect(addr, &ta).await;
     let mut b = connect(addr, &tb).await;
     for ws in [&mut a, &mut b] {
-        send(ws, json!({ "type": "hub_join" })).await;
-        next_json_of(ws, "map_enter").await;
+        send(ws, ClientMsg::HubJoin { channel: None }).await;
+        next_of!(ws, MapEnter);
     }
-    send(&mut a, json!({ "type": "mission_select", "mission": "poring_island_survival", "public": false })).await;
-    let lobby = next_json_of(&mut a, "lobby_state").await["lobby"].clone();
-    assert_eq!(lobby["public"], false);
-    let code = lobby["code"].as_str().unwrap().to_string();
+    send(&mut a, mission_select(false)).await;
+    let (lobby,) = next_of!(&mut a, LobbyState { lobby });
+    assert!(!lobby.public);
 
     // Public matchmaking does not find it; the code does.
-    send(&mut b, json!({ "type": "lobby_join", "code": "NOPE1" })).await;
-    assert_eq!(next_json_of(&mut b, "lobby_error").await["code"], "no_such_lobby");
-    send(&mut b, json!({ "type": "lobby_join", "code": code.to_lowercase() })).await;
-    let lobby = next_json_of(&mut b, "lobby_state").await["lobby"].clone();
-    assert_eq!(lobby["members"].as_array().unwrap().len(), 2);
+    send(&mut b, ClientMsg::LobbyJoin { code: "NOPE1".into() }).await;
+    assert_eq!(next_of!(&mut b, LobbyError { code }).0, "no_such_lobby");
+    send(&mut b, ClientMsg::LobbyJoin { code: lobby.code.to_lowercase() }).await;
+    assert_eq!(next_of!(&mut b, LobbyState { lobby }).0.members.len(), 2);
 
     // The leader's socket drops: hugo leads the lobby now.
     a.close(None).await.unwrap();
-    let lobby = next_json_of(&mut b, "lobby_state").await["lobby"].clone();
-    let members = lobby["members"].as_array().unwrap();
-    assert_eq!(members.len(), 1);
-    assert_eq!((members[0]["entity_id"].as_u64().unwrap(), members[0]["leader"].as_bool().unwrap()), (b_id, true));
-    send(&mut b, json!({ "type": "lobby_leave" })).await;
-    assert_eq!(next_json_of(&mut b, "lobby_left").await["reason"], "left");
+    let (lobby,) = next_of!(&mut b, LobbyState { lobby });
+    assert_eq!(lobby.members.len(), 1);
+    assert_eq!((lobby.members[0].entity_id as u64, lobby.members[0].leader), (b_id, true));
+    send(&mut b, ClientMsg::LobbyLeave).await;
+    assert_eq!(next_of!(&mut b, LobbyLeft { reason }).0, "left");
     assert_eq!(state.lobbies.as_ref().unwrap().open_lobbies(), 0);
 }
 
@@ -504,14 +517,14 @@ async fn stale_socket_with_same_token_does_not_evict_successor() {
     let (addr, state) = start_with(vec![synthetic_stage()]).await;
     let (token, _) = player(addr, "ivy", true).await;
     let mut old = connect(addr, &token).await;
-    send(&mut old, json!({ "type": "hub_join" })).await;
-    next_json_of(&mut old, "map_enter").await;
+    send(&mut old, ClientMsg::HubJoin { channel: None }).await;
+    next_of!(&mut old, MapEnter);
 
     let mut new = connect(addr, &token).await;
-    send(&mut new, json!({ "type": "hub_join" })).await;
-    next_json_of(&mut new, "map_enter").await;
-    send(&mut new, json!({ "type": "mission_select", "mission": "poring_island_survival", "public": false })).await;
-    next_json_of(&mut new, "lobby_state").await;
+    send(&mut new, ClientMsg::HubJoin { channel: None }).await;
+    next_of!(&mut new, MapEnter);
+    send(&mut new, mission_select(false)).await;
+    next_of!(&mut new, LobbyState);
 
     old.close(None).await.unwrap();
     drop(old);

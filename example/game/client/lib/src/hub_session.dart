@@ -20,6 +20,8 @@ final class _Npc {
       name = j['name']! as String,
       sprite = j['sprite']! as String,
       kind = (j['kind'] as String?) ?? 'talk',
+      cutin = j['cutin'] as String?,
+      text = j['text'] as String?,
       x = (j['x']! as num).toDouble() + 0.5,
       y = (j['y']! as num).toDouble() + 0.5,
       facing = (j['facing'] as num?)?.toInt() ?? 4,
@@ -30,6 +32,8 @@ final class _Npc {
   final String name;
   final String sprite;
   final String kind;
+  final String? cutin;
+  final String? text;
   final double x;
   final double y;
   final int facing;
@@ -44,10 +48,11 @@ final class _Npc {
   }
 }
 
-/// A stage monster seen in snapshots. Its identity is `(slot, generation)`:
-/// a new generation on the same slot is a different monster.
+/// A stage monster as the server last described it: a dead-reckoning
+/// record (see [Reckoning]). Its identity is `(slot, generation)`: a new
+/// generation on the same slot is a different monster.
 final class _Mob {
-  _Mob(this.slot, this.generation, this.kind) : track = RemoteTrack(entityIdOf(slot));
+  _Mob(this.slot, this.generation, this.kind);
 
   /// Engine ids of monsters: above every character id, below 2^24 (exact in
   /// float32), and positive (NPCs are negative).
@@ -56,23 +61,52 @@ final class _Mob {
   final int slot;
   final int generation;
   final int kind;
-  final RemoteTrack track;
-  double lastSeen = 0;
+  double get id => entityIdOf(slot).toDouble();
+
+  // Record: position (1/64 cell), velocity (1/256 cell/tick), stamp tick.
+  int x = 0;
+  int y = 0;
+  int vx = 0;
+  int vy = 0;
+  int stamp = 0;
   int facing = 4;
-  double lastX = double.nan;
-  double lastY = double.nan;
+
+  /// The record changed since it was last handed to the engine.
+  bool dirty = true;
+
+  /// Removed by the server at this tick; dropped once the render clock
+  /// gets there (it renders slightly in the past).
+  int? removeAt;
+
+  void set(int x, int y, int vx, int vy, int stamp) {
+    this
+      ..x = x
+      ..y = y
+      ..vx = vx
+      ..vy = vy
+      ..stamp = stamp
+      ..dirty = true;
+    // Facing from the velocity, with a dead zone so push-out nudges in a
+    // settled crowd do not spin the sprite.
+    if (vx * vx + vy * vy >= 9) facing = facingOf(vx.toDouble(), vy.toDouble());
+  }
+
+  bool get moving => vx * vx + vy * vy >= 9;
 }
 
 final class _Peer {
-  _Peer(this.name, this.archetype);
+  _Peer(this.name, this.archetype, this.look);
   final String name;
   final String archetype;
+  Look look;
 }
 
 /// One connected hub session: network, prediction, interpolation and the
 /// render loop feeding the engine façade.
 final class HubSession {
-  HubSession(this.api, this.view, {required this.assetsBase, required String characterName}) : _myName = characterName;
+  HubSession(this.api, this.view, {required this.assetsBase, required String characterName, Look look = const Look()})
+    : _myName = characterName,
+      _myLook = look;
 
   final Api api;
   final GameView view;
@@ -84,13 +118,18 @@ final class HubSession {
   int? _me;
   String _myName;
   String _myArchetype = 'novice';
+  Look _myLook;
+
+  /// The stylist window is open (NPC id), and a restyle is in flight.
+  String? _stylist;
+  bool _styling = false;
   String _channel = '-';
 
   /// In a stage instance (not the hub).
   bool _inStage = false;
 
-  /// Current lobby (`lobby_state.lobby`), or null.
-  Map<String, Object?>? _lobby;
+  /// Current lobby (`LobbyState`), or null.
+  LobbyInfo? _lobby;
   String _missionName = '';
   int _tickHz = 20;
   String _mapId = '';
@@ -109,9 +148,11 @@ final class HubSession {
   final _mobs = <int, _Mob>{};
   var _monsterKinds = const <String>[];
 
-  /// A monster not refreshed for this long left the view (or died); one
-  /// missing snapshot alone means nothing once frames ride on datagrams.
-  static const _mobTimeout = 0.5;
+  /// Tick of the last monster section applied; null until a keyframe
+  /// (after a map change, or when a delta did not apply and a resync is
+  /// pending).
+  int? _mobTick;
+  bool _resyncSent = false;
   var _npcs = <_Npc>[];
   _Npc? _nearNpc;
 
@@ -148,7 +189,7 @@ final class HubSession {
     _subs.add(
       _ws.states.listen((s) {
         if (s is WebSocketState$Open) {
-          _send({'type': 'hub_join'});
+          _send(ClientMsg.hubJoin());
         }
       }),
     );
@@ -164,19 +205,22 @@ final class HubSession {
     await _ws.connect('$scheme://${loc.host}/api/ws?token=${Uri.encodeQueryComponent(token)}');
     Timer.periodic(const Duration(seconds: 2), (_) {
       _pingSentAt = _now();
-      _send({'type': 'ping'});
+      _send(ClientMsg.ping());
     });
     // Read-only probe for scripted browser tests and bots.
-    globalContext.setProperty('gameDebug'.toJS, (() {
-      final p = _predictor;
-      return jsonEncode({'map': _mapId, 'loading': _loading, 'x': p?.x, 'y': p?.y, 'peers': _peers.length});
-    }).toJS);
+    globalContext.setProperty(
+      'gameDebug'.toJS,
+      (() {
+        final p = _predictor;
+        return jsonEncode({'map': _mapId, 'loading': _loading, 'x': p?.x, 'y': p?.y, 'peers': _peers.length});
+      }).toJS,
+    );
     _frame(0);
   }
 
-  void _send(Map<String, Object?> msg) {
+  void _send(Uint8List frame) {
     if (_ws.state is! WebSocketState$Open) return;
-    _ws.push(utf8.encode(jsonEncode(msg))).ignore();
+    _ws.push(frame).ignore();
   }
 
   // ---------------------------------------------------------------- network
@@ -188,40 +232,45 @@ final class HubSession {
       if (s != null) _onSnapshot(s);
       return;
     }
-    if (data[0] != 0x7B) return; // '{'
-    final msg = jsonDecode(utf8.decode(data)) as Map<String, Object?>;
-    switch (msg['type']) {
-      case 'connected':
+    final ServerMsg? msg;
+    try {
+      msg = ServerMsg.decode(data);
+    } on Object catch (e) {
+      web.console.warn('bad frame 0x${data[0].toRadixString(16)}: $e'.toJS);
+      return;
+    }
+    switch (msg) {
+      case null || Connected() || HubChannels() || Notification():
         break;
-      case 'pong':
+      case Pong():
         if (_pingSentAt > 0) _rttMs = (_now() - _pingSentAt) * 1000;
-      case 'hub_joined':
-        _me = (msg['entity_id']! as num).toInt();
-        _channel = msg['channel_name']! as String;
-        _tickHz = (msg['tick_rate']! as num).toInt();
+      case HubJoined(:final entityId, :final channelName, :final tickRate):
+        _me = entityId;
+        _channel = channelName;
+        _tickHz = tickRate;
         _clock = ServerClock(tickHz: _tickHz);
         view.setLightRadius(0);
         if (_inStage) {
           _inStage = false;
           view.showPanel('');
         }
-      case 'stage_joined':
-        _me = (msg['entity_id']! as num).toInt();
-        _channel = 'Stage-${msg['stage_id']}';
-        _tickHz = (msg['tick_rate']! as num).toInt();
+      case StageJoined():
+        _me = msg.entityId;
+        _channel = 'Stage-${msg.stageId}';
+        _tickHz = msg.tickRate;
         _clock = ServerClock(tickHz: _tickHz);
-        _monsterKinds = ((msg['monsters'] as List?) ?? const []).cast<String>();
-        view.setLightRadius(((msg['light_radius'] as num?) ?? 0).toDouble());
+        _monsterKinds = msg.monsters;
+        view.setLightRadius(msg.lightRadius);
         _inStage = true;
         _renderStagePanel();
-      case 'lobby_state':
-        _lobby = msg['lobby']! as Map<String, Object?>;
-        _missionName = (_lobby!['mission']! as Map<String, Object?>)['name']! as String;
+      case LobbyState(:final lobby):
+        _lobby = lobby;
+        _missionName = lobby.mission.name;
         _renderLobby();
-      case 'lobby_left':
+      case LobbyLeft(:final reason):
         _lobby = null;
         if (!_inStage) view.showPanel('');
-        switch (msg['reason']) {
+        switch (reason) {
           case 'kicked':
             view.toast('You were removed from the party.');
           case 'replaced':
@@ -229,32 +278,33 @@ final class HubSession {
           case 'launched':
             view.toast('$_missionName is starting!');
         }
-      case 'lobby_error':
-        view.toast('${msg['message']}');
-      case 'map_enter':
-        _onMapEnter(msg).catchError((Object e, StackTrace st) {
+      case HubError(:final message) when _stylist != null:
+        _styling = false;
+        _showStylist(error: message);
+      case LobbyError(:final message) || HubError(:final message):
+        view.toast(message);
+      case PlayerLook(:final entityId, :final look):
+        _onPlayerLook(entityId, look);
+      case final MapEnter enter:
+        _onMapEnter(enter).catchError((Object e, StackTrace st) {
           web.console.error('map_enter failed: $e\n$st'.toJS);
-          view.toast('Could not load ${(msg['map'] as Map?)?['id']}: $e');
+          view.toast('Could not load ${enter.map.id}: $e');
         });
-      case 'player_appeared':
-        _addPeer(msg['player']! as Map<String, Object?>);
+      case PlayerAppeared(:final player):
+        _addPeer(player);
         if (_inStage) _renderStagePanel();
-      case 'player_vanished':
-        _removePeer((msg['entity_id']! as num).toInt());
+      case PlayerVanished(:final entityId):
+        _removePeer(entityId);
         if (_inStage) _renderStagePanel();
-      case 'portal_denied':
-        view.toast('${msg['target_map']} is reached through the mission board.');
-      case 'npc_dialog':
+      case PortalDenied(:final targetMap):
+        view.toast('$targetMap is reached through the mission board.');
+      case NpcDialog():
         _onNpcDialog(msg);
-      case 'hub_error':
-        view.toast('${msg['message']}');
-      case 'hub_left':
-        view.toast('Left the hub (${msg['reason']}).');
-      case 'displaced':
+      case HubLeft(:final reason):
+        view.toast('Left the hub ($reason).');
+      case Displaced():
         view.toast('Signed in elsewhere; this tab is disconnected.');
         _ws.close().ignore();
-      default:
-        break;
     }
   }
 
@@ -273,42 +323,70 @@ final class HubSession {
       (_tracks[id] ??= RemoteTrack(id)).push(s.tick, s.xs[i], s.ys[i], s.facings[i]);
       _lastSeen[id] = now;
     }
+    if (s.mobBaseline >= 0) _applyMonsters(s);
+  }
+
+  /// Applies a monster section; a delta against a frame this client did not
+  /// apply asks the server for a keyframe and waits for it.
+  void _applyMonsters(Snapshot s) {
+    if (s.mobBaseline == 0) {
+      for (final m in _mobs.values) {
+        m.removeAt ??= s.tick;
+      }
+      _resyncSent = false;
+    } else if (_mobTick == null || s.tick - s.mobBaseline != _mobTick) {
+      _outOfSync();
+      return;
+    }
     for (var i = 0; i < s.monsterCount; i++) {
       final slot = s.mobSlots[i];
       var m = _mobs[slot];
-      if (m == null || m.generation != s.mobGenerations[i]) {
-        // A reused slot is a new monster: snap, never slide from the old one.
-        if (m != null) view.removeEntity(m.track.id.toDouble());
-        m = _mobs[slot] = _Mob(slot, s.mobGenerations[i], s.mobKinds[i]);
+      switch (s.mobOps[i]) {
+        case MobOp.spawn:
+          // A reused slot (or a keyframe) is a new monster: snap, never
+          // slide from the old one.
+          if (m != null) view.removeEntity(m.id);
+          m = _mobs[slot] = _Mob(slot, s.mobGenerations[i], s.mobKinds[i]);
+          m.set(s.mobXs[i], s.mobYs[i], s.mobVxs[i], s.mobVys[i], s.tick);
+        case MobOp.move when m != null && m.removeAt == null:
+          m.set(s.mobXs[i], s.mobYs[i], s.mobVxs[i], s.mobVys[i], s.tick);
+        case MobOp.nudge when m != null && m.removeAt == null:
+          m.set(m.x + s.mobXs[i], m.y + s.mobYs[i], s.mobVxs[i], s.mobVys[i], s.tick);
+        case MobOp.remove when m != null:
+          m.removeAt ??= s.tick;
+        default:
+          // An update for a monster this client does not hold.
+          _outOfSync();
+          return;
       }
-      final x = s.mobXs[i], y = s.mobYs[i];
-      // Facing from movement, with a dead zone so push-out nudges in a
-      // settled crowd do not spin the sprite.
-      final dx = x - m.lastX, dy = y - m.lastY;
-      if (dx * dx + dy * dy > 0.03 * 0.03) m.facing = facingOf(dx, dy);
-      m
-        ..lastX = x
-        ..lastY = y
-        ..lastSeen = now;
-      m.track.push(s.tick, x, y, m.facing);
     }
+    _mobTick = s.tick;
+  }
+
+  void _outOfSync() {
+    _mobTick = null;
+    if (_resyncSent) return;
+    _resyncSent = true;
+    _send(ClientMsg.resync());
   }
 
   void _clearMobs() {
     for (final m in _mobs.values) {
-      view.removeEntity(m.track.id.toDouble());
+      view.removeEntity(m.id);
     }
     _mobs.clear();
+    _mobTick = null;
+    _resyncSent = false;
   }
 
-  Future<void> _onMapEnter(Map<String, Object?> msg) async {
+  Future<void> _onMapEnter(MapEnter msg) async {
     final token = ++_loadToken;
     _loading = true;
-    final map = msg['map']! as Map<String, Object?>;
-    _mapEpoch = (msg['map_epoch']! as num).toInt();
-    _mapId = map['id']! as String;
-    _mapName = map['name']! as String;
-    final x = (msg['x']! as num).toDouble(), y = (msg['y']! as num).toDouble();
+    final map = msg.map;
+    _mapEpoch = msg.mapEpoch;
+    _mapId = map.id;
+    _mapName = map.name;
+    final x = msg.x, y = msg.y;
     view.closeDialog();
     for (final id in _tracks.keys.toList()) {
       _removePeer(id);
@@ -319,9 +397,7 @@ final class HubSession {
     }
     _clock.reset();
     _epochTick = null;
-    for (final p in (msg['players']! as List).cast<Map<String, Object?>>()) {
-      _addPeer(p);
-    }
+    msg.players.forEach(_addPeer);
 
     final base = '$assetsBase/client/locations/$_mapId';
     final results = await Future.wait([
@@ -333,7 +409,7 @@ final class HubSession {
     final manifest = results[0]! as Map<String, Object?>;
     final grid = WalkGrid.parse(results[1]! as Uint8List);
 
-    view.setCamera(jsonEncode(map['camera']));
+    view.setCamera(jsonEncode(map.camera));
     final p = _predictor;
     if (p == null) {
       _predictor = LocalPredictor(grid, x, y, rules: MoveRules(tickHz: _tickHz));
@@ -364,41 +440,83 @@ final class HubSession {
     for (final t in _tracks.values) {
       t.resetSent();
     }
+    for (final m in _mobs.values) {
+      m.dirty = true;
+    }
+    // Labels and looks were cleared with the entities.
     final me = _me;
-    if (me != null) view.setLabel(me.toDouble(), _myName, 'me');
+    if (me != null) {
+      view.setLabel(me.toDouble(), _myName, 'me');
+      _applyLook(me, _myLook);
+    }
     for (final e in _peers.entries) {
       view.setLabel(e.key.toDouble(), e.value.name, '');
+      _applyLook(e.key, e.value.look);
     }
-    final bgm = map['bgm'] as String?;
+    final bgm = map.bgm;
     view.playBgm(bgm == null ? null : '$assetsBase/client/$bgm');
     _loading = false;
     if (_inStage) {
       _renderStagePanel();
       view.toast('$_mapName: the mission has begun. Walk to the exit or use the panel to return.');
-    } else if (msg['via_portal'] == null) {
+    } else if (msg.viaPortal == null) {
       view.toast('Welcome to $_mapName ($_channel). WASD to move, F to talk.');
     }
   }
 
-  void _addPeer(Map<String, Object?> p) {
-    final id = (p['entity_id']! as num).toInt();
-    final name = p['name']! as String;
-    final archetype = p['archetype']! as String;
+  void _addPeer(PlayerInfo p) {
+    final id = p.entityId;
+    final name = p.name;
+    final archetype = p.archetype;
     if (id == _me) {
       _myName = name;
       _myArchetype = archetype;
+      _myLook = p.look;
+      _applyLook(id, p.look);
       return;
     }
-    _peers[id] = _Peer(name, archetype);
+    _peers[id] = _Peer(name, archetype, p.look);
+    _applyLook(id, p.look);
     final t = _tracks[id] ??= RemoteTrack(id);
     if (t.isEmpty) {
       t
-        ..x = (p['x']! as num).toDouble()
-        ..y = (p['y']! as num).toDouble()
-        ..facing = (p['facing']! as num).toInt();
+        ..x = p.x
+        ..y = p.y
+        ..facing = p.facing;
     }
     _lastSeen[id] = _now();
     view.setLabel(id.toDouble(), name, '');
+  }
+
+  void _applyLook(int id, Look l) => view.setLook(id.toDouble(), l.gender, l.hair, l.hairColor, l.bodyColor);
+
+  void _onPlayerLook(int id, Look look) {
+    if (id == _me) {
+      _myLook = look;
+      if (_stylist != null) {
+        _stylist = null;
+        _styling = false;
+        view.closeScreen();
+        view.toast('Looking sharp!');
+      }
+    } else {
+      _peers[id]?.look = look;
+    }
+    _applyLook(id, look);
+  }
+
+  /// The stylist window over the game (hair style, hair and clothes dyes).
+  void _showStylist({String? error}) {
+    final npc = _npcs.where((n) => n.id == _stylist).firstOrNull;
+    view.showStylist(
+      jsonEncode({
+        'title': npc?.name ?? 'Stylist',
+        'text': npc?.text ?? 'Pick a new style.',
+        'look': _myLook.toUi(),
+        'busy': _styling,
+        'error': ?error,
+      }),
+    );
   }
 
   void _removePeer(int id) {
@@ -431,7 +549,7 @@ final class HubSession {
     if (npc == null) return;
     final p = _predictor;
     if (p != null && npc.inReach(p.x, p.y)) {
-      _send({'type': 'npc_interact', 'npc': npc.id});
+      _send(ClientMsg.npcInteract(npc.id));
     } else {
       view.toast('Walk closer to ${npc.name}.');
     }
@@ -439,40 +557,50 @@ final class HubSession {
 
   void _interactNearest() {
     final npc = _nearNpc;
-    if (npc != null && !view.dialogOpen()) _send({'type': 'npc_interact', 'npc': npc.id});
+    if (npc != null && !view.dialogOpen()) _send(ClientMsg.npcInteract(npc.id));
   }
 
-  void _onNpcDialog(Map<String, Object?> msg) {
-    final missions = (msg['missions']! as List).cast<Map<String, Object?>>();
-    final isBoard = msg['kind'] == 'mission_board';
+  void _onNpcDialog(NpcDialog msg) {
+    if (msg.kind == 'stylist') {
+      view.closeDialog();
+      _stylist = msg.npc;
+      _styling = false;
+      _showStylist();
+      return;
+    }
+    final missions = msg.missions;
+    final isBoard = msg.kind == 'mission_board';
+    final npc = _npcs.where((n) => n.id == msg.npc).firstOrNull;
     _settingsOpen = false;
     final inLobby = _lobby != null;
+    final cutin = npc?.cutin;
+    final cutinUrl = cutin == null ? null : (cutin.startsWith('/') || cutin.startsWith('http')) ? cutin : '$assetsBase/client/$cutin';
     view.showDialog(
       jsonEncode({
-        'id': 'npc:${msg['npc']}',
-        'title': msg['name'],
-        'text': !isBoard
+        'id': 'npc:${msg.npc}',
+        'title': msg.name,
+        if (cutinUrl != null) 'cutin': cutinUrl,
+        'text': npc?.text ?? (!isBoard
             ? 'Hello there.'
             : inLobby
             ? 'You are already in a party. Leave it to pick another mission.'
-            : 'Pick a mission. Parties of up to four.',
+            : 'Pick a mission. Parties of up to four.'),
         'options': [
           if (isBoard && !inLobby)
             for (final m in missions) ...[
               {
-                'id': 'public:${m['id']}',
-                'label': '${m['name']}: find a party',
-                'detail': '${m['description']} Joins an open public party or starts one (up to ${m['max_players']}).',
+                'id': 'public:${m.id}',
+                'label': '${m.name}: find a party',
+                'detail': '${m.description} Joins an open public party or starts one (up to ${m.maxPlayers}).',
               },
               {
-                'id': 'private:${m['id']}',
-                'label': '${m['name']}: private party',
+                'id': 'private:${m.id}',
+                'label': '${m.name}: private party',
                 'detail': 'Only players with your party code can join.',
               },
             ],
         ],
-        if (isBoard && !inLobby)
-          'input': {'id': 'code', 'label': 'Join', 'placeholder': 'Party code', 'maxLength': 8},
+        if (isBoard && !inLobby) 'input': {'id': 'code', 'label': 'Join', 'placeholder': 'Party code', 'maxLength': 8},
       }),
     );
   }
@@ -481,33 +609,34 @@ final class HubSession {
   void _renderLobby() {
     final lobby = _lobby;
     if (lobby == null) return;
-    final members = (lobby['members']! as List).cast<Map<String, Object?>>();
-    final mission = lobby['mission']! as Map<String, Object?>;
-    final me = members.where((m) => m['entity_id'] == _me).firstOrNull;
-    final leader = me?['leader'] == true;
-    final othersReady = members.where((m) => m['leader'] != true).every((m) => m['ready'] == true);
-    final max = mission['max_players'];
+    final members = lobby.members;
+    final mission = lobby.mission;
+    final me = members.where((m) => m.entityId == _me).firstOrNull;
+    final leader = me?.leader ?? false;
+    final othersReady = members.where((m) => !m.leader).every((m) => m.ready);
+    final ready = me?.ready ?? false;
     view.showPanel(
       jsonEncode({
         'id': 'lobby',
-        'title': mission['name'],
-        'subtitle': '${lobby['public'] == true ? 'Public' : 'Private'} party · code ${lobby['code']} · ${members.length}/$max',
+        'title': mission.name,
+        'subtitle':
+            '${lobby.public ? 'Public' : 'Private'} party · code ${lobby.code} · ${members.length}/${mission.maxPlayers}',
         'rows': [
           for (final m in members)
             {
-              'id': '${m['entity_id']}',
-              'text': m['name'],
-              'detail': m['entity_id'] == _me ? '(you)' : null,
-              'tag': m['leader'] == true ? 'leader' : (m['ready'] == true ? 'ready' : 'not ready'),
-              'tagKind': m['leader'] == true ? 'lead' : (m['ready'] == true ? 'ok' : 'wait'),
-              if (leader && m['entity_id'] != _me) 'action': {'id': 'kick', 'label': 'Kick'},
+              'id': '${m.entityId}',
+              'text': m.name,
+              'detail': m.entityId == _me ? '(you)' : null,
+              'tag': m.leader ? 'leader' : (m.ready ? 'ready' : 'not ready'),
+              'tagKind': m.leader ? 'lead' : (m.ready ? 'ok' : 'wait'),
+              if (leader && m.entityId != _me) 'action': {'id': 'kick', 'label': 'Kick'},
             },
         ],
         'actions': [
           if (leader)
             {'id': 'start', 'label': othersReady ? 'Start' : 'Waiting…', 'primary': true, 'disabled': !othersReady}
           else
-            {'id': me?['ready'] == true ? 'unready' : 'ready', 'label': me?['ready'] == true ? 'Not ready' : 'Ready', 'primary': me?['ready'] != true},
+            {'id': ready ? 'unready' : 'ready', 'label': ready ? 'Not ready' : 'Ready', 'primary': !ready},
           {'id': 'leave', 'label': 'Leave'},
         ],
       }),
@@ -535,18 +664,18 @@ final class HubSession {
   void _onPanelAction(String panel, String action, String? row) {
     switch ((panel, action)) {
       case ('lobby', 'ready'):
-        _send({'type': 'lobby_ready', 'ready': true});
+        _send(ClientMsg.lobbyReady(true));
       case ('lobby', 'unready'):
-        _send({'type': 'lobby_ready', 'ready': false});
+        _send(ClientMsg.lobbyReady(false));
       case ('lobby', 'start'):
-        _send({'type': 'lobby_start'});
+        _send(ClientMsg.lobbyStart());
       case ('lobby', 'leave'):
-        _send({'type': 'lobby_leave'});
+        _send(ClientMsg.lobbyLeave());
       case ('lobby', 'kick'):
         final id = int.tryParse(row ?? '');
-        if (id != null) _send({'type': 'lobby_kick', 'entity_id': id});
+        if (id != null) _send(ClientMsg.lobbyKick(id));
       case ('stage', 'return'):
-        _send({'type': 'stage_leave'});
+        _send(ClientMsg.stageLeave());
     }
   }
 
@@ -556,10 +685,10 @@ final class HubSession {
       case 'dialog_choice':
         final option = e['option']! as String;
         if (option == 'code') {
-          _send({'type': 'lobby_join', 'code': e['value']});
+          _send(ClientMsg.lobbyJoin('${e['value']}'));
         } else if (option.startsWith('public:') || option.startsWith('private:')) {
           final i = option.indexOf(':');
-          _send({'type': 'mission_select', 'mission': option.substring(i + 1), 'public': option.startsWith('public:')});
+          _send(ClientMsg.missionSelect(option.substring(i + 1), public: option.startsWith('public:')));
         }
         view.closeDialog();
       case 'panel_action':
@@ -568,6 +697,22 @@ final class HubSession {
         _applySetting(e['id']! as String, e['value']);
       case 'dialog_close':
         if (e['dialog'] == 'settings') _settingsOpen = false;
+      case 'style_apply':
+        if (_stylist == null || _styling) return;
+        _styling = true;
+        _send(
+          ClientMsg.styleSet(
+            _myLook.copyWith(
+              hair: (e['hair']! as num).toInt(),
+              hairColor: (e['hairColor']! as num).toInt(),
+              bodyColor: (e['bodyColor']! as num).toInt(),
+            ),
+          ),
+        );
+        _showStylist();
+      case 'style_cancel':
+        _stylist = null;
+        _styling = false;
     }
   }
 
@@ -652,7 +797,15 @@ final class HubSession {
             (_clock.bias * 1000).round(),
             'Smoother remote movement on unstable links, at the cost of latency.',
           ),
-          range('stepHz', 'Monster step rate, Hz', 0, 30, 1, e['stepHz'], '0 = smooth. Low values give a stepped retro look.'),
+          range(
+            'stepHz',
+            'Monster step rate, Hz',
+            0,
+            30,
+            1,
+            e['stepHz'],
+            '0 = smooth. Low values give a stepped retro look.',
+          ),
           range('highStepHz', 'Player/boss step rate, Hz', 0, 60, 1, e['highStepHz'], '0 = smooth.'),
           range('animLodNear', 'Full-rate animation radius, m', 4, 40, 1, e['animLodNear']),
           range('animLodFar', 'Reduced animation beyond, m', 8, 80, 1, e['animLodFar']),
@@ -738,7 +891,7 @@ final class HubSession {
       y1: my,
       t1: 0,
       facing: p.facing,
-      sprite: _spriteFor(me, _myArchetype),
+      sprite: _spriteFor(me, _myArchetype, _myLook),
       action: p.moving ? Act.walk : Act.idle,
       flags: Row.flagFocus | Row.flagHigh,
     );
@@ -755,7 +908,8 @@ final class HubSession {
       }
       t.segment(rt);
       final action = t.moving ? Act.walk : Act.idle;
-      final sprite = _spriteFor(t.id, _peers[t.id]?.archetype ?? 'novice');
+      final peer = _peers[t.id];
+      final sprite = _spriteFor(t.id, peer?.archetype ?? 'novice', peer?.look);
       final still = t.x0 == t.x1 && t.y0 == t.y1;
       if (t.sentFacing == t.facing && t.sentAction == action && t.sentSprite == sprite) {
         if (still ? (t.sentX == t.x1 && t.sentY == t.y1) : (t.sentTick0 == t.tick0 && t.sentTick1 == t.tick1)) {
@@ -786,46 +940,39 @@ final class HubSession {
     }
     stale.forEach(_removePeer);
 
-    // Monsters: same segment logic as remote players, sprite by kind.
-    final staleMobs = <int>[];
+    // Monsters: one row per record change. The row is the record's
+    // dead-reckoning line from `stamp − back` to `stamp + horizon`; the
+    // shader walks it, so a monster on a straight path costs nothing here.
+    final removed = <int>[];
     for (final m in _mobs.values) {
-      if (now - m.lastSeen > _mobTimeout) {
-        staleMobs.add(m.slot);
+      final at = m.removeAt;
+      if (at != null && rt >= at) {
+        removed.add(m.slot);
         continue;
       }
-      final t = m.track..segment(rt);
-      final action = t.moving ? Act.walk : Act.idle;
+      if (!m.dirty) continue;
       final sprite = _mobSprite(m.kind);
-      final still = t.x0 == t.x1 && t.y0 == t.y1;
-      if (t.sentFacing == t.facing && t.sentAction == action && t.sentSprite == sprite) {
-        if (still ? (t.sentX == t.x1 && t.sentY == t.y1) : (t.sentTick0 == t.tick0 && t.sentTick1 == t.tick1)) {
-          continue;
-        }
-      }
+      final px = m.x / Reckoning.posOne, py = m.y / Reckoning.posOne;
+      final vx = m.vx / Reckoning.velOne, vy = m.vy / Reckoning.velOne;
+      final moving = m.vx != 0 || m.vy != 0;
+      const back = Reckoning.back, ahead = Reckoning.horizon;
       _out.add(
-        id: t.id.toDouble(),
-        x0: t.x0,
-        y0: t.y0,
-        t0: _sec(t.tick0),
-        x1: t.x1,
-        y1: t.y1,
-        t1: still ? _sec(t.tick0) : _sec(t.tick1),
-        facing: t.facing,
+        id: m.id,
+        x0: moving ? px - vx * back : px,
+        y0: moving ? py - vy * back : py,
+        t0: _sec(moving ? m.stamp - back : m.stamp),
+        x1: moving ? px + vx * ahead : px,
+        y1: moving ? py + vy * ahead : py,
+        t1: _sec(moving ? m.stamp + ahead : m.stamp),
+        facing: m.facing,
         sprite: sprite,
-        action: action,
+        action: m.moving ? Act.walk : Act.idle,
         flags: Row.flagFade,
       );
-      t
-        ..sentTick0 = t.tick0
-        ..sentTick1 = t.tick1
-        ..sentFacing = t.facing
-        ..sentAction = action
-        ..sentSprite = sprite
-        ..sentX = still ? t.x1 : double.nan
-        ..sentY = still ? t.y1 : double.nan;
+      m.dirty = false;
     }
-    for (final slot in staleMobs) {
-      view.removeEntity(_mobs.remove(slot)!.track.id.toDouble());
+    for (final slot in removed) {
+      view.removeEntity(_mobs.remove(slot)!.id);
     }
 
     _nearNpc = null;
@@ -842,10 +989,14 @@ final class HubSession {
 
   final _spriteCache = <String, int>{};
 
-  /// Sprite for a character: `<archetype>_m|_f` when the atlas has it, else
-  /// the novice placeholder (gender is not stored yet; id parity stands in).
-  int _spriteFor(int id, String archetype) {
-    final g = id.isEven ? 'm' : 'f';
+  /// Sprite for a character: the dyeable body of its gender (hair and dyes
+  /// come from `setLook`); without the customization pack,
+  /// `<archetype>_m|_f` when the atlas has it, else the novice placeholder.
+  int _spriteFor(int id, String archetype, Look? look) {
+    final gender = look?.gender ?? (id.isEven ? 0 : 1);
+    final body = _spriteCache['$_mapId:body:$gender'] ??= view.bodySpriteIndex(gender);
+    if (body >= 0) return body;
+    final g = gender == 0 ? 'm' : 'f';
     final key = '$_mapId:$archetype:$g';
     return _spriteCache[key] ??= () {
       final s = view.spriteIndex('${archetype}_$g');

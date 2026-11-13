@@ -1,3 +1,4 @@
+use crate::world::protocol::Look;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -14,6 +15,7 @@ pub struct CharacterState {
     pub unlocked_skills: serde_json::Value,
     pub inventory: serde_json::Value,
     pub last_location_id: String,
+    pub look: Look,
 
     pub is_dirty: bool,
     pub last_modified: Instant,
@@ -31,6 +33,7 @@ impl CharacterState {
         unlocked_skills: serde_json::Value,
         inventory: serde_json::Value,
         last_location_id: String,
+        look: Look,
     ) -> Self {
         Self {
             id,
@@ -43,6 +46,7 @@ impl CharacterState {
             unlocked_skills,
             inventory,
             last_location_id,
+            look,
             is_dirty: false,
             last_modified: Instant::now(),
         }
@@ -77,6 +81,13 @@ impl CharacterState {
     /// Updates location ID, marking state dirty.
     pub fn set_location(&mut self, location_id: String) {
         self.last_location_id = location_id;
+        self.is_dirty = true;
+        self.last_modified = Instant::now();
+    }
+
+    /// Restyled at a stylist, marking state dirty.
+    pub fn set_look(&mut self, look: Look) {
+        self.look = look;
         self.is_dirty = true;
         self.last_modified = Instant::now();
     }

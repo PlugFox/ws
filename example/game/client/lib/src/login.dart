@@ -1,13 +1,43 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:js_interop';
 
 import 'package:game_client/src/api.dart';
+import 'package:game_client/src/engine.dart';
+import 'package:game_client/src/protocol.dart' show Look;
 import 'package:web/web.dart' as web;
 
-/// Minimal auth + character screen (HTML). Completes with the selected
-/// character once the server has it loaded into the session.
-Future<Map<String, Object?>> runLogin(Api api, web.HTMLElement host) {
-  final done = Completer<Map<String, Object?>>();
+/// Classes offered at creation (the server validates the id).
+const _classes = [
+  {'id': 'novice', 'name': 'Novice', 'description': 'Balanced start, can grow into anything.'},
+  {'id': 'warrior', 'name': 'Warrior', 'description': 'Front line: high HP, STR and VIT.'},
+  {'id': 'ranger', 'name': 'Ranger', 'description': 'Swift and precise: AGI and DEX.'},
+  {'id': 'mage', 'name': 'Mage', 'description': 'Arcane power: INT, but fragile.'},
+  {'id': 'rogue', 'name': 'Rogue', 'description': 'Quick and lucky: AGI and LUK.'},
+];
+
+/// Character slots per account (the server enforces the same limit).
+const maxCharacters = 6;
+
+/// Friendly place names for the slot cards.
+const _places = {
+  'izlude': 'Izlude',
+  'izlude_in': 'Izlude',
+  'hub_central': 'Izlude',
+  'prt_fild08': 'Poring Island',
+};
+
+/// Sign-in form (HTML), then the engine's character slots and creation
+/// screens. Completes with the selected character once the server has it
+/// loaded into the session.
+Future<Map<String, Object?>> runLogin(Api api, web.HTMLElement host, GameView view, {required String assetsBase}) async {
+  await _signIn(api, host);
+  await view.loadCustomization('$assetsBase/client/customization/').toDart;
+  return _chooseCharacter(api, view);
+}
+
+Future<void> _signIn(Api api, web.HTMLElement host) {
+  final done = Completer<void>();
   final panel = web.document.createElement('div') as web.HTMLDivElement..className = 'login';
   host.appendChild(panel);
 
@@ -24,102 +54,130 @@ Future<Map<String, Object?>> runLogin(Api api, web.HTMLElement host) {
         ..type = type;
 
   final error = el('div', cls: 'error');
-
-  Future<void> guarded(Future<void> Function() f) async {
+  final user = input('username')..autocomplete = 'username';
+  final pass = input('password', type: 'password')..autocomplete = 'current-password';
+  final login = el('button', text: 'Log in');
+  final register = el('button', text: 'Create account', cls: 'secondary');
+  var busy = false;
+  Future<void> go(bool reg) async {
+    if (busy) return;
+    busy = true;
     error.textContent = '';
     try {
-      await f();
+      await api.login(user.value.trim(), pass.value, register: reg);
+      panel.remove();
+      done.complete();
     } on Object catch (e) {
       error.textContent = '$e';
+    } finally {
+      busy = false;
     }
   }
 
-  late void Function() showCharacters;
+  login.addEventListener(
+    'click',
+    ((web.Event _) {
+      go(false);
+    }).toJS,
+  );
+  register.addEventListener(
+    'click',
+    ((web.Event _) {
+      go(true);
+    }).toJS,
+  );
+  pass.addEventListener(
+    'keydown',
+    ((web.KeyboardEvent e) {
+      if (e.key == 'Enter') go(false);
+    }).toJS,
+  );
+  panel
+    ..appendChild(el('h1', text: 'Izlude'))
+    ..appendChild(el('p', text: 'A survivors-like over WebSockets', cls: 'sub'))
+    ..appendChild(user)
+    ..appendChild(pass)
+    ..appendChild(login)
+    ..appendChild(register)
+    ..appendChild(error);
+  user.focus();
+  return done.future;
+}
 
-  void showAuth() {
-    panel.textContent = '';
-    final user = input('username');
-    final pass = input('password', type: 'password');
-    final login = el('button', text: 'Log in');
-    final register = el('button', text: 'Register', cls: 'secondary');
-    Future<void> go(bool reg) => guarded(() async {
-      await api.login(user.value.trim(), pass.value, register: reg);
-      showCharacters();
-    });
-    login.addEventListener(
-      'click',
-      ((web.Event _) {
-        go(false);
-      }).toJS,
+Future<Map<String, Object?>> _chooseCharacter(Api api, GameView view) {
+  final done = Completer<Map<String, Object?>>();
+  var chars = <Map<String, Object?>>[];
+  int? selected;
+
+  void show({bool busy = false, String? error, bool create = false}) {
+    view.showCharacterSelect(
+      jsonEncode({
+        'slots': [
+          for (final c in chars)
+            {
+              'id': (c['id']! as num).toInt(),
+              'name': c['name'],
+              'archetype': c['archetype'],
+              'level': c['level'],
+              'location': _places[c['last_location_id']] ?? c['last_location_id'],
+              'look': Look.fromJson(c['look']).toUi(),
+            },
+        ],
+        'maxSlots': maxCharacters,
+        'classes': _classes,
+        'selected': ?selected,
+        'busy': busy,
+        'error': ?error,
+        'create': create,
+        'nameMin': 2,
+        'nameMax': 24,
+      }),
     );
-    register.addEventListener(
-      'click',
-      ((web.Event _) {
-        go(true);
-      }).toJS,
-    );
-    pass.addEventListener(
-      'keydown',
-      ((web.KeyboardEvent e) {
-        if (e.key == 'Enter') go(false);
-      }).toJS,
-    );
-    panel
-      ..appendChild(el('h1', text: 'ws · Izlude'))
-      ..appendChild(user)
-      ..appendChild(pass)
-      ..appendChild(login)
-      ..appendChild(register)
-      ..appendChild(error);
-    user.focus();
   }
 
-  showCharacters = () {
-    guarded(() async {
-      final chars = await api.characters();
-      panel.textContent = '';
-      panel.appendChild(el('h1', text: 'Characters'));
-      for (final c in chars) {
-        final b = el('button', text: '${c['name']} · ${c['archetype']} · lv ${c['level']}');
-        b.addEventListener(
-          'click',
-          ((web.Event _) {
-            guarded(() async {
-              await api.select((c['id']! as num).toInt());
-              panel.remove();
-              done.complete(c);
-            });
-          }).toJS,
-        );
-        panel.appendChild(b);
-      }
-      final name = input('new character name');
-      final arch = web.document.createElement('select') as web.HTMLSelectElement;
-      for (final a in ['novice', 'warrior', 'ranger', 'mage', 'rogue']) {
-        arch.appendChild(
-          (web.document.createElement('option') as web.HTMLOptionElement)
-            ..value = a
-            ..textContent = a,
-        );
-      }
-      final create = el('button', text: 'Create', cls: 'secondary');
-      create.addEventListener(
-        'click',
-        ((web.Event _) {
-          guarded(() async {
-            await api.createCharacter(name.value.trim(), arch.value);
-            showCharacters();
-          });
-        }).toJS,
-      );
-      panel
-        ..appendChild(name)
-        ..appendChild(arch)
-        ..appendChild(create)
-        ..appendChild(error);
-    });
-  };
+  Future<void> refresh() async {
+    chars = await api.characters();
+  }
 
-  showAuth();
+  view.onUiEvent(
+    ((String json) {
+      if (done.isCompleted) return;
+      final e = jsonDecode(json) as Map<String, Object?>;
+      switch (e['type']) {
+        case 'char_select':
+          final id = (e['id']! as num).toInt();
+          selected = id;
+          show(busy: true);
+          api
+              .select(id)
+              .then((_) {
+                view.closeScreen();
+                done.complete(chars.firstWhere((c) => (c['id']! as num).toInt() == id));
+              })
+              .catchError((Object err) => show(error: '$err'));
+        case 'char_create':
+          show(busy: true);
+          api
+              .createCharacter(
+                '${e['name']}',
+                '${e['archetype']}',
+                look: {
+                  'gender': (e['gender']! as num).toInt(),
+                  'hair_style': (e['hair']! as num).toInt(),
+                  'hair_color': (e['hairColor']! as num).toInt(),
+                  'body_color': (e['bodyColor']! as num).toInt(),
+                },
+              )
+              .then((created) async {
+                selected = (created['id']! as num).toInt();
+                await refresh();
+                show();
+              })
+              .catchError((Object err) => show(error: '$err'));
+      }
+    }).toJS,
+  );
+
+  refresh().then((_) => show(create: chars.isEmpty)).catchError((Object err) => show(error: '$err'));
   return done.future;
 }

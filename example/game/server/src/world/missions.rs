@@ -5,9 +5,7 @@
 //! waves bought under the mission's [`WaveRules`].
 
 use super::horde::director::WaveRules;
-use serde::Serialize;
-
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MissionInfo {
     pub id: &'static str,
     pub name: &'static str,
@@ -17,7 +15,6 @@ pub struct MissionInfo {
     pub max_players: u8,
     /// Difficulty: what the wave game master gets to spend and where packs
     /// land. Server-side only.
-    #[serde(skip)]
     pub waves: WaveRules,
 }
 

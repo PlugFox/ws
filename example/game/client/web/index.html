@@ -4,16 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ws game</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Alegreya+Sans:wght@400;500;700&family=Philosopher:wght@400;700&display=swap">
 <style>
-  html, body { margin: 0; height: 100%; background: #0d111a; color: #eee; font: 14px system-ui, sans-serif; }
+  html, body { margin: 0; height: 100%; color: #eee; font: 16px 'Alegreya Sans', system-ui, sans-serif;
+               background: radial-gradient(120% 90% at 30% 20%, #2a3550 0%, #141a28 55%, #0b0e16 100%); }
   #stage { position: fixed; inset: 0; }
   canvas { width: 100%; height: 100%; display: block; }
   .login { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 300px;
            background: #1b2130; border: 1px solid #3d4a66; border-radius: 8px; padding: 20px; z-index: 5; }
-  .login h1 { margin: 0 0 12px; font-size: 18px; }
+  .login h1 { margin: 0; font: 700 30px 'Philosopher', serif; color: #ffe9b8; }
+  .login .sub { margin: 2px 0 14px; color: #9aa5bd; }
   .login input, .login select, .login button { display: block; box-sizing: border-box; width: 100%; margin: 6px 0;
            padding: 8px; border-radius: 6px; border: 1px solid #3d4a66; background: #10141f; color: inherit; font: inherit; }
-  .login button { background: #2f6fd6; border-color: #2f6fd6; cursor: pointer; }
+  .login button { background: linear-gradient(#3e8a57, #2c6a42); border-color: #58a872; cursor: pointer; font-weight: 700; }
   .login button.secondary { background: #28324a; border-color: #3d4a66; }
   .login .error { color: #ff8a8a; min-height: 1em; margin-top: 6px; }
 </style>

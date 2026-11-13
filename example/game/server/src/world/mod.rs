@@ -9,6 +9,7 @@ pub mod map;
 pub mod missions;
 pub mod protocol;
 pub mod stage;
+pub mod wire;
 
 pub use directory::{HubCommand, HubConfig, HubDirectory, HubTicket, JoinError, OUTBOX_CAPACITY};
 pub use hub::{Arrival, HubEvent, HubInstance, HubSimConfig, HubWorld, InstanceKind, PlayerProfile, PortalLink};

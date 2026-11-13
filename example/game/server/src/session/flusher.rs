@@ -29,6 +29,7 @@ impl StateFlusher {
                     &skills_str,
                     &inv_str,
                     &character.last_location_id,
+                    character.look,
                 )
                 .await?;
 

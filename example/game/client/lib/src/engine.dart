@@ -55,6 +55,30 @@ extension type GameView._(JSObject _) implements JSObject {
   external void playBgm(String? url);
   external String stats();
 
+  /// Loads the character customization pack (dyeable bodies and hair).
+  /// Call once, before the first `loadLocation`.
+  external JSPromise<JSAny?> loadCustomization(String baseUrl);
+
+  /// Sprite index of the dyeable body for a gender (0 male, 1 female), or -1.
+  external int bodySpriteIndex(int gender);
+
+  /// Hair style and dyes of a character drawn with [bodySpriteIndex];
+  /// a negative gender removes them.
+  external void setLook(double entityId, int gender, int hair, int hairColor, int bodyColor);
+
+  /// Health bar under a player's name on combat maps (0..1; NaN hides it).
+  external void setHealth(double entityId, double fraction);
+
+  /// Full-screen character slots and creation (`CharacterSelectSpec` JSON).
+  /// Events: `char_select`, `char_create`.
+  external void showCharacterSelect(String specJson);
+
+  /// Stylist window (`StylistSpec` JSON). Events: `style_apply`, `style_cancel`.
+  external void showStylist(String specJson);
+
+  /// Closes the character select or stylist screen.
+  external void closeScreen();
+
   /// Passes the rows as a view on the same buffer: under dart2js and
   /// dart2wasm (with a JS-backed list) this crosses without a copy.
   void upsertEntities(Float32List rows, int count) {

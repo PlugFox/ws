@@ -126,7 +126,7 @@ fn walk_through_every_house_door_and_back() {
     let mut hub = HubInstance::new(1, Arc::clone(&world), HubSimConfig::default());
     let mut out = Vec::new();
     hub.join(
-        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into() },
+        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default() },
         Uuid::nil(),
         None,
         0,
@@ -210,7 +210,7 @@ fn field_portal_is_denied_in_the_hub() {
     let mut hub = HubInstance::new(1, Arc::clone(&world), HubSimConfig::default());
     let mut out = Vec::new();
     hub.join(
-        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into() },
+        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default() },
         Uuid::nil(),
         None,
         0,
@@ -243,7 +243,7 @@ fn stage_on_prt_fild08_exits_to_izlude_arrival() {
 
     let mut stage = HubInstance::stage(1, "poring_island_survival", Arc::clone(&stage_world), HubSimConfig::default());
     let mut out = Vec::new();
-    let walker = PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into() };
+    let walker = PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default() };
     stage.join(walker, Uuid::nil(), None, 0, &mut out);
     let path = bfs(field, field.spawn, |cx, cy| exit.contains(cx as f32 + 0.5, cy as f32 + 0.5))
         .expect("the exit is reachable from the stage spawn");
@@ -293,6 +293,7 @@ fn horde_on_prt_fild08_spawns_chases_and_stays_on_walkable_ground() {
     assert!(nearest_seen < 3.0, "closest monster is {nearest_seen} cells away");
     let mut buf = bytes::BytesMut::new();
     let viewer = game_server::world::horde::PlayerView { x: sx, y: sy, light: horde.light_radius() };
-    let n = horde.write_visible(&viewer, &mut buf) as usize;
-    assert!(n > 0 && n <= horde.len());
+    let mut view = game_server::world::horde::view::MonsterView::new(horde.capacity());
+    let stats = horde.write_delta(&mut view, &viewer, 75 * hz, &mut buf);
+    assert!(stats.spawns > 0 && stats.spawns as usize <= horde.len(), "{stats:?}");
 }
