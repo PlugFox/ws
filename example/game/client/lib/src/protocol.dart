@@ -736,6 +736,11 @@ abstract final class MobStatus {
   static const blinded = 8;
   static const rooted = 16;
   static const petrified = 32;
+  static const burning = 64;
+  static const poisoned = 128;
+
+  /// −2 AC in a swamp (drawn as [slowed], which comes with it).
+  static const mired = 256;
 
   /// Cannot move or act: the animation holds.
   static const held = frozen | stunned | petrified;
@@ -756,7 +761,7 @@ abstract final class Reckoning {
 /// u8 facing}`. Stage snapshots (`kind=0x03`) append the monster section:
 /// `var baseline` (0 = keyframe, else `tick − baseline` is the frame it
 /// applies to), `var count`, then entries in slot order with
-/// `var head = gap << 3 | s << 2 | op` (see [MobOp]); `s = 1` puts a `u8`
+/// `var head = gap << 3 | s << 2 | op` (see [MobOp]); `s = 1` puts a `var`
 /// status ([MobStatus] bits) right after the head.
 final class Snapshot {
   Snapshot._(this.mapEpoch, this.tick, this.ackSeq, this.ids, this.xs, this.ys, this.facings);
@@ -791,7 +796,7 @@ final class Snapshot {
   Int8List mobVys = Int8List(0);
 
   /// [MobStatus] bits when the entry carries them, else -1 (unchanged).
-  Int16List mobStatuses = Int16List(0);
+  Int32List mobStatuses = Int32List(0);
 
   int get length => ids.length;
   int get monsterCount => mobOps.length;
@@ -833,7 +838,7 @@ final class Snapshot {
     mobYs = Int32List(n);
     mobVxs = Int8List(n);
     mobVys = Int8List(n);
-    mobStatuses = Int16List(n);
+    mobStatuses = Int32List(n);
     var prev = -1;
     for (var i = 0; i < n; i++) {
       final head = r.varint();
@@ -845,7 +850,9 @@ final class Snapshot {
       mobSlots[i] = slot;
       if (head & 4 != 0) {
         if (op == MobOp.remove) throw const WireFormatError('status on remove');
-        mobStatuses[i] = r.u8();
+        final status = r.varint();
+        if (status > 0xFFFF) throw const WireFormatError('status');
+        mobStatuses[i] = status;
       } else {
         mobStatuses[i] = -1;
       }

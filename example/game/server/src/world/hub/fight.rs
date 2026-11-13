@@ -267,7 +267,8 @@ impl HubInstance {
                 for _ in 0..attacks {
                     let id = MONSTER_ENTITY_BASE + s as u32;
                     let advantage = horde.store().status_of(s).advantage_against();
-                    match attack_roll(rng, bonus, block.ac, advantage, 20) {
+                    let ac = block.ac + horde.store().status_of(s).ac();
+                    match attack_roll(rng, bonus, ac, advantage, 20) {
                         AttackOutcome::Miss => hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS }),
                         outcome => {
                             let crit = outcome == AttackOutcome::Critical;
@@ -357,18 +358,24 @@ impl HubInstance {
                 continue;
             }
             let id = p.profile.character_id;
-            match attack_roll(rng, block.attack, f.ac, status.advantage(), 20) {
-                AttackOutcome::Miss => hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS }),
-                outcome => {
-                    let crit = outcome == AttackOutcome::Critical;
-                    let amount = block.damage.roll(rng, crit);
-                    f.hp -= amount;
-                    let flags = damage_type_bits(DamageType::Physical) | if crit { hit::CRITICAL } else { 0 };
-                    hits.push(HitEvent { target: id, amount: amount as u32, flags });
-                    if f.hp <= 0 {
-                        f.hp = 0;
-                        f.state = Vital::Downed { ticks: (DOWNED_SECS * hz) as u32 };
-                        f.revive = 0;
+            if let Some(w) = self.zones.iter_mut().find(|z| z.shields(map, p.x, p.y)) {
+                // Safety Wall: the blow lands on the ward.
+                w.absorb();
+                hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS });
+            } else {
+                match attack_roll(rng, block.attack, f.ac, status.advantage(), 20) {
+                    AttackOutcome::Miss => hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS }),
+                    outcome => {
+                        let crit = outcome == AttackOutcome::Critical;
+                        let amount = block.damage.roll(rng, crit);
+                        f.hp -= amount;
+                        let flags = damage_type_bits(DamageType::Physical) | if crit { hit::CRITICAL } else { 0 };
+                        hits.push(HitEvent { target: id, amount: amount as u32, flags });
+                        if f.hp <= 0 {
+                            f.hp = 0;
+                            f.state = Vital::Downed { ticks: (DOWNED_SECS * hz) as u32 };
+                            f.revive = 0;
+                        }
                     }
                 }
             }

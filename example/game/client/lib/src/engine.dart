@@ -136,12 +136,15 @@ abstract final class Row {
   /// Monsters: dissolve in and out at the edge of the light radius.
   static const flagFade = 4;
 
-  /// Condition tints (engine `units.ts`): ice, stone, stars, slow, blind.
+  /// Condition tints (engine `units.ts`): ice, stone, stars, slow, blind,
+  /// fire, poison.
   static const flagFrozen = 8;
   static const flagPetrified = 16;
   static const flagStunned = 32;
   static const flagSlowed = 64;
   static const flagBlinded = 128;
+  static const flagBurning = 256;
+  static const flagPoisoned = 512;
 }
 
 /// Growable row buffer for `upsertEntities`; reused every frame.

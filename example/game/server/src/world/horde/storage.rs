@@ -38,7 +38,9 @@ pub struct HordeStorage {
     /// Ticks left per condition (index `Condition as usize`).
     pub cond: Vec<[u16; CONDITIONS]>,
     /// Active conditions (`Condition::bit`), what clients see.
-    pub status: Vec<u8>,
+    pub status: Vec<u16>,
+    /// Cantrip multiplier of the fire it burns with.
+    pub burn_k: Vec<u8>,
     /// Failed saves it may still turn into successes (bosses).
     pub legendary: Vec<u8>,
     /// Dense list of live slots (iteration order).
@@ -66,6 +68,7 @@ impl HordeStorage {
             far_ticks: vec![0; capacity],
             cond: vec![[0; CONDITIONS]; capacity],
             status: vec![0; capacity],
+            burn_k: vec![0; capacity],
             legendary: vec![0; capacity],
             alive: Vec::with_capacity(capacity),
             alive_pos: vec![u16::MAX; capacity],
@@ -109,6 +112,7 @@ impl HordeStorage {
         self.far_ticks[s] = 0;
         self.cond[s] = [0; CONDITIONS];
         self.status[s] = 0;
+        self.burn_k[s] = 0;
         self.legendary[s] = 0;
         self.alive_pos[s] = self.alive.len() as u16;
         self.alive.push(slot);

@@ -9,7 +9,9 @@
 use super::fight::Fighter;
 use super::{facing_of, HubEvent, HubInstance, HubPlayer, MapIdx, Outgoing};
 use crate::world::combat::rules::{attack_roll, saving_throw, AttackOutcome};
-use crate::world::combat::skills::{DamageFx, Effect, EffectDice, HealFx, MoveMode, SaveFx, Shape, SkillBook, SkillDef, Target};
+use crate::world::combat::skills::{
+    DamageFx, Effect, EffectDice, HealFx, MoveMode, SaveFx, Shape, SkillBook, SkillDef, Target, WallFx, ZoneFx,
+};
 use crate::world::combat::{cantrip_k, save_dc, Condition, Damage, DamageType, Dice, Rng};
 use crate::world::horde::Horde;
 use crate::world::map::WalkGrid;
@@ -27,6 +29,10 @@ const AIM_UNIT: f32 = 0.25;
 const MOVE_STEP: f32 = 0.25;
 /// Player body radius (cells), as the basic attack uses it.
 const BODY: f32 = 0.4;
+/// Zones act this often (seconds); a swamp's hold lasts two pulses.
+const ZONE_PULSE_SECS: f32 = 0.25;
+/// A fire wall burns what touches it this often (seconds).
+const WALL_PULSE_SECS: f32 = 0.5;
 
 /// Where a skill lands, decided when it starts (the telegraph is honest).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -85,6 +91,49 @@ pub(super) enum PendingKind {
     },
 }
 
+/// Ground a skill leaves behind (COMBAT.md §3: Quagmire, Fire Wall,
+/// Safety Wall). It acts every pulse until `until`.
+#[derive(Clone, Debug)]
+pub(super) struct Zone {
+    pub map: MapIdx,
+    pub born: u32,
+    pub until: u32,
+    pub kind: ZoneKind,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum ZoneKind {
+    /// What stands inside keeps `condition` (and Mired when `mired`).
+    Swamp { area: Area, condition: Option<Condition>, mired: bool },
+    /// Contact = a hit and a push along `push`.
+    Wall { area: Area, push: (f32, f32), knockback: f32, blow: Blow },
+    /// Allies inside ignore the next `hits` melee hits.
+    Ward { x: f32, y: f32, radius: f32, hits: u32 },
+}
+
+impl Zone {
+    /// A ward still holding over a player at `(x, y)`.
+    pub fn shields(&self, map: MapIdx, x: f32, y: f32) -> bool {
+        match self.kind {
+            ZoneKind::Ward { x: wx, y: wy, radius, hits } => {
+                self.map == map && hits > 0 && (x - wx).powi(2) + (y - wy).powi(2) <= (radius + BODY).powi(2)
+            }
+            _ => false,
+        }
+    }
+
+    /// Spends one hit of a ward.
+    pub fn absorb(&mut self) {
+        if let ZoneKind::Ward { hits, .. } = &mut self.kind {
+            *hits = hits.saturating_sub(1);
+        }
+    }
+
+    fn spent(&self) -> bool {
+        matches!(self.kind, ZoneKind::Ward { hits: 0, .. })
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Area {
     Circle { x: f32, y: f32, radius: f32 },
@@ -122,6 +171,10 @@ impl Area {
     }
 }
 
+fn ticks_of(secs: f32, hz: f32) -> u32 {
+    (secs.max(0.0) * hz).round() as u32
+}
+
 /// Ticks of a condition at skill level `slv`.
 fn condition_ticks(save: &SaveFx, slv: u8, hz: f32) -> u16 {
     (save.secs.at(slv).max(0.0) * hz).round().min(u16::MAX as f32) as u16
@@ -145,6 +198,8 @@ fn reach_of(def: &SkillDef) -> f32 {
         .find_map(|e| match e {
             Effect::Damage(d) => Some(d.radius.max(d.width / 2.0) + d.scatter * 0.5),
             Effect::Heal(h) => Some(h.radius),
+            Effect::Zone(z) => Some(z.radius),
+            Effect::Ward { radius, .. } => Some(*radius),
             _ => None,
         })
         .unwrap_or(2.0)
@@ -341,6 +396,7 @@ fn land(
     now: u32,
     hz: f32,
     pending: &mut Vec<PendingHit>,
+    zones: &mut Vec<Zone>,
 ) {
     let Some(f) = caster.fighter.as_ref() else { return };
     let (cl, class, weapon) = (f.level, f.class, f.weapon);
@@ -430,6 +486,46 @@ fn land(
                     ticks: condition_ticks(save, slv, hz),
                 },
             }),
+            Effect::Zone(ZoneFx { radius, secs, condition, ac }) => zones.push(Zone {
+                map,
+                born: now,
+                until: now + ticks_of(secs.at(slv), hz),
+                kind: ZoneKind::Swamp {
+                    area: Area::Circle { x: aimed.x, y: aimed.y, radius: *radius },
+                    condition: *condition,
+                    mired: *ac < 0,
+                },
+            }),
+            Effect::Wall(WallFx { length, width, secs, dice, scale_k, kind, save, knockback }) => {
+                // Across the aim, centred on the aimed point.
+                let along = (-aimed.dir.1, aimed.dir.0);
+                let (x, y) = (aimed.x - along.0 * length / 2.0, aimed.y - along.1 * length / 2.0);
+                let blow = Blow {
+                    damage: Damage::new(scaled(*dice, *scale_k, 1.0, 0.0, cl), *kind),
+                    extra: None,
+                    to_hit: None,
+                    dc,
+                    save: save.as_ref().map(|sv| (sv.condition, condition_ticks(sv, slv, hz))),
+                    k: cantrip_k(cl),
+                };
+                zones.push(Zone {
+                    map,
+                    born: now,
+                    until: now + ticks_of(secs.at(slv), hz),
+                    kind: ZoneKind::Wall {
+                        area: Area::Line { x, y, dir: along, length: *length, half_width: width / 2.0 },
+                        push: aimed.dir,
+                        knockback: *knockback,
+                        blow,
+                    },
+                });
+            }
+            Effect::Ward { radius, secs, hits } => zones.push(Zone {
+                map,
+                born: now,
+                until: now + ticks_of(secs.at(slv), hz),
+                kind: ZoneKind::Ward { x: aimed.x, y: aimed.y, radius: *radius, hits: hits.at(slv).round().max(1.0) as u32 },
+            }),
             Effect::SpRegen(_) | Effect::Pending(_) => {}
         }
     }
@@ -485,7 +581,7 @@ impl HubInstance {
                         f.quiet = 0;
                         let spread = spread_targets(horde, def, c.level, c.aimed);
                         let walk = &self.world.map(map).walk;
-                        land(def, c.level, &mut self.players[idx], c.aimed, &spread, walk, &mut self.dice, now, hz, &mut self.pending);
+                        land(def, c.level, &mut self.players[idx], c.aimed, &spread, walk, &mut self.dice, now, hz, &mut self.pending, &mut self.zones);
                     } else {
                         casts.push(cancel(entity));
                     }
@@ -541,7 +637,7 @@ impl HubInstance {
                     f.quiet = 0;
                     let spread = spread_targets(horde, def, level, aimed);
                     let walk = &self.world.map(map).walk;
-                    land(def, level, &mut self.players[idx], aimed, &spread, walk, &mut self.dice, now, hz, &mut self.pending);
+                    land(def, level, &mut self.players[idx], aimed, &spread, walk, &mut self.dice, now, hz, &mut self.pending, &mut self.zones);
                 } else {
                     f.casting = Some(Casting { skill, level, ticks: cast_ticks, aimed });
                 }
@@ -564,7 +660,7 @@ impl HubInstance {
                 PendingKind::Condition { area, dc, condition, ticks } => {
                     for s in inside(horde, area) {
                         if !resist(horde, &mut self.dice, s, dc, true) {
-                            horde.store_mut().afflict(s, condition, ticks);
+                            inflict(horde, s, condition, ticks, 0);
                         }
                     }
                 }
@@ -595,6 +691,44 @@ impl HubInstance {
                 }
             }
         }
+
+        // Ground that lasts, then burning and poison.
+        self.zones.retain(|z| z.until > now && !z.spent());
+        let walk = &self.world.map(map).walk;
+        for z in self.zones.iter().filter(|z| z.map == map) {
+            let age = now - z.born;
+            match z.kind {
+                ZoneKind::Swamp { area, condition, mired } => {
+                    let pulse = ticks_of(ZONE_PULSE_SECS, hz).max(1);
+                    if !age.is_multiple_of(pulse) {
+                        continue;
+                    }
+                    let hold = (pulse * 2).min(u16::MAX as u32) as u16;
+                    for s in inside(horde, area) {
+                        if let Some(c) = condition {
+                            inflict(horde, s, c, hold, 0);
+                        }
+                        if mired {
+                            inflict(horde, s, Condition::Mired, hold, 0);
+                        }
+                    }
+                }
+                ZoneKind::Wall { area, push, knockback, blow } => {
+                    if !age.is_multiple_of(ticks_of(WALL_PULSE_SECS, hz).max(1)) {
+                        continue;
+                    }
+                    let touched = inside(horde, area);
+                    strike(horde, &mut self.dice, area, blow, hits, kills);
+                    for s in touched {
+                        if horde.store().hp[s as usize] > 0 {
+                            shove(horde, walk, s, push, knockback);
+                        }
+                    }
+                }
+                ZoneKind::Ward { .. } => {}
+            }
+        }
+        ailments(horde, &mut self.dice, now, hz, hits, kills);
 
         let recipients: Vec<u32> = self.players.iter().filter(|p| p.map == map).map(|p| p.profile.user_id).collect();
         for msg in casts {
@@ -631,6 +765,62 @@ fn spread_targets(horde: &Horde, def: &SkillDef, slv: u8, aimed: Aimed) -> Vec<(
     near.sort_by(|a, b| a.3.total_cmp(&b.3));
     near.truncate(n as usize);
     near.into_iter().map(|(s, x, y, _)| (s, x, y)).collect()
+}
+
+/// Puts a condition on a monster; fire remembers the strongest `k` lit.
+fn inflict(horde: &mut Horde, s: u16, c: Condition, ticks: u16, k: u32) {
+    let store = horde.store_mut();
+    store.afflict(s, c, ticks);
+    if c == Condition::Burning {
+        let b = &mut store.burn_k[s as usize];
+        *b = (*b).max(k.clamp(1, u8::MAX as u32) as u8);
+    }
+}
+
+/// Pushes a monster along `dir` by up to `distance` cells of open ground.
+fn shove(horde: &mut Horde, walk: &WalkGrid, s: u16, dir: (f32, f32), distance: f32) {
+    let store = horde.store_mut();
+    let i = s as usize;
+    let (mut x, mut y) = (store.x[i], store.y[i]);
+    let mut moved = 0.0;
+    while moved + MOVE_STEP <= distance {
+        let (nx, ny) = (x + dir.0 * MOVE_STEP, y + dir.1 * MOVE_STEP);
+        if !walk.is_walkable(nx, ny) {
+            break;
+        }
+        (x, y, moved) = (nx, ny, moved + MOVE_STEP);
+    }
+    (store.x[i], store.y[i]) = (x, y);
+}
+
+/// Burning (1d4 fire per k) and poison (1d4) bite once a second, staggered
+/// by slot so a burning crowd does not land in one tick.
+fn ailments(horde: &mut Horde, rng: &mut Rng, now: u32, hz: f32, hits: &mut Vec<HitEvent>, kills: &mut Vec<u16>) {
+    let second = (hz.round() as u32).max(1);
+    for k in 0..horde.store().alive().len() {
+        let s = horde.store().alive()[k];
+        let i = s as usize;
+        let status = horde.store().status_of(s);
+        if !status.ailing() || !(now + s as u32).is_multiple_of(second) {
+            continue;
+        }
+        let burn = horde.store().burn_k[i] as u32;
+        for (c, dice, kind) in [
+            (Condition::Burning, Dice::new(burn.max(1), 4, 0), DamageType::Fire),
+            (Condition::Poisoned, Dice::new(1, 4, 0), DamageType::Poison),
+        ] {
+            if !status.has(c) || horde.store().hp[i] <= 0 {
+                continue;
+            }
+            let amount = wound(horde, rng, s, Damage::new(dice, kind), None, false, false, 0);
+            let mut flags = (kind as u8) << 4;
+            if horde.store().hp[i] <= 0 {
+                flags |= hit::KILL;
+                kills.push(s);
+            }
+            hits.push(HitEvent { target: MONSTER_ENTITY_BASE + s as u32, amount: amount as u32, flags });
+        }
+    }
 }
 
 /// Live monsters inside an area.
@@ -696,8 +886,8 @@ pub(super) fn wound(
 }
 
 /// What one skill hit carries.
-#[derive(Clone, Copy)]
-struct Blow {
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Blow {
     damage: Damage,
     extra: Option<Dice>,
     /// To-hit bonus when it swings the weapon; `None` = save for half.
@@ -713,7 +903,7 @@ fn strike(horde: &mut Horde, rng: &mut Rng, area: Area, blow: Blow, hits: &mut V
         let id = MONSTER_ENTITY_BASE + s as u32;
         let (crit, saved) = match blow.to_hit {
             Some(bonus) => {
-                let ac = horde.block(s).ac;
+                let ac = horde.block(s).ac + horde.store().status_of(s).ac();
                 match attack_roll(rng, bonus, ac, horde.store().status_of(s).advantage_against(), 20) {
                     AttackOutcome::Miss => {
                         hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS });
@@ -736,7 +926,7 @@ fn strike(horde: &mut Horde, rng: &mut Rng, area: Area, blow: Blow, hits: &mut V
             // A weapon swing that hit still allows a save against its rider.
             let failed = if blow.to_hit.is_some() { !resist(horde, rng, s, blow.dc, true) } else { !saved };
             if failed {
-                horde.store_mut().afflict(s, condition, ticks);
+                inflict(horde, s, condition, ticks, blow.k);
             }
         }
         hits.push(HitEvent { target: id, amount: amount as u32, flags });

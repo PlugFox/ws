@@ -471,4 +471,10 @@ fn status_changes_reach_the_client_even_standing_still() {
     h.tick_views(3, 20, &[p]);
     v.frame(&h, p, 3);
     assert_eq!(v.mirror.monsters[&a].status, 0, "the thaw is sent too");
+    // Bits past the seventh take a second varint byte.
+    h.store_mut().afflict(a, Condition::Poisoned, 50);
+    h.store_mut().afflict(a, Condition::Mired, 50);
+    h.tick_views(4, 20, &[p]);
+    v.frame(&h, p, 4);
+    assert_eq!(v.mirror.monsters[&a].status, Condition::Poisoned.bit() | Condition::Mired.bit());
 }

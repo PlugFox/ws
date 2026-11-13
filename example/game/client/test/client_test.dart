@@ -175,6 +175,11 @@ void main() {
       expect((s.mobXs[1], s.mobYs[1], s.mobVxs[1], s.mobVys[1]), (-2, 3, 0, -128));
       expect((s.mobXs[2], s.mobYs[2], s.mobVxs[2], s.mobVys[2]), (65535, 0, 127, 1));
       expect(s.mobStatuses, [-1, MobStatus.frozen, -1, -1], reason: 'the NUDGE carries a status byte');
+      final poisoned = Snapshot.decode(
+        hex('030400640000000c000000010009000000600080000201041a05018002000510f0048001fe030080' '9902ffff00007f0103'),
+      )!;
+      expect(poisoned.mobStatuses[1], MobStatus.poisoned, reason: 'the status is a varint');
+      expect(poisoned.mobXs[1], -2);
       final b = hex('030400640000000c000000010009000000600080000201041a05018002000510f00402fe0300809902ffff00007f0103');
       expect(Snapshot.decode(Uint8List.sublistView(b, 0, b.length - 1)), isNull);
       expect(Snapshot.decode(Uint8List.fromList([...b, 0])), isNull, reason: 'trailing bytes');

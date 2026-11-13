@@ -3,7 +3,7 @@ import { expect, type Page } from '@playwright/test';
 /** Collects uncaught exceptions and console errors of a page. */
 export function watchErrors(page: Page): string[] {
   const errors: string[] = [];
-  page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+  page.on('pageerror', (e) => errors.push(`pageerror: ${e.message || e.name}${e.stack ? `\n${e.stack.split('\n').slice(0, 4).join('\n')}` : ''}`));
   page.on('console', (m) => {
     if (m.type() === 'error') errors.push(`console: ${m.text()}`);
   });
@@ -15,10 +15,10 @@ export function unique(prefix: string): string {
   return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
-/** Registers a fresh account through the login screen. */
-export async function signUp(page: Page): Promise<string> {
+/** Registers a fresh account through the login screen (opened at `path`). */
+export async function signUp(page: Page, path = '/'): Promise<string> {
   const user = unique('e2e_');
-  await page.goto('/');
+  await page.goto(path);
   await page.getByPlaceholder('username').fill(user);
   await page.getByPlaceholder('password').fill('e2e-password');
   await page.getByRole('button', { name: 'Create account' }).click();
@@ -51,4 +51,35 @@ export async function hold(page: Page, key: string, ms: number): Promise<void> {
   await page.keyboard.down(key);
   await page.waitForTimeout(ms);
   await page.keyboard.up(key);
+}
+
+/** A node of the open skill tree, by its exact name. */
+export function treeNode(page: Page, name: string) {
+  return page.locator('.ge-tree .ge-node', { has: page.locator('.nm', { hasText: new RegExp(`^${name}$`) }) });
+}
+
+/** Spends points on `name` in the open tree until it reaches `level`. */
+export async function learn(page: Page, name: string, level: number): Promise<void> {
+  for (let l = 1; l <= level; l++) {
+    await treeNode(page, name).locator('.plus').click();
+    await expect(treeNode(page, name).locator('.lv')).toHaveText(new RegExp(`^${l} /`));
+  }
+}
+
+/** Hotbar slot holding `name` (the page-2 row comes first in the DOM). */
+export function hotkey(page: Page, name: string) {
+  return page.locator('.ge-hk', { has: page.locator('img') }).and(page.locator(`[title^="${name} —"]`));
+}
+
+/** Puts a learned skill of the open tree in hotbar slot `slot` (0-based). */
+export async function slot(page: Page, name: string, slot: number): Promise<void> {
+  await treeNode(page, name).click();
+  await page.locator('.ge-tree footer .slots button').nth(slot).click();
+  await expect(hotkey(page, name)).toHaveCount(1);
+}
+
+/** Cooldown sweep of the hotbar slot holding `name` (0 = ready, percent covered). */
+export async function cooldown(page: Page, name: string): Promise<number> {
+  const p = await hotkey(page, name).locator('.cd').evaluate((el) => (el as HTMLElement).style.getPropertyValue('--p'));
+  return parseFloat(p) || 0;
 }

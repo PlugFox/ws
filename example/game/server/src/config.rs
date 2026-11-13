@@ -25,6 +25,9 @@ pub struct AppConfig {
     pub stages: StageConfig,
     /// Built web client (`dart compile` output) served at `/`. Optional.
     pub client_dir: Option<PathBuf>,
+    /// Test hooks (`GAME_DEV=1`, for e2e runs only): new characters start at
+    /// `GAME_DEV_LEVEL`, and missions can be picked away from a board.
+    pub dev_level: Option<u32>,
 }
 
 impl AppConfig {
@@ -83,6 +86,9 @@ impl AppConfig {
         if let Some(max) = env::var("HUB_MAX_CHANNELS").ok().and_then(|v| v.parse().ok()) {
             hub.max_channels = max;
         }
+        let dev = env::var("GAME_DEV").is_ok_and(|v| v == "1");
+        hub.sim.missions_anywhere = dev;
+        let dev_level = env::var("GAME_DEV_LEVEL").ok().and_then(|v| v.parse().ok()).filter(|_| dev);
         let mut stages = StageConfig::default();
         if let Some(max) = env::var("MAX_STAGES").ok().and_then(|v| v.parse().ok()) {
             stages.max_stages = max;
@@ -106,6 +112,7 @@ impl AppConfig {
             hub,
             stages,
             client_dir,
+            dev_level,
         }
     }
 
@@ -126,6 +133,7 @@ impl AppConfig {
             hub: HubConfig::default(),
             stages: StageConfig::default(),
             client_dir: None,
+            dev_level: None,
         }
     }
 }

@@ -125,6 +125,28 @@ pub struct SaveFx {
     pub secs: Lin,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZoneFx {
+    pub radius: f32,
+    pub secs: Lin,
+    pub condition: Option<Condition>,
+    pub ac: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WallFx {
+    /// Cells.
+    pub length: f32,
+    pub width: f32,
+    pub secs: Lin,
+    pub dice: Dice,
+    pub scale_k: bool,
+    pub kind: DamageType,
+    pub save: Option<SaveFx>,
+    /// Cells.
+    pub knockback: f32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct HealFx {
     pub dice: Dice,
@@ -144,6 +166,14 @@ pub enum Effect {
     SpRegen(Lin),
     /// Save or the condition, no damage (in `radius` of the point).
     Condition { save: SaveFx, radius: f32 },
+    /// Ground that lasts: what stands inside keeps `condition`, and `ac`
+    /// below zero leaves it Mired (a swamp).
+    Zone(ZoneFx),
+    /// A wall across the aim: every contact is a hit (save for half, its
+    /// condition on a failure) and a push away from the caster.
+    Wall(WallFx),
+    /// Allies inside ignore the next `hits` melee hits (shared).
+    Ward { radius: f32, secs: Lin, hits: Lin },
     /// Not cast by the server yet (conditions, zones, buffs...).
     Pending(String),
 }
@@ -499,6 +529,18 @@ struct RawEffect {
     distance: Option<Lin>,
     value: Option<Lin>,
     save: Option<RawSave>,
+    secs: Option<Lin>,
+    #[serde(default)]
+    length: f32,
+    #[serde(default)]
+    knockback: f32,
+    #[serde(default)]
+    condition: String,
+    #[serde(default)]
+    ac: i32,
+    hits: Option<Lin>,
+    #[serde(default)]
+    ranged: bool,
 }
 
 #[derive(Deserialize)]
@@ -511,7 +553,7 @@ struct RawSave {
 impl RawEffect {
     fn parse(v: &serde_json::Value) -> Result<Effect, String> {
         let kind = v.get("type").and_then(|t| t.as_str()).ok_or("effect without a type")?;
-        if !matches!(kind, "damage" | "heal" | "move" | "sp_regen" | "condition") {
+        if !matches!(kind, "damage" | "heal" | "move" | "sp_regen" | "condition" | "zone" | "wall" | "ward") {
             return Ok(Effect::Pending(kind.to_string()));
         }
         let raw: RawEffect = serde_json::from_value(v.clone()).map_err(|e| format!("{kind} effect: {e}"))?;
@@ -527,6 +569,18 @@ impl RawEffect {
                 None => return Ok(Effect::Pending(format!("condition {}", s.condition))),
             },
         };
+        let condition = match self.condition.as_str() {
+            "" => None,
+            c => match Condition::from_id(c) {
+                Some(c) => Some(c),
+                None => return Ok(Effect::Pending(format!("condition {c}"))),
+            },
+        };
+        let kind = || match self.damage.as_str() {
+            "" => Ok(DamageType::Physical),
+            d => DamageType::from_id(d).ok_or_else(|| format!("unknown damage type {d}")),
+        };
+        let secs = self.secs.unwrap_or(Lin(1.0, 0.0));
         let mult = self.mult.unwrap_or(Lin(1.0, 0.0));
         let count = self.count.unwrap_or(Lin(1.0, 0.0));
         Ok(match self.kind.as_str() {
@@ -539,10 +593,7 @@ impl RawEffect {
                 scale_k: self.scale == "k",
                 mult,
                 bonus: self.bonus.unwrap_or_default(),
-                kind: match self.damage.as_str() {
-                    "" => DamageType::Physical,
-                    d => DamageType::from_id(d).ok_or_else(|| format!("unknown damage type {d}"))?,
-                },
+                kind: kind()?,
                 count,
                 every: self.every,
                 shape: self.shape,
@@ -570,6 +621,20 @@ impl RawEffect {
                 save: save.ok_or("condition without a save")?,
                 radius: self.radius * CELLS,
             },
+            "zone" => Effect::Zone(ZoneFx { radius: self.radius * CELLS, secs, condition, ac: self.ac }),
+            "wall" => Effect::Wall(WallFx {
+                length: self.length * CELLS,
+                width: if self.width > 0.0 { self.width * CELLS } else { 1.0 },
+                secs,
+                dice: parse_dice(&self.dice)?,
+                scale_k: self.scale == "k",
+                kind: kind()?,
+                save,
+                knockback: self.knockback * CELLS,
+            }),
+            // Monsters have no ranged attacks yet.
+            "ward" if self.ranged => Effect::Pending("ranged ward".into()),
+            "ward" => Effect::Ward { radius: self.radius * CELLS, secs, hits: self.hits.unwrap_or(Lin(1.0, 0.0)) },
             other => Effect::Pending(other.to_string()),
         })
     }
@@ -611,7 +676,7 @@ pub(crate) mod tests {
       {"id":"focus","name":"Focus","class":"mage","max_level":10,"passive":true,
        "effects":[{"type":"sp_regen","value":[0,0.2]}]},
       {"id":"storm","name":"Storm","class":"mage","tier":2,"min_level":30,"target":"densest","range":16,
-       "requires":{"bolt":1},"effects":[{"type":"zone"}]},
+       "requires":{"bolt":1},"effects":[{"type":"aura"}]},
       {"id":"cleave","name":"Cleave","class":"swordsman","target":"front","effects":[]},
       {"id":"mending","name":"Mending","class":"acolyte","max_level":10,"target":"most_wounded_ally","range":10,
        "cast":[0.2,0],"cooldown":[1.5,0],"sp":[2,0.6],
@@ -622,7 +687,16 @@ pub(crate) mod tests {
       {"id":"curse","name":"Curse","class":"mage","target":"strongest","range":10,
        "effects":[{"type":"condition","save":{"condition":"petrified","secs":3}}]},
       {"id":"scorch","name":"Scorch","class":"mage","target":"nearest","range":10,
-       "effects":[{"type":"damage","dice":"1d4","save":{"condition":"burning"}}]}
+       "effects":[{"type":"damage","dice":"1d4","save":{"condition":"bleeding"}}]},
+      {"id":"swamp","name":"Swamp","class":"mage","target":"densest","range":10,
+       "effects":[{"type":"zone","radius":1.5,"secs":4,"condition":"slowed","ac":-2}]},
+      {"id":"flames","name":"Flames","class":"mage","target":"aim","range":6,
+       "effects":[{"type":"wall","length":4,"secs":[2,1],"dice":"1d6","scale":"k","damage":"fire","knockback":1,
+                   "save":{"condition":"burning","secs":3}}]},
+      {"id":"shield","name":"Shield","class":"mage","target":"densest_allies","range":8,
+       "effects":[{"type":"ward","radius":2,"secs":10,"hits":[1,1]}]},
+      {"id":"pneuma","name":"Pneuma","class":"mage","target":"densest_allies","range":8,
+       "effects":[{"type":"ward","radius":2,"secs":10,"ranged":true}]}
     ]}"#;
 
     pub fn book() -> SkillBook {
@@ -632,14 +706,14 @@ pub(crate) mod tests {
     #[test]
     fn parses_the_table_in_cells() {
         let b = book();
-        assert_eq!(b.len(), 11);
+        assert_eq!(b.len(), 15);
         let (_, bolt) = b.find("bolt").unwrap();
         assert_eq!(bolt.range, 20.0);
         assert_eq!(bolt.class, Some(Class::Mage));
         assert!(bolt.ready());
         let Effect::Damage(fx) = &bolt.effects[0] else { panic!() };
         assert_eq!((fx.radius, fx.kind, fx.count.at(3)), (2.0, DamageType::Fire, 3.0));
-        assert!(!b.find("storm").unwrap().1.ready(), "zones are not cast yet");
+        assert!(!b.find("storm").unwrap().1.ready(), "unknown effects are not cast");
         assert_eq!(b.find("slide").unwrap().1.class, None);
         assert_eq!(bolt.sp_cost(3), 3);
         assert!((bolt.cast_secs(10) - 0.9).abs() < 1e-6);
@@ -654,7 +728,19 @@ pub(crate) mod tests {
         let curse = b.find("curse").unwrap().1;
         assert!(curse.ready());
         assert!(matches!(curse.effects[0], Effect::Condition { save: SaveFx { condition: Condition::Petrified, secs: Lin(3.0, 0.0) }, .. }));
-        assert!(!b.find("scorch").unwrap().1.ready(), "a condition not applied yet keeps the skill pending");
+        assert!(!b.find("scorch").unwrap().1.ready(), "an unknown condition keeps the skill pending");
+    }
+
+    #[test]
+    fn ground_effects_parse_in_cells() {
+        let b = book();
+        let Effect::Zone(z) = b.find("swamp").unwrap().1.effects[0] else { panic!() };
+        assert_eq!((z.radius, z.secs.at(1), z.condition, z.ac), (3.0, 4.0, Some(Condition::Slowed), -2));
+        let Effect::Wall(w) = b.find("flames").unwrap().1.effects[0] else { panic!() };
+        assert_eq!((w.length, w.knockback, w.secs.at(2), w.kind), (8.0, 2.0, 4.0, DamageType::Fire));
+        assert_eq!(w.save.map(|s| s.condition), Some(Condition::Burning));
+        assert!(matches!(b.find("shield").unwrap().1.effects[0], Effect::Ward { radius: 4.0, hits: Lin(1.0, 1.0), .. }));
+        assert!(!b.find("pneuma").unwrap().1.ready(), "ranged wards wait for ranged monsters");
     }
 
     #[test]

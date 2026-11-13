@@ -54,6 +54,10 @@ export default defineConfig({
       SERVER_PORT: String(port),
       DATABASE_URL: `sqlite://${process.env.E2E_DB}?mode=rwc`,
       RUST_LOG: 'warn',
+      // Test hooks: new characters start at level 30 (tier-2 skills), and
+      // `/?mission=<id>` picks a mission without walking to the board.
+      GAME_DEV: '1',
+      GAME_DEV_LEVEL: '30',
     },
   },
 });

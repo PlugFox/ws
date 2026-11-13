@@ -138,11 +138,13 @@ pub struct HubSimConfig {
     /// A held direction is dropped after this many ticks without input, so a
     /// frozen client does not walk forever.
     pub input_timeout_ticks: u32,
+    /// Test hook (`GAME_DEV=1`): a mission can be picked anywhere in town.
+    pub missions_anywhere: bool,
 }
 
 impl Default for HubSimConfig {
     fn default() -> Self {
-        Self { tick_hz: 20, walk_speed: 6.0, input_timeout_ticks: 10 }
+        Self { tick_hz: 20, walk_speed: 6.0, input_timeout_ticks: 10, missions_anywhere: false }
     }
 }
 
@@ -272,6 +274,8 @@ pub struct HubInstance {
     skills: Arc<SkillBook>,
     /// Hits of cast skills still to land.
     pending: Vec<cast::PendingHit>,
+    /// Swamps, walls and wards on the ground.
+    zones: Vec<cast::Zone>,
 }
 
 pub const MISSION_BOARD: &str = "mission_board";
@@ -317,6 +321,7 @@ impl HubInstance {
             last_wave: 0,
             skills: Arc::new(SkillBook::default()),
             pending: Vec::new(),
+            zones: Vec::new(),
             horde_players: Vec::new(),
             monster_buf: BytesMut::new(),
         }
@@ -588,13 +593,8 @@ impl HubInstance {
     pub fn select_mission(&mut self, user_id: u32, mission: &str, public: bool, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
         let p = &self.players[i];
-        let at_board = self
-            .world
-            .map(p.map)
-            .manifest
-            .npcs
-            .iter()
-            .any(|n| n.kind == MISSION_BOARD && n.in_reach(p.x, p.y));
+        let at_board = self.config.missions_anywhere
+            || self.world.map(p.map).manifest.npcs.iter().any(|n| n.kind == MISSION_BOARD && n.in_reach(p.x, p.y));
         let event = if !at_board {
             HubEvent::Control(hub_error("npc_too_far", "stand at a mission board to pick a mission"))
         } else {
@@ -1618,5 +1618,120 @@ mod tests {
         stage.act(1, [0, 0], 1);
         stage.tick(&mut out);
         assert!(petrified(&mut stage), "the fourth failure sticks");
+    }
+
+    /// Hits on monsters in the messages of `out`, as `(target, amount, flags)`.
+    fn monster_hits(out: &Outgoing) -> Vec<(u32, u32, u8)> {
+        use crate::world::protocol::MONSTER_ENTITY_BASE;
+        controls_for(out, 1)
+            .iter()
+            .flat_map(|m| match m {
+                ServerMsg::Combat { hits, .. } => hits.iter().map(|h| (h.target, h.amount, h.flags)).collect(),
+                _ => Vec::new(),
+            })
+            .filter(|h| h.0 >= MONSTER_ENTITY_BASE)
+            .collect()
+    }
+
+    #[test]
+    fn a_swamp_holds_what_stands_in_it_and_lets_go_after() {
+        use crate::world::combat::Condition;
+        let mut stage = skill_stage("mage", 10, &[("swamp", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 8.0, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        assert_eq!(stage.zones.len(), 1);
+        let status = |stage: &mut HubInstance| stage.horde_mut().unwrap().store().status_of(slot);
+        for _ in 0..10 {
+            stage.tick(&mut out);
+            let st = status(&mut stage);
+            assert!(st.has(Condition::Slowed) && st.has(Condition::Mired), "held while inside: {st:?}");
+            assert_eq!(st.ac(), -2);
+        }
+        for _ in 0..80 {
+            stage.tick(&mut out);
+        }
+        assert!(stage.zones.is_empty(), "4 s are over");
+        assert_eq!(status(&mut stage), combat::Status(0), "the swamp's hold runs out");
+    }
+
+    #[test]
+    fn a_fire_wall_burns_pushes_back_and_sets_alight() {
+        use crate::world::combat::Condition;
+        let mut stage = skill_stage("mage", 10, &[("flames", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 6.0, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        let mut out = Vec::new();
+        stage.act(1, [24, 0], 1); // aim 3 m east, onto the monster
+        stage.tick(&mut out);
+        assert_eq!(stage.zones.len(), 1);
+        let x = stage.horde_mut().unwrap().store().x[slot as usize];
+        assert!(x >= px + 7.0, "pushed 1 m away from the caster: {x}");
+        let fire = DamageType::Fire as u8;
+        let mut burned = false;
+        for _ in 0..60 {
+            stage.tick(&mut out);
+            let st = stage.horde_mut().unwrap().store().status_of(slot);
+            burned |= st.has(Condition::Burning);
+        }
+        let fire_hits = monster_hits(&out).iter().filter(|h| h.2 >> 4 == fire).count();
+        assert!(fire_hits >= 2, "the wall hits on contact and the burn bites ({fire_hits})");
+        assert!(burned, "a failed save sets it alight (DC 13 against +1)");
+        assert!(stage.horde_mut().unwrap().store().burn_k[slot as usize] >= 1);
+    }
+
+    #[test]
+    fn poison_bites_once_a_second() {
+        use crate::world::combat::Condition;
+        let mut stage = skill_stage("mage", 10, &[]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 8.0, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        stage.horde_mut().unwrap().store_mut().afflict(slot, Condition::Poisoned, 61);
+        let mut out = Vec::new();
+        for _ in 0..80 {
+            stage.tick(&mut out);
+        }
+        let poison = monster_hits(&out).iter().filter(|h| h.2 >> 4 == DamageType::Poison as u8 && h.1 > 0).count();
+        assert_eq!(poison, 3, "3 s of poison at 20 Hz");
+    }
+
+    #[test]
+    fn a_ward_takes_the_next_melee_hits() {
+        let mut stage = skill_stage("mage", 10, &[("shield", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 0.8, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        let held = |stage: &HubInstance| match stage.zones[..] {
+            [cast::Zone { kind: cast::ZoneKind::Ward { hits, .. }, .. }] => hits,
+            _ => 0,
+        };
+        let max = fighter(&stage, 1).max_hp;
+        let swings = |out: &Outgoing| {
+            controls_for(out, 1)
+                .iter()
+                .flat_map(|m| match m {
+                    ServerMsg::Combat { swings, .. } => swings.clone(),
+                    _ => Vec::new(),
+                })
+                .filter(|s| s.entity_id >= crate::world::protocol::MONSTER_ENTITY_BASE)
+                .count()
+        };
+        // 1 + 1·slv hits; the first may land on the tick of the cast.
+        assert_eq!(held(&stage) as usize + swings(&out), 2);
+        while swings(&out) < 2 {
+            stage.tick(&mut out);
+        }
+        assert_eq!(fighter(&stage, 1).hp, max, "two blows land on the ward");
+        assert!(stage.zones.is_empty() || matches!(stage.zones[0].kind, cast::ZoneKind::Ward { hits: 0, .. }));
+        stage.tick(&mut out);
+        assert!(stage.zones.is_empty(), "a spent ward is gone");
     }
 }

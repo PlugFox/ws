@@ -158,6 +158,16 @@ impl CharacterRepo {
         .await
     }
 
+    /// Sets a fresh character's level (test hook, `GAME_DEV_LEVEL`).
+    pub async fn set_level(pool: &Pool<Sqlite>, character_id: u32, level: u32) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE characters SET level = ?, base_exp = 0 WHERE id = ?")
+            .bind(level as i64)
+            .bind(character_id as i64)
+            .execute(pool)
+            .await
+            .map(|_| ())
+    }
+
     pub async fn update_dirty_state(
         pool: &Pool<Sqlite>,
         character_id: u32,

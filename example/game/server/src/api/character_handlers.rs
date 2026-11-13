@@ -219,6 +219,13 @@ pub async fn create_character(
             Json(json!({ "error": err.to_string() })),
         ),
     })?;
+    let mut record = record;
+    if let Some(level) = state.config.dev_level {
+        let level = level.clamp(1, combat::MAX_LEVEL);
+        CharacterRepo::set_level(&state.pool, record.id as u32, level).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": err.to_string() }))))?;
+        record.level = level as i64;
+        record.base_exp = 0;
+    }
 
     Ok((StatusCode::CREATED, Json(CharacterDto::of(record))).into_response())
 }

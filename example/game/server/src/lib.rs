@@ -24,6 +24,9 @@ use world::{missions, HubDirectory, HubWorld, LobbyDirectory, StageDirectory};
 /// pack is not fatal: auth and characters keep working and `hub_join`
 /// answers `hub_unavailable`.
 pub async fn create_app(config: AppConfig) -> Result<(Router, AppState), Box<dyn std::error::Error + Send + Sync>> {
+    if config.hub.sim.missions_anywhere {
+        warn!("GAME_DEV test hooks are on: missions anywhere, new characters at level {:?}", config.dev_level);
+    }
     let world = match &config.assets_dir {
         Some(dir) => match HubWorld::load(dir, &config.hub_maps, &config.hub_entry) {
             Ok(world) => {

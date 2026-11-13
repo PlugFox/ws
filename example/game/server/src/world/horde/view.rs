@@ -33,7 +33,7 @@
 //! count × entry, in increasing slot order:
 //!   var  head     (slot − previous slot − 1) << 3 | s << 2 | op
 //!                 (previous = −1 at start)
-//!   u8   status   only when s = 1: the monster's conditions changed
+//!   var  status   only when s = 1: the monster's conditions changed
 //!                 (`combat::Condition` bits); never on REMOVE
 //!   op 0 NUDGE    i8 dx, i8 dy (1/64 cell, from the known p), i8 vx, i8 vy
 //!   op 1 MOVE     u16 x, u16 y, i8 vx, i8 vy
@@ -130,7 +130,7 @@ struct Known {
     generation: u8,
     rec: Record,
     /// Conditions the client knows.
-    status: u8,
+    status: u16,
     /// Last tick the monster was within keep range.
     seen: u32,
 }
@@ -141,7 +141,7 @@ struct Candidate {
     spawn: bool,
     /// The known position fits a NUDGE.
     nudge: bool,
-    /// Carries the status byte.
+    /// Carries the status.
     status: bool,
     priority: f32,
 }
@@ -155,7 +155,7 @@ struct Entry {
     rec: Record,
     /// Previous position, for NUDGE.
     from: (u16, u16),
-    status: Option<u8>,
+    status: Option<u16>,
 }
 
 /// Per-player mirror of the client's monster records.
@@ -296,7 +296,7 @@ impl Horde {
             }
         }
 
-        let cost = |c: &Candidate| HEAD_COST + usize::from(c.status) + if c.spawn { 8 } else if c.nudge { 4 } else { 6 };
+        let cost = |c: &Candidate| HEAD_COST + 2 * usize::from(c.status) + if c.spawn { 8 } else if c.nudge { 4 } else { 6 };
         let total: usize = candidates.iter().map(cost).sum();
         if used + total > config.budget {
             candidates.sort_unstable_by(|a, b| b.priority.total_cmp(&a.priority));
@@ -390,7 +390,7 @@ impl Horde {
             prev = e.slot as i32;
             out.put_var(gap << 3 | u64::from(e.status.is_some()) << 2 | u64::from(e.op));
             if let Some(st) = e.status {
-                out.put_u8(st);
+                out.put_var(u64::from(st));
             }
             let r = &e.rec;
             match e.op {
@@ -428,9 +428,9 @@ impl Horde {
 /// One decoded entry of a monster section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeltaEntry {
-    Nudge { slot: u16, dx: i8, dy: i8, vx: i8, vy: i8, status: Option<u8> },
-    Move { slot: u16, x: u16, y: u16, vx: i8, vy: i8, status: Option<u8> },
-    Spawn { slot: u16, generation: u8, kind: u8, x: u16, y: u16, vx: i8, vy: i8, status: Option<u8> },
+    Nudge { slot: u16, dx: i8, dy: i8, vx: i8, vy: i8, status: Option<u16> },
+    Move { slot: u16, x: u16, y: u16, vx: i8, vy: i8, status: Option<u16> },
+    Spawn { slot: u16, generation: u8, kind: u8, x: u16, y: u16, vx: i8, vy: i8, status: Option<u16> },
     Remove { slot: u16 },
 }
 
@@ -462,7 +462,7 @@ impl MonsterDelta {
                 if op == OP_REMOVE {
                     return None;
                 }
-                Some(r.u8()?)
+                Some(u16::try_from(r.var()?).ok()?)
             } else {
                 None
             };
@@ -497,7 +497,7 @@ pub struct Mirrored {
     pub kind: u8,
     pub rec: Record,
     /// Conditions (`combat::Condition` bits).
-    pub status: u8,
+    pub status: u16,
 }
 
 /// Client-side state rebuilt from monster sections (tests, bots, benches;

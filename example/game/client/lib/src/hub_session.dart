@@ -94,7 +94,9 @@ final class _Mob {
       (status & MobStatus.petrified != 0 ? Row.flagPetrified : 0) |
       (status & MobStatus.stunned != 0 ? Row.flagStunned : 0) |
       (status & MobStatus.slowed != 0 ? Row.flagSlowed : 0) |
-      (status & MobStatus.blinded != 0 ? Row.flagBlinded : 0);
+      (status & MobStatus.blinded != 0 ? Row.flagBlinded : 0) |
+      (status & MobStatus.burning != 0 ? Row.flagBurning : 0) |
+      (status & MobStatus.poisoned != 0 ? Row.flagPoisoned : 0);
 
   /// Held monsters stop mid-frame; slowed ones animate at half speed.
   double get animSpeed => status & MobStatus.held != 0
@@ -199,6 +201,10 @@ final class HubSession {
   _Npc? _nearNpc;
 
   final _keys = <String>{};
+
+  /// Keys pressed since the last input tick: a tap shorter than a tick
+  /// (a slow frame, a quick finger) still casts.
+  final _tapped = <String>{};
   int _stopSends = 0;
 
   /// Own skills (`skills` message) and the last pointer position (aim).
@@ -251,7 +257,7 @@ final class HubSession {
     web.window.addEventListener(
       'pointermove',
       ((web.PointerEvent e) {
-        _pointer = (e.clientX.toDouble(), e.clientY.toDouble());
+        _pointer = _clientXY(e);
       }).toJS,
     );
     web.window.addEventListener('keydown', _onKeyDown.toJS);
@@ -333,6 +339,7 @@ final class HubSession {
           _inStage = false;
           view.showPanel('');
         }
+        _devMission();
       case StageJoined():
         _me = msg.entityId;
         _channel = 'Stage-${msg.stageId}';
@@ -710,6 +717,7 @@ final class HubSession {
     // `is` on JS interop types checks only the Dart representation; use isA.
     if (e.target.isA<web.HTMLInputElement>()) return;
     _keys.add(e.code);
+    if (!e.repeat) _tapped.add(e.code);
     // On a stage F is a skill slot; in town it talks to the nearest NPC.
     if (e.code == 'KeyF' && !e.repeat && !_inStage) _interactNearest();
     if (_inStage && (e.code == 'Space' || e.code == 'Tab')) e.preventDefault();
@@ -723,8 +731,18 @@ final class HubSession {
 
   void _onKeyUp(web.KeyboardEvent e) => _keys.remove(e.code);
 
+  /// Pointer position in client pixels. `package:web` types `clientX` as an
+  /// int, but pointer events carry fractions (high-DPI, zoom), which a typed
+  /// read rejects under dart2js; read the JS number as it is.
+  static (double, double) _clientXY(web.MouseEvent e) {
+    final o = e as JSObject;
+    double at(String k) => o.getProperty<JSNumber>(k.toJS).toDartDouble;
+    return (at('clientX'), at('clientY'));
+  }
+
   void _onClick(web.MouseEvent e) {
-    final id = view.pickEntity(e.clientX.toDouble(), e.clientY.toDouble());
+    final (x, y) = _clientXY(e);
+    final id = view.pickEntity(x, y);
     if (id.isNaN || id >= 0) return;
     final npc = _npcs.where((n) => n.entityId == id).firstOrNull;
     if (npc == null) return;
@@ -842,6 +860,17 @@ final class HubSession {
     );
   }
 
+  /// `?mission=<id>` (e2e runs): picks a private mission on the first town
+  /// join. Only a server with `GAME_DEV=1` accepts it away from the board.
+  void _devMission() {
+    if (_devMissionSent) return;
+    _devMissionSent = true;
+    final mission = Uri.base.queryParameters['mission'];
+    if (mission != null && mission.isNotEmpty) _send(ClientMsg.missionSelect(mission, public: false));
+  }
+
+  bool _devMissionSent = false;
+
   void _onPanelAction(String panel, String action, String? row) {
     switch ((panel, action)) {
       case ('lobby', 'ready'):
@@ -934,17 +963,18 @@ final class HubSession {
     );
   }
 
-  /// Skill slots held this tick (bit i = slot i); only on a stage, standing
-  /// up, with no window open.
+  /// Skill slots held or tapped this tick (bit i = slot i); only on a
+  /// stage, standing up, with no window open.
   int _heldSlots() {
     if (!_inStage || _myState != 0 || view.dialogOpen()) return 0;
-    final shift = _keys.contains('ShiftLeft') || _keys.contains('ShiftRight');
+    bool down(String code) => _keys.contains(code) || _tapped.contains(code);
+    final shift = down('ShiftLeft') || down('ShiftRight');
     var bits = 0;
     for (var i = 0; i < _slotKeys.length; i++) {
-      if (_keys.contains(_slotKeys[i])) bits |= 1 << (shift ? i + 5 : i);
+      if (down(_slotKeys[i])) bits |= 1 << (shift ? i + 5 : i);
     }
     for (var i = 0; i < 10; i++) {
-      if (_keys.contains('Digit${(i + 1) % 10}')) bits |= 1 << i;
+      if (down('Digit${(i + 1) % 10}')) bits |= 1 << i;
     }
     return bits;
   }
@@ -1085,11 +1115,15 @@ final class HubSession {
 
   void _tick() {
     final p = _predictor;
-    if (p == null || _loading) return;
+    if (p == null || _loading) {
+      _tapped.clear();
+      return;
+    }
     // Downed or fallen: the server ignores movement; do not predict any.
     final (dx, dy) = _myState == 0 ? _inputDir() : (0.0, 0.0);
     final moving = dx != 0 || dy != 0;
     final slots = _heldSlots();
+    _tapped.clear();
     if (moving || slots != 0) _stopSends = 3;
     if (moving || slots != 0 || _stopSends > 0) {
       if (!moving && slots == 0) _stopSends--;
