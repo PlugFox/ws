@@ -1,0 +1,14 @@
+{
+  "name": "game-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Browser tests of the example game (Playwright, headless Chromium).",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "install:browser": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0"
+  }
+}

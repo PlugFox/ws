@@ -9,8 +9,8 @@
 use super::fight::Fighter;
 use super::{facing_of, HubEvent, HubInstance, HubPlayer, MapIdx, Outgoing};
 use crate::world::combat::rules::{attack_roll, saving_throw, AttackOutcome};
-use crate::world::combat::skills::{DamageFx, Effect, EffectDice, HealFx, MoveMode, Shape, SkillBook, SkillDef, Target};
-use crate::world::combat::{cantrip_k, save_dc, Damage, DamageType, Dice, Rng};
+use crate::world::combat::skills::{DamageFx, Effect, EffectDice, HealFx, MoveMode, SaveFx, Shape, SkillBook, SkillDef, Target};
+use crate::world::combat::{cantrip_k, save_dc, Condition, Damage, DamageType, Dice, Rng};
 use crate::world::horde::Horde;
 use crate::world::map::WalkGrid;
 use crate::world::protocol::{hit, HitEvent, ServerMsg, MONSTER_ENTITY_BASE};
@@ -68,7 +68,13 @@ pub(super) enum PendingKind {
         area: Area,
         /// A `spread` hit follows its monster (slot) instead of the point.
         follow: Option<u16>,
+        /// A failed save also leaves this condition for so many ticks.
+        save: Option<(Condition, u16)>,
+        /// The caster's cantrip multiplier (shattering ice).
+        k: u32,
     },
+    /// Save or the condition, no damage.
+    Condition { area: Area, dc: i32, condition: Condition, ticks: u16 },
     Heal {
         dice: Dice,
         x: f32,
@@ -114,6 +120,11 @@ impl Area {
             other => other,
         }
     }
+}
+
+/// Ticks of a condition at skill level `slv`.
+fn condition_ticks(save: &SaveFx, slv: u8, hz: f32) -> u16 {
+    (save.secs.at(slv).max(0.0) * hz).round().min(u16::MAX as f32) as u16
 }
 
 fn norm(x: f32, y: f32) -> Option<(f32, f32)> {
@@ -338,7 +349,9 @@ fn land(
     for effect in &def.effects {
         match effect {
             Effect::Damage(fx) => {
-                let DamageFx { dice, extra, scale_k, mult, bonus, kind, count, every, shape, radius, width, arc_cos, scatter, spread } = fx;
+                let DamageFx { dice, extra, scale_k, mult, bonus, kind, count, every, shape, radius, width, arc_cos, scatter, spread, save } =
+                    fx;
+                let save = save.as_ref().map(|sv| (sv.condition, condition_ticks(sv, slv, hz)));
                 let (base, kind, to_hit) = match dice {
                     EffectDice::Fixed(d) => (scaled(*d, *scale_k, mult.at(slv), bonus.at(slv), cl), *kind, None),
                     EffectDice::Weapon => {
@@ -378,7 +391,7 @@ fn land(
                     pending.push(PendingHit {
                         at,
                         map,
-                        kind: PendingKind::Damage { dice: base, extra, kind, to_hit, dc, area, follow },
+                        kind: PendingKind::Damage { dice: base, extra, kind, to_hit, dc, area, follow, save, k: cantrip_k(cl) },
                     });
                 }
             }
@@ -407,6 +420,16 @@ fn land(
                 }
                 (caster.x, caster.y) = (x, y);
             }
+            Effect::Condition { save, radius } => pending.push(PendingHit {
+                at: now,
+                map,
+                kind: PendingKind::Condition {
+                    area: Area::Circle { x: aimed.x, y: aimed.y, radius: *radius },
+                    dc,
+                    condition: save.condition,
+                    ticks: condition_ticks(save, slv, hz),
+                },
+            }),
             Effect::SpRegen(_) | Effect::Pending(_) => {}
         }
     }
@@ -538,7 +561,14 @@ impl HubInstance {
         });
         for h in due.into_iter().filter(|h| h.map == map) {
             match h.kind {
-                PendingKind::Damage { dice, extra, kind, to_hit, dc, area, follow } => {
+                PendingKind::Condition { area, dc, condition, ticks } => {
+                    for s in inside(horde, area) {
+                        if !resist(horde, &mut self.dice, s, dc, true) {
+                            horde.store_mut().afflict(s, condition, ticks);
+                        }
+                    }
+                }
+                PendingKind::Damage { dice, extra, kind, to_hit, dc, area, follow, save, k } => {
                     let area = match follow {
                         Some(s) if horde.store().is_alive(s) && horde.store().hp[s as usize] > 0 => {
                             area.moved_to(horde.store().x[s as usize], horde.store().y[s as usize])
@@ -546,7 +576,8 @@ impl HubInstance {
                         Some(_) => continue,
                         None => area,
                     };
-                    strike(horde, &mut self.dice, area, Damage::new(dice, kind), extra, to_hit, dc, hits, kills);
+                    let blow = Blow { damage: Damage::new(dice, kind), extra, to_hit, dc, save, k };
+                    strike(horde, &mut self.dice, area, blow, hits, kills);
                 }
                 PendingKind::Heal { dice, x, y, radius, ally } => {
                     for p in self.players.iter_mut().filter(|p| p.map == map) {
@@ -602,59 +633,111 @@ fn spread_targets(horde: &Horde, def: &SkillDef, slv: u8, aimed: Aimed) -> Vec<(
     near.into_iter().map(|(s, x, y, _)| (s, x, y)).collect()
 }
 
-/// One hit over an area of the horde.
+/// Live monsters inside an area.
+fn inside(horde: &Horde, area: Area) -> Vec<u16> {
+    let store = horde.store();
+    let catalog = horde.catalog();
+    store
+        .alive()
+        .iter()
+        .copied()
+        .filter(|&s| {
+            let i = s as usize;
+            store.hp[i] > 0 && area.contains(store.x[i], store.y[i], catalog.get(store.kind[i]).radius)
+        })
+        .collect()
+}
+
+/// A monster's saving throw against `dc`; stunned ones fail. When a
+/// condition rides on it, a boss turns a failure into a success while its
+/// legendary resistance lasts (it is not spent on plain damage).
+fn resist(horde: &mut Horde, rng: &mut Rng, s: u16, dc: i32, condition: bool) -> bool {
+    let block = horde.block(s);
+    if !horde.store().status_of(s).saves_fail() && saving_throw(rng, block.save, dc, 0) {
+        return true;
+    }
+    let lr = &mut horde.store_mut().legendary[s as usize];
+    if condition && *lr > 0 {
+        *lr -= 1;
+        return true;
+    }
+    false
+}
+
+/// Damage to one monster with its conditions applied (COMBAT.md §2.5): ice
+/// makes it water and a physical hit shatters it for +1d6 per `k`; stone
+/// halves everything. Returns the amount taken off its HP.
 #[allow(clippy::too_many_arguments)]
-fn strike(
+pub(super) fn wound(
     horde: &mut Horde,
     rng: &mut Rng,
-    area: Area,
+    s: u16,
     damage: Damage,
     extra: Option<Dice>,
+    crit: bool,
+    saved: bool,
+    k: u32,
+) -> i32 {
+    let status = horde.store().status_of(s);
+    let element = status.element(horde.catalog().get(horde.store().kind[s as usize]).element);
+    let mut amount = damage.resolve(rng, crit, saved, element, 0);
+    if let Some(e) = extra {
+        amount += Damage::new(e, damage.kind).resolve(rng, crit, saved, element, 0);
+    }
+    if status.has(Condition::Frozen) && damage.kind == DamageType::Physical {
+        amount += Dice::new(k.max(1), 6, 0).roll(rng, crit);
+        horde.store_mut().cure(s, Condition::Frozen);
+    }
+    if status.resists_all() {
+        amount /= 2;
+    }
+    horde.store_mut().hp[s as usize] -= amount;
+    amount
+}
+
+/// What one skill hit carries.
+#[derive(Clone, Copy)]
+struct Blow {
+    damage: Damage,
+    extra: Option<Dice>,
+    /// To-hit bonus when it swings the weapon; `None` = save for half.
     to_hit: Option<i32>,
     dc: i32,
-    hits: &mut Vec<HitEvent>,
-    kills: &mut Vec<u16>,
-) {
-    let inside: Vec<u16> = {
-        let store = horde.store();
-        let catalog = horde.catalog();
-        store
-            .alive()
-            .iter()
-            .copied()
-            .filter(|&s| {
-                let i = s as usize;
-                store.hp[i] > 0 && area.contains(store.x[i], store.y[i], catalog.get(store.kind[i]).radius)
-            })
-            .collect()
-    };
-    for s in inside {
-        let block = horde.block(s);
-        let element = horde.catalog().get(horde.store().kind[s as usize]).element;
+    save: Option<(Condition, u16)>,
+    k: u32,
+}
+
+/// One hit over an area of the horde.
+fn strike(horde: &mut Horde, rng: &mut Rng, area: Area, blow: Blow, hits: &mut Vec<HitEvent>, kills: &mut Vec<u16>) {
+    for s in inside(horde, area) {
         let id = MONSTER_ENTITY_BASE + s as u32;
-        let (crit, saved) = match to_hit {
-            Some(bonus) => match attack_roll(rng, bonus, block.ac, 0, 20) {
-                AttackOutcome::Miss => {
-                    hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS });
-                    continue;
+        let (crit, saved) = match blow.to_hit {
+            Some(bonus) => {
+                let ac = horde.block(s).ac;
+                match attack_roll(rng, bonus, ac, horde.store().status_of(s).advantage_against(), 20) {
+                    AttackOutcome::Miss => {
+                        hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS });
+                        continue;
+                    }
+                    o => (o == AttackOutcome::Critical, false),
                 }
-                o => (o == AttackOutcome::Critical, false),
-            },
-            None => (false, saving_throw(rng, block.save, dc, 0)),
+            }
+            None => (false, resist(horde, rng, s, blow.dc, blow.save.is_some())),
         };
-        let mut amount = damage.resolve(rng, crit, saved, element, 0);
-        if let Some(e) = extra {
-            amount += Damage::new(e, damage.kind).resolve(rng, crit, saved, element, 0);
-        }
-        let hp = &mut horde.store_mut().hp[s as usize];
-        *hp -= amount;
-        let mut flags = (damage.kind as u8) << 4;
+        let amount = wound(horde, rng, s, blow.damage, blow.extra, crit, saved, blow.k);
+        let mut flags = (blow.damage.kind as u8) << 4;
         if crit {
             flags |= hit::CRITICAL;
         }
-        if *hp <= 0 {
+        if horde.store().hp[s as usize] <= 0 {
             flags |= hit::KILL;
             kills.push(s);
+        } else if let Some((condition, ticks)) = blow.save {
+            // A weapon swing that hit still allows a save against its rider.
+            let failed = if blow.to_hit.is_some() { !resist(horde, rng, s, blow.dc, true) } else { !saved };
+            if failed {
+                horde.store_mut().afflict(s, condition, ticks);
+            }
         }
         hits.push(HitEvent { target: id, amount: amount as u32, flags });
     }

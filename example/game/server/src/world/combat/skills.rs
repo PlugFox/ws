@@ -7,7 +7,7 @@
 
 use super::dice::Dice;
 use super::rules::DamageType;
-use super::Class;
+use super::{Class, Condition};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -20,14 +20,24 @@ pub const SLOTS: usize = 10;
 /// The row every class shares (the kiting kit).
 pub const BASIC: &str = "basic";
 
-/// `a + b·slv`.
+/// `a + b·slv`; in the file `[a, b]` or a plain number `a`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
-#[serde(from = "[f32; 2]")]
+#[serde(from = "RawLin")]
 pub struct Lin(pub f32, pub f32);
 
-impl From<[f32; 2]> for Lin {
-    fn from(v: [f32; 2]) -> Self {
-        Lin(v[0], v[1])
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawLin {
+    Flat(f32),
+    Pair([f32; 2]),
+}
+
+impl From<RawLin> for Lin {
+    fn from(v: RawLin) -> Self {
+        match v {
+            RawLin::Flat(a) => Lin(a, 0.0),
+            RawLin::Pair([a, b]) => Lin(a, b),
+        }
     }
 }
 
@@ -103,6 +113,16 @@ pub struct DamageFx {
     pub arc_cos: f32,
     pub scatter: f32,
     pub spread: bool,
+    /// A failed save also leaves this condition.
+    pub save: Option<SaveFx>,
+}
+
+/// The condition a failed saving throw leaves, and for how long.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SaveFx {
+    pub condition: Condition,
+    /// Seconds.
+    pub secs: Lin,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -122,6 +142,8 @@ pub enum Effect {
     Move { mode: MoveMode, distance: Lin },
     /// Passive: + value % of max SP per second.
     SpRegen(Lin),
+    /// Save or the condition, no damage (in `radius` of the point).
+    Condition { save: SaveFx, radius: f32 },
     /// Not cast by the server yet (conditions, zones, buffs...).
     Pending(String),
 }
@@ -476,13 +498,20 @@ struct RawEffect {
     mode: Option<MoveMode>,
     distance: Option<Lin>,
     value: Option<Lin>,
+    save: Option<RawSave>,
+}
+
+#[derive(Deserialize)]
+struct RawSave {
+    condition: String,
+    secs: Option<Lin>,
 }
 
 /// Timings stay in seconds; the caller turns them into ticks.
 impl RawEffect {
     fn parse(v: &serde_json::Value) -> Result<Effect, String> {
         let kind = v.get("type").and_then(|t| t.as_str()).ok_or("effect without a type")?;
-        if !matches!(kind, "damage" | "heal" | "move" | "sp_regen") {
+        if !matches!(kind, "damage" | "heal" | "move" | "sp_regen" | "condition") {
             return Ok(Effect::Pending(kind.to_string()));
         }
         let raw: RawEffect = serde_json::from_value(v.clone()).map_err(|e| format!("{kind} effect: {e}"))?;
@@ -490,6 +519,14 @@ impl RawEffect {
     }
 
     fn build(&self) -> Result<Effect, String> {
+        // A condition the server does not apply yet keeps the skill pending.
+        let save = match &self.save {
+            None => None,
+            Some(s) => match Condition::from_id(&s.condition) {
+                Some(condition) => Some(SaveFx { condition, secs: s.secs.unwrap_or(Lin(1.0, 0.0)) }),
+                None => return Ok(Effect::Pending(format!("condition {}", s.condition))),
+            },
+        };
         let mult = self.mult.unwrap_or(Lin(1.0, 0.0));
         let count = self.count.unwrap_or(Lin(1.0, 0.0));
         Ok(match self.kind.as_str() {
@@ -514,6 +551,7 @@ impl RawEffect {
                 arc_cos: if self.arc > 0.0 { (self.arc.to_radians() / 2.0).cos() } else { -1.0 },
                 scatter: self.scatter * CELLS,
                 spread: self.spread,
+                save,
             }),
             "heal" => Effect::Heal(HealFx {
                 dice: parse_dice(&self.dice)?,
@@ -528,6 +566,10 @@ impl RawEffect {
                 distance: Lin(self.distance.unwrap_or_default().0 * CELLS, self.distance.unwrap_or_default().1 * CELLS),
             },
             "sp_regen" => Effect::SpRegen(self.value.unwrap_or_default()),
+            "condition" => Effect::Condition {
+                save: save.ok_or("condition without a save")?,
+                radius: self.radius * CELLS,
+            },
             other => Effect::Pending(other.to_string()),
         })
     }
@@ -573,7 +615,14 @@ pub(crate) mod tests {
       {"id":"cleave","name":"Cleave","class":"swordsman","target":"front","effects":[]},
       {"id":"mending","name":"Mending","class":"acolyte","max_level":10,"target":"most_wounded_ally","range":10,
        "cast":[0.2,0],"cooldown":[1.5,0],"sp":[2,0.6],
-       "effects":[{"type":"heal","dice":"1d8","scale":"k","mult":[0,1],"radius":1.5}]}
+       "effects":[{"type":"heal","dice":"1d8","scale":"k","mult":[0,1],"radius":1.5}]},
+      {"id":"chill","name":"Chill","class":"mage","max_level":10,"target":"nearest","range":10,
+       "effects":[{"type":"damage","dice":"1d4","damage":"cold","radius":1,
+                   "save":{"ability":"body","condition":"frozen","secs":[1,0.5]}}]},
+      {"id":"curse","name":"Curse","class":"mage","target":"strongest","range":10,
+       "effects":[{"type":"condition","save":{"condition":"petrified","secs":3}}]},
+      {"id":"scorch","name":"Scorch","class":"mage","target":"nearest","range":10,
+       "effects":[{"type":"damage","dice":"1d4","save":{"condition":"burning"}}]}
     ]}"#;
 
     pub fn book() -> SkillBook {
@@ -583,7 +632,7 @@ pub(crate) mod tests {
     #[test]
     fn parses_the_table_in_cells() {
         let b = book();
-        assert_eq!(b.len(), 8);
+        assert_eq!(b.len(), 11);
         let (_, bolt) = b.find("bolt").unwrap();
         assert_eq!(bolt.range, 20.0);
         assert_eq!(bolt.class, Some(Class::Mage));
@@ -594,6 +643,18 @@ pub(crate) mod tests {
         assert_eq!(b.find("slide").unwrap().1.class, None);
         assert_eq!(bolt.sp_cost(3), 3);
         assert!((bolt.cast_secs(10) - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn saves_carry_conditions() {
+        let b = book();
+        let Effect::Damage(fx) = &b.find("chill").unwrap().1.effects[0] else { panic!() };
+        let save = fx.save.unwrap();
+        assert_eq!((save.condition, save.secs.at(2)), (Condition::Frozen, 2.0));
+        let curse = b.find("curse").unwrap().1;
+        assert!(curse.ready());
+        assert!(matches!(curse.effects[0], Effect::Condition { save: SaveFx { condition: Condition::Petrified, secs: Lin(3.0, 0.0) }, .. }));
+        assert!(!b.find("scorch").unwrap().1.ready(), "a condition not applied yet keeps the skill pending");
     }
 
     #[test]

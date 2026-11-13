@@ -411,3 +411,64 @@ fn no_players_freezes_the_horde() {
     assert_eq!(h.monsters().next().unwrap().3, 20.5);
     assert_eq!(h.director_elapsed(), 0.0);
 }
+
+#[test]
+fn held_monsters_stand_and_slowed_ones_crawl() {
+    use crate::world::combat::Condition;
+    let w = world(60, 20, None);
+    let mut h = Horde::new(w, catalog(), config(30.0));
+    let held = h.spawn(0, 10.5, 5.5).unwrap();
+    let slow = h.spawn(0, 10.5, 10.5).unwrap();
+    let free = h.spawn(0, 10.5, 15.5).unwrap();
+    h.store_mut().afflict(held, Condition::Frozen, 100);
+    h.store_mut().afflict(slow, Condition::Slowed, 100);
+    let player = (50.5, 10.5);
+    for t in 0..20 {
+        h.tick(t, 20, &[player]);
+    }
+    let x = |h: &Horde, s: u16| h.monsters().find(|m| m.0 == s).unwrap().3;
+    assert_eq!(x(&h, held), 10.5, "frozen in place");
+    let (slow_d, free_d) = (x(&h, slow) - 10.5, x(&h, free) - 10.5);
+    assert!(free_d > 2.0 && (slow_d / free_d - 0.5).abs() < 0.1, "half speed: {slow_d} vs {free_d}");
+    // The freeze runs out (100 ticks): it walks again.
+    for t in 20..110 {
+        h.tick(t, 20, &[player]);
+    }
+    assert!(x(&h, held) > 10.5);
+}
+
+#[test]
+fn status_changes_reach_the_client_even_standing_still() {
+    use crate::world::combat::Condition;
+    let w = world(60, 60, None);
+    let mut h = Horde::new(w, catalog(), config(20.0));
+    let mut v = Viewer::new(&h);
+    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0 };
+    let a = h.spawn(0, 25.5, 30.5).unwrap();
+    let b = h.spawn(0, 35.5, 30.5).unwrap();
+    h.store_mut().afflict(b, Condition::Stunned, 50);
+    h.tick_views(0, 20, &[p]);
+    let (_, d) = v.frame(&h, p, 0);
+    let spawn_status = |slot: u16| {
+        d.entries.iter().find_map(|e| match *e {
+            view::DeltaEntry::Spawn { slot: s, status, .. } if s == slot => Some(status),
+            _ => None,
+        })
+    };
+    assert_eq!(spawn_status(a), Some(None), "no byte for a clean newcomer");
+    assert_eq!(spawn_status(b), Some(Some(Condition::Stunned.bit())));
+    // Freeze the first; it stands still, yet the change goes out.
+    h.store_mut().afflict(a, Condition::Frozen, 50);
+    h.tick_views(1, 20, &[p]);
+    v.frame(&h, p, 1);
+    assert_eq!(v.mirror.monsters[&a].status, Condition::Frozen.bit());
+    assert_eq!(v.mirror.monsters[&b].status, Condition::Stunned.bit());
+    // Nothing changes: nothing about status is resent.
+    h.tick_views(2, 20, &[p]);
+    let (_, d) = v.frame(&h, p, 2);
+    assert!(d.entries.iter().all(|e| !matches!(e, view::DeltaEntry::Nudge { status: Some(_), .. } | view::DeltaEntry::Move { status: Some(_), .. })));
+    h.store_mut().cure(a, Condition::Frozen);
+    h.tick_views(3, 20, &[p]);
+    v.frame(&h, p, 3);
+    assert_eq!(v.mirror.monsters[&a].status, 0, "the thaw is sent too");
+}

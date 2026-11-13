@@ -9,6 +9,7 @@
 //! on `(slot, generation)`, so a reused slot is a new entity to them, never the old
 //! one sliding across the map.
 
+use crate::world::combat::{Condition, Status, CONDITIONS};
 use std::collections::VecDeque;
 
 /// Simulated at full rate (inside some player's view, or a boss).
@@ -34,6 +35,12 @@ pub struct HordeStorage {
     /// Ticks spent outside every player's recycle radius (far mobs are
     /// teleported back just outside the light after a while).
     pub far_ticks: Vec<u16>,
+    /// Ticks left per condition (index `Condition as usize`).
+    pub cond: Vec<[u16; CONDITIONS]>,
+    /// Active conditions (`Condition::bit`), what clients see.
+    pub status: Vec<u8>,
+    /// Failed saves it may still turn into successes (bosses).
+    pub legendary: Vec<u8>,
     /// Dense list of live slots (iteration order).
     alive: Vec<u16>,
     /// Position of a slot in `alive` (`u16::MAX` when free).
@@ -57,6 +64,9 @@ impl HordeStorage {
             flags: vec![0; capacity],
             generation: vec![0; capacity],
             far_ticks: vec![0; capacity],
+            cond: vec![[0; CONDITIONS]; capacity],
+            status: vec![0; capacity],
+            legendary: vec![0; capacity],
             alive: Vec::with_capacity(capacity),
             alive_pos: vec![u16::MAX; capacity],
             free: (0..capacity as u16).collect(),
@@ -97,9 +107,53 @@ impl HordeStorage {
         self.kind[s] = kind;
         self.flags[s] = flags;
         self.far_ticks[s] = 0;
+        self.cond[s] = [0; CONDITIONS];
+        self.status[s] = 0;
+        self.legendary[s] = 0;
         self.alive_pos[s] = self.alive.len() as u16;
         self.alive.push(slot);
         Some(slot)
+    }
+
+    pub fn status_of(&self, slot: u16) -> Status {
+        Status(self.status[slot as usize])
+    }
+
+    /// Puts `c` on a monster for `ticks` (a longer one already running wins).
+    pub fn afflict(&mut self, slot: u16, c: Condition, ticks: u16) {
+        let s = slot as usize;
+        let t = &mut self.cond[s][c as usize];
+        *t = (*t).max(ticks);
+        if *t > 0 {
+            self.status[s] |= c.bit();
+        }
+    }
+
+    /// Ends `c` early (a physical hit shatters the ice).
+    pub fn cure(&mut self, slot: u16, c: Condition) {
+        let s = slot as usize;
+        self.cond[s][c as usize] = 0;
+        self.status[s] &= !c.bit();
+    }
+
+    /// One tick off every running condition.
+    pub fn tick_conditions(&mut self) {
+        for &slot in &self.alive {
+            let s = slot as usize;
+            if self.status[s] == 0 {
+                continue;
+            }
+            let mut bits = 0;
+            for (i, t) in self.cond[s].iter_mut().enumerate() {
+                if *t > 0 {
+                    *t -= 1;
+                    if *t > 0 {
+                        bits |= 1 << i;
+                    }
+                }
+            }
+            self.status[s] = bits;
+        }
     }
 
     /// Frees a live slot; its generation is bumped. No-op for a free slot.
@@ -146,6 +200,32 @@ mod tests {
         for &slot in s.alive() {
             assert_eq!(s.alive()[s.alive_pos[slot as usize] as usize], slot);
         }
+    }
+
+    #[test]
+    fn conditions_run_out() {
+        let mut s = HordeStorage::new(4);
+        let a = s.spawn(0, 0.0, 0.0, 10, 0).unwrap();
+        s.afflict(a, Condition::Frozen, 2);
+        s.afflict(a, Condition::Frozen, 1);
+        s.afflict(a, Condition::Slowed, 3);
+        assert!(s.status_of(a).has(Condition::Frozen) && s.status_of(a).has(Condition::Slowed));
+        s.tick_conditions();
+        assert!(s.status_of(a).has(Condition::Frozen), "the longer freeze is kept");
+        s.tick_conditions();
+        assert_eq!(s.status_of(a), Status(Condition::Slowed.bit()));
+        s.cure(a, Condition::Slowed);
+        assert_eq!(s.status_of(a), Status(0));
+        s.afflict(a, Condition::Stunned, 5);
+        s.legendary[a as usize] = 2;
+        let mut one = HordeStorage::new(1);
+        let x = one.spawn(0, 0.0, 0.0, 10, 0).unwrap();
+        one.afflict(x, Condition::Stunned, 5);
+        one.legendary[x as usize] = 2;
+        one.despawn(x);
+        let y = one.spawn(0, 0.0, 0.0, 10, 0).unwrap();
+        assert_eq!(x, y);
+        assert_eq!((one.status_of(y), one.legendary[y as usize]), (Status(0), 0), "a reused slot starts clean");
     }
 
     #[test]

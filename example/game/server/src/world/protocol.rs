@@ -1011,7 +1011,7 @@ mod tests {
         let mut m = BytesMut::new();
         m.put_var(0);
         m.put_var(1);
-        m.put_var(513 << 2 | 2);
+        m.put_var(513 << 3 | 2);
         m.put_slice(&[4, 2]);
         m.put_u16_le(encode_pos(100.25));
         m.put_u16_le(encode_pos(7.5));
@@ -1023,7 +1023,7 @@ mod tests {
         assert_eq!(d.baseline, 0);
         assert_eq!(
             d.entries,
-            vec![DeltaEntry::Spawn { slot: 513, generation: 4, kind: 2, x: 6416, y: 480, vx: 10, vy: -10 }]
+            vec![DeltaEntry::Spawn { slot: 513, generation: 4, kind: 2, x: 6416, y: 480, vx: 10, vy: -10, status: None }]
         );
         assert!(Snapshot::decode(&frame[..frame.len() - 1]).is_none());
         assert!(Snapshot::decode(&[frame.as_ref(), &[0]].concat()).is_none(), "trailing bytes");
@@ -1316,14 +1316,16 @@ pub(crate) mod golden {
         let mut m = BytesMut::new();
         m.put_var(1);
         m.put_var(4);
-        m.put_var(3 << 2 | 2);
+        m.put_var(3 << 3 | 2);
         m.put_slice(&[5, 1]);
         m.put_u16_le(640);
         m.put_u16_le(1280);
         m.put_slice(&[16, 0xF0]);
-        m.put_var(0 << 2);
+        // NUDGE with a status byte (frozen).
+        m.put_var(1 << 2);
+        m.put_u8(2);
         m.put_slice(&[0xFE, 3, 0, 0x80]);
-        m.put_var(35 << 2 | 1);
+        m.put_var(35 << 3 | 1);
         m.put_u16_le(65535);
         m.put_u16_le(0);
         m.put_slice(&[127, 1]);
@@ -1360,7 +1362,7 @@ pub(crate) mod golden {
         ("input", "0209000000ff7f0000f8102100"),
         ("skill_learn", "4e04626f6c74"),
         ("skill_slot", "500405736c696465"),
-        ("stage_snapshot", "030400640000000c000000010009000000600080000201040e05018002000510f000fe0300808d01ffff00007f0103"),
+        ("stage_snapshot", "030400640000000c000000010009000000600080000201041a05018002000510f00402fe0300809902ffff00007f0103"),
     ];
 
     /// Change these only together with `client_test.dart`.
@@ -1378,9 +1380,9 @@ pub(crate) mod golden {
         assert_eq!(
             s.monsters.unwrap().entries,
             vec![
-                Spawn { slot: 3, generation: 5, kind: 1, x: 640, y: 1280, vx: 16, vy: -16 },
-                Nudge { slot: 4, dx: -2, dy: 3, vx: 0, vy: -128 },
-                Move { slot: 40, x: 65535, y: 0, vx: 127, vy: 1 },
+                Spawn { slot: 3, generation: 5, kind: 1, x: 640, y: 1280, vx: 16, vy: -16, status: None },
+                Nudge { slot: 4, dx: -2, dy: 3, vx: 0, vy: -128, status: Some(2) },
+                Move { slot: 40, x: 65535, y: 0, vx: 127, vy: 1, status: None },
                 Remove { slot: 41 },
             ]
         );

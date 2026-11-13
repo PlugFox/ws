@@ -253,3 +253,25 @@ run = "npm --prefix example/assets run dev:engine"
 description = "Run simulated player bots in the hub (default: 10 bots)"
 dir = "example/game/client"
 run = "dart run tool/bot.dart --server http://127.0.0.1:8080 --count 10"
+
+[tasks."game:e2e:install"]
+description = "Install the browser test runner (Playwright) and its headless Chromium"
+dir = "example/game/e2e"
+run = ["npm ci --no-audit --no-fund", "npx playwright install chromium"]
+
+[tasks."game:e2e"]
+description = "Browser tests of the game (Playwright): builds the client, starts its own server on port 18091 with a fresh database"
+depends = ["game:client:build"]
+dir = "example/game/e2e"
+run = "npx playwright test"
+
+[tasks."game:e2e:headed"]
+description = "Browser tests in a visible browser window, one step at a time with the Playwright inspector"
+depends = ["game:client:build"]
+dir = "example/game/e2e"
+run = "npx playwright test --headed --debug"
+
+[tasks."game:e2e:report"]
+description = "Open the last browser test report (traces, screenshots and videos of failures)"
+dir = "example/game/e2e"
+run = "npx playwright show-report"

@@ -162,7 +162,7 @@ void main() {
 
     test('stage snapshot golden carries every monster op', () {
       final s = Snapshot.decode(
-        hex('030400640000000c000000010009000000600080000201040e05018002000510f000fe0300808d01ffff00007f0103'),
+        hex('030400640000000c000000010009000000600080000201041a05018002000510f00402fe0300809902ffff00007f0103'),
       )!;
       expect((s.mapEpoch, s.tick, s.ackSeq, s.length, s.ids[0], s.xs[0], s.ys[0]), (4, 100, 12, 1, 9, 1.5, 2.0));
       expect(s.mobBaseline, 1);
@@ -174,7 +174,8 @@ void main() {
       );
       expect((s.mobXs[1], s.mobYs[1], s.mobVxs[1], s.mobVys[1]), (-2, 3, 0, -128));
       expect((s.mobXs[2], s.mobYs[2], s.mobVxs[2], s.mobVys[2]), (65535, 0, 127, 1));
-      final b = hex('030400640000000c000000010009000000600080000201040e05018002000510f000fe0300808d01ffff00007f0103');
+      expect(s.mobStatuses, [-1, MobStatus.frozen, -1, -1], reason: 'the NUDGE carries a status byte');
+      final b = hex('030400640000000c000000010009000000600080000201041a05018002000510f00402fe0300809902ffff00007f0103');
       expect(Snapshot.decode(Uint8List.sublistView(b, 0, b.length - 1)), isNull);
       expect(Snapshot.decode(Uint8List.fromList([...b, 0])), isNull, reason: 'trailing bytes');
     });

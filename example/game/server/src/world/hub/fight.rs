@@ -3,11 +3,11 @@
 //! [`crate::world::combat`]; this file only applies them to the instance's
 //! players and horde once per tick.
 
-use super::cast::Casting;
+use super::cast::{wound, Casting};
 use super::{facing_of, HubEvent, HubInstance, Outgoing};
 use crate::world::combat::skills::SLOTS;
 use crate::world::combat::rules::{attack_roll, AttackOutcome};
-use crate::world::combat::{self, exp_to_next, kill_value, share_kill, Class, Damage, DamageType, Reach, Weapon};
+use crate::world::combat::{self, cantrip_k, exp_to_next, kill_value, share_kill, Class, Damage, DamageType, Reach, Weapon};
 use crate::world::horde::storage::FLAG_FULL;
 use crate::world::hub::PortalLink;
 use crate::world::protocol::{hit, HitEvent, ServerMsg, Swing, MONSTER_ENTITY_BASE};
@@ -261,28 +261,28 @@ impl HubInstance {
             let bonus = weapon.to_hit(f.level);
             let attacks = f.class.attacks_per_action(f.level);
             let entity = p.profile.character_id;
+            let k = cantrip_k(f.level);
             for s in targets {
                 let block = horde.block(s);
-                let element = horde.catalog().get(horde.store().kind[s as usize]).element;
                 for _ in 0..attacks {
                     let id = MONSTER_ENTITY_BASE + s as u32;
-                    match attack_roll(rng, bonus, block.ac, 0, 20) {
+                    let advantage = horde.store().status_of(s).advantage_against();
+                    match attack_roll(rng, bonus, block.ac, advantage, 20) {
                         AttackOutcome::Miss => hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS }),
                         outcome => {
                             let crit = outcome == AttackOutcome::Critical;
-                            let amount = damage.resolve(rng, crit, false, element, 0);
-                            let hp = &mut horde.store_mut().hp[s as usize];
-                            *hp -= amount;
+                            let amount = wound(horde, rng, s, damage, None, crit, false, k);
+                            let dead = horde.store().hp[s as usize] <= 0;
                             let mut flags = damage_type_bits(damage.kind);
                             if crit {
                                 flags |= hit::CRITICAL;
                             }
-                            if *hp <= 0 {
+                            if dead {
                                 flags |= hit::KILL;
                                 kills.push(s);
                             }
                             hits.push(HitEvent { target: id, amount: amount as u32, flags });
-                            if *hp <= 0 {
+                            if dead {
                                 break;
                             }
                         }
@@ -335,7 +335,8 @@ impl HubInstance {
                 store.cooldown[i] -= 1;
                 continue;
             }
-            if store.flags[i] & FLAG_FULL == 0 || ups.is_empty() {
+            let status = store.status_of(s);
+            if store.flags[i] & FLAG_FULL == 0 || ups.is_empty() || status.held() {
                 continue;
             }
             let (mx, my) = (store.x[i], store.y[i]);
@@ -356,7 +357,7 @@ impl HubInstance {
                 continue;
             }
             let id = p.profile.character_id;
-            match attack_roll(rng, block.attack, f.ac, 0, 20) {
+            match attack_roll(rng, block.attack, f.ac, status.advantage(), 20) {
                 AttackOutcome::Miss => hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS }),
                 outcome => {
                     let crit = outcome == AttackOutcome::Critical;

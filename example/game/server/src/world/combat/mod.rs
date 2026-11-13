@@ -6,6 +6,7 @@
 //! stage replays the same rolls in tests.
 
 pub mod class;
+pub mod conditions;
 pub mod dice;
 pub mod exp;
 pub mod monster;
@@ -14,6 +15,7 @@ pub mod skills;
 pub mod weapon;
 
 pub use class::{Class, Save};
+pub use conditions::{Condition, Status, CONDITIONS};
 pub use dice::{Dice, Rng};
 pub use exp::{exp_to_next, kill_value, level_diff_percent, share_kill};
 pub use monster::{Archetype, MonsterBlock, Size};

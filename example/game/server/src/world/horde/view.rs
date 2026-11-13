@@ -31,12 +31,19 @@
 //! var  baseline   tick − tick of the frame this delta applies to; 0 = keyframe
 //! var  count
 //! count × entry, in increasing slot order:
-//!   var  head     (slot − previous slot − 1) << 2 | op   (previous = −1 at start)
+//!   var  head     (slot − previous slot − 1) << 3 | s << 2 | op
+//!                 (previous = −1 at start)
+//!   u8   status   only when s = 1: the monster's conditions changed
+//!                 (`combat::Condition` bits); never on REMOVE
 //!   op 0 NUDGE    i8 dx, i8 dy (1/64 cell, from the known p), i8 vx, i8 vy
 //!   op 1 MOVE     u16 x, u16 y, i8 vx, i8 vy
 //!   op 2 SPAWN    u8 generation, u8 kind, u16 x, u16 y, i8 vx, i8 vy
 //!   op 3 REMOVE   —
 //! ```
+//!
+//! A SPAWN carries the status only when it is not empty; a status change
+//! of a known monster goes out as a NUDGE or MOVE, even when it stands
+//! still (a frozen monster stops, so nothing else would send it).
 //!
 //! Positions are cells in 1/64 fixed point, velocities cells per tick in
 //! 1/256 (±0.5 cells/tick, above the fastest monster). Every record in a
@@ -60,7 +67,7 @@ pub const BACK: u32 = 8;
 /// Known monsters stay in the view until this far beyond the send radius,
 /// so one walking along the edge does not flicker in and out.
 const KEEP_MARGIN: f32 = 2.0;
-/// Conservative bytes per entry head (a slot gap above 31 takes two).
+/// Conservative bytes per entry head (a slot gap above 15 takes two).
 const HEAD_COST: usize = 2;
 /// Above any drift ratio a correction reaches in practice, and small
 /// enough that f32 still resolves the nearness fraction added to it.
@@ -122,6 +129,8 @@ struct Known {
     present: bool,
     generation: u8,
     rec: Record,
+    /// Conditions the client knows.
+    status: u8,
     /// Last tick the monster was within keep range.
     seen: u32,
 }
@@ -132,6 +141,8 @@ struct Candidate {
     spawn: bool,
     /// The known position fits a NUDGE.
     nudge: bool,
+    /// Carries the status byte.
+    status: bool,
     priority: f32,
 }
 
@@ -144,6 +155,7 @@ struct Entry {
     rec: Record,
     /// Previous position, for NUDGE.
     from: (u16, u16),
+    status: Option<u8>,
 }
 
 /// Per-player mirror of the client's monster records.
@@ -241,15 +253,26 @@ impl Horde {
                 let err2 = ex * ex + ey * ey;
                 let moving = k.rec.vx != 0 || k.rec.vy != 0;
                 let stale = moving && tick.wrapping_sub(k.rec.stamp) + 2 >= HORIZON;
-                if err2 >= th * th || stale {
+                let changed = s.status[i] != k.status;
+                if err2 >= th * th || stale || changed {
                     let small = |a: f32, b: u16| (quant_pos(a) as i32 - b as i32).abs() <= 127;
                     let nudge = small(s.x[i], k.rec.x) && small(s.y[i], k.rec.y);
-                    candidates.push(Candidate { slot, spawn: false, nudge, priority: (err2 / (th * th)).sqrt().max(1.0) });
+                    // A frozen monster that is not shown frozen reads as a
+                    // bug: status changes rank right after newcomers.
+                    let drift = (err2 / (th * th)).sqrt().max(1.0);
+                    let priority = if changed { drift + SPAWN_PRIORITY * 0.5 } else { drift };
+                    candidates.push(Candidate { slot, spawn: false, nudge, status: changed, priority });
                 }
             } else if in_radius(dx, dy, reach) {
                 // Newcomers before any correction (a missing monster is worse
                 // than a drifting one), nearest first.
-                candidates.push(Candidate { slot, spawn: true, nudge: false, priority: SPAWN_PRIORITY + 1.0 - d / reach });
+                candidates.push(Candidate {
+                    slot,
+                    spawn: true,
+                    nudge: false,
+                    status: s.status[i] != 0,
+                    priority: SPAWN_PRIORITY + 1.0 - d / reach,
+                });
             }
         }
 
@@ -260,12 +283,20 @@ impl Horde {
             let k = &known[slot as usize];
             let alive_same = s.is_alive(slot) && s.generation[slot as usize] == k.generation;
             if k.seen != tick || !alive_same {
-                entries.push(Entry { slot, op: OP_REMOVE, generation: 0, kind: 0, rec: Record::default(), from: (0, 0) });
+                entries.push(Entry {
+                    slot,
+                    op: OP_REMOVE,
+                    generation: 0,
+                    kind: 0,
+                    rec: Record::default(),
+                    from: (0, 0),
+                    status: None,
+                });
                 used += HEAD_COST;
             }
         }
 
-        let cost = |c: &Candidate| HEAD_COST + if c.spawn { 8 } else if c.nudge { 4 } else { 6 };
+        let cost = |c: &Candidate| HEAD_COST + usize::from(c.status) + if c.spawn { 8 } else if c.nudge { 4 } else { 6 };
         let total: usize = candidates.iter().map(cost).sum();
         if used + total > config.budget {
             candidates.sort_unstable_by(|a, b| b.priority.total_cmp(&a.priority));
@@ -288,13 +319,22 @@ impl Horde {
                 stamp: tick,
             };
             let k = &known[i];
+            let status = c.status.then_some(s.status[i]);
             if c.spawn {
                 spawns += 1;
-                entries.push(Entry { slot: c.slot, op: OP_SPAWN, generation: s.generation[i], kind: s.kind[i], rec, from: (0, 0) });
+                entries.push(Entry {
+                    slot: c.slot,
+                    op: OP_SPAWN,
+                    generation: s.generation[i],
+                    kind: s.kind[i],
+                    rec,
+                    from: (0, 0),
+                    status,
+                });
             } else {
                 updates += 1;
                 let op = if c.nudge { OP_NUDGE } else { OP_MOVE };
-                entries.push(Entry { slot: c.slot, op, generation: 0, kind: 0, rec, from: (k.rec.x, k.rec.y) });
+                entries.push(Entry { slot: c.slot, op, generation: 0, kind: 0, rec, from: (k.rec.x, k.rec.y), status });
             }
         }
 
@@ -324,9 +364,14 @@ impl Horde {
                     if !k.present {
                         list.push(e.slot);
                     }
-                    *k = Known { present: true, generation: e.generation, rec: e.rec, seen: tick };
+                    *k = Known { present: true, generation: e.generation, rec: e.rec, status: e.status.unwrap_or(0), seen: tick };
                 }
-                _ => k.rec = e.rec,
+                _ => {
+                    k.rec = e.rec;
+                    if let Some(st) = e.status {
+                        k.status = st;
+                    }
+                }
             }
         }
         if removes > 0 {
@@ -343,7 +388,10 @@ impl Horde {
         for e in entries.iter() {
             let gap = (e.slot as i32 - prev - 1) as u64;
             prev = e.slot as i32;
-            out.put_var(gap << 2 | u64::from(e.op));
+            out.put_var(gap << 3 | u64::from(e.status.is_some()) << 2 | u64::from(e.op));
+            if let Some(st) = e.status {
+                out.put_u8(st);
+            }
             let r = &e.rec;
             match e.op {
                 OP_NUDGE => {
@@ -380,9 +428,9 @@ impl Horde {
 /// One decoded entry of a monster section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeltaEntry {
-    Nudge { slot: u16, dx: i8, dy: i8, vx: i8, vy: i8 },
-    Move { slot: u16, x: u16, y: u16, vx: i8, vy: i8 },
-    Spawn { slot: u16, generation: u8, kind: u8, x: u16, y: u16, vx: i8, vy: i8 },
+    Nudge { slot: u16, dx: i8, dy: i8, vx: i8, vy: i8, status: Option<u8> },
+    Move { slot: u16, x: u16, y: u16, vx: i8, vy: i8, status: Option<u8> },
+    Spawn { slot: u16, generation: u8, kind: u8, x: u16, y: u16, vx: i8, vy: i8, status: Option<u8> },
     Remove { slot: u16 },
 }
 
@@ -406,12 +454,21 @@ impl MonsterDelta {
         let mut prev: i64 = -1;
         for _ in 0..count {
             let head = r.var()?;
-            let slot = prev + 1 + (head >> 2) as i64;
+            let slot = prev + 1 + (head >> 3) as i64;
             let slot = u16::try_from(slot).ok()?;
             prev = slot as i64;
-            entries.push(match (head & 3) as u8 {
-                OP_NUDGE => DeltaEntry::Nudge { slot, dx: r.i8()?, dy: r.i8()?, vx: r.i8()?, vy: r.i8()? },
-                OP_MOVE => DeltaEntry::Move { slot, x: r.u16()?, y: r.u16()?, vx: r.i8()?, vy: r.i8()? },
+            let op = (head & 3) as u8;
+            let status = if head & 4 != 0 {
+                if op == OP_REMOVE {
+                    return None;
+                }
+                Some(r.u8()?)
+            } else {
+                None
+            };
+            entries.push(match op {
+                OP_NUDGE => DeltaEntry::Nudge { slot, dx: r.i8()?, dy: r.i8()?, vx: r.i8()?, vy: r.i8()?, status },
+                OP_MOVE => DeltaEntry::Move { slot, x: r.u16()?, y: r.u16()?, vx: r.i8()?, vy: r.i8()?, status },
                 OP_SPAWN => DeltaEntry::Spawn {
                     slot,
                     generation: r.u8()?,
@@ -420,6 +477,7 @@ impl MonsterDelta {
                     y: r.u16()?,
                     vx: r.i8()?,
                     vy: r.i8()?,
+                    status,
                 },
                 _ => DeltaEntry::Remove { slot },
             });
@@ -438,6 +496,8 @@ pub struct Mirrored {
     pub generation: u8,
     pub kind: u8,
     pub rec: Record,
+    /// Conditions (`combat::Condition` bits).
+    pub status: u8,
 }
 
 /// Client-side state rebuilt from monster sections (tests, bots, benches;
@@ -461,18 +521,21 @@ impl MonsterMirror {
         }
         for e in &delta.entries {
             match *e {
-                DeltaEntry::Spawn { slot, generation, kind, x, y, vx, vy } => {
-                    self.monsters.insert(slot, Mirrored { generation, kind, rec: Record { x, y, vx, vy, stamp: tick } });
+                DeltaEntry::Spawn { slot, generation, kind, x, y, vx, vy, status } => {
+                    let rec = Record { x, y, vx, vy, stamp: tick };
+                    self.monsters.insert(slot, Mirrored { generation, kind, rec, status: status.unwrap_or(0) });
                 }
-                DeltaEntry::Move { slot, x, y, vx, vy } => {
+                DeltaEntry::Move { slot, x, y, vx, vy, status } => {
                     let m = self.monsters.get_mut(&slot).ok_or(OutOfSync)?;
                     m.rec = Record { x, y, vx, vy, stamp: tick };
+                    m.status = status.unwrap_or(m.status);
                 }
-                DeltaEntry::Nudge { slot, dx, dy, vx, vy } => {
+                DeltaEntry::Nudge { slot, dx, dy, vx, vy, status } => {
                     let m = self.monsters.get_mut(&slot).ok_or(OutOfSync)?;
                     let x = (m.rec.x as i32 + dx as i32).clamp(0, u16::MAX as i32) as u16;
                     let y = (m.rec.y as i32 + dy as i32).clamp(0, u16::MAX as i32) as u16;
                     m.rec = Record { x, y, vx, vy, stamp: tick };
+                    m.status = status.unwrap_or(m.status);
                 }
                 DeltaEntry::Remove { slot } => {
                     self.monsters.remove(&slot);

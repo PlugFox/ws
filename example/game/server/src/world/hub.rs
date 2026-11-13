@@ -1328,7 +1328,8 @@ mod tests {
             vec![portal("to_town", [1, 1, 1], "town", [3, 3])],
         );
         let world = Arc::new(HubWorld::new(vec![field], "field").unwrap());
-        let catalog = Arc::new(MonsterCatalog::new(vec![test_def("blob", 2.0, 1, 0.0, false)]).unwrap());
+        let catalog =
+            Arc::new(MonsterCatalog::new(vec![test_def("blob", 2.0, 1, 0.0, false), test_def("king", 2.0, 50, 0.0, true)]).unwrap());
         let cfg = HordeConfig { light_radius: 12.0, director_enabled: false, seed: Some(1), ..HordeConfig::default() };
         let horde = Horde::new(Arc::clone(&world), catalog, cfg);
         let mut stage =
@@ -1527,5 +1528,95 @@ mod tests {
         assert!(stage.position_of(1).is_none(), "the defeated party leaves the stage");
         assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Notification { .. })));
         assert!(out.iter().any(|(u, e)| *u == 1 && matches!(e, HubEvent::Transfer { target_map, .. } if target_map == "town")));
+    }
+
+    /// Kind index of the boss in [`skill_stage`].
+    fn king(stage: &mut HubInstance) -> u8 {
+        stage.horde_mut().unwrap().catalog().defs().iter().position(|d| d.boss).unwrap() as u8
+    }
+
+    #[test]
+    fn a_failed_save_freezes_a_monster_until_a_blow_shatters_it() {
+        use crate::world::combat::Condition;
+        let mut stage = skill_stage("mage", 10, &[("chill", 10)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 8.0, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        let status = |stage: &mut HubInstance| stage.horde_mut().unwrap().store().status_of(slot);
+        let mut out = Vec::new();
+        let mut casts = 0;
+        while !status(&mut stage).has(Condition::Frozen) {
+            assert!(casts < 50, "some save fails (DC 13 against +1)");
+            stage.act(1, [0, 0], 1);
+            stage.tick(&mut out);
+            casts += 1;
+        }
+        let at = |stage: &mut HubInstance| {
+            let s = stage.horde_mut().unwrap().store();
+            (s.x[slot as usize], s.y[slot as usize])
+        };
+        let before = at(&mut stage);
+        for _ in 0..40 {
+            stage.tick(&mut out);
+        }
+        assert_eq!(at(&mut stage), before, "frozen 1 + 0.5·10 s: it does not move");
+        assert!(status(&mut stage).has(Condition::Frozen));
+        // A physical blow shatters the ice.
+        let horde = stage.horde_mut().unwrap();
+        let mut rng = combat::Rng::new(3);
+        let blow = combat::Damage::new(combat::Dice::new(1, 4, 0), DamageType::Physical);
+        let dealt = super::cast::wound(horde, &mut rng, slot, blow, None, false, false, 2);
+        assert!(dealt >= 3, "1d4 + 2d6 of shattering ice ({dealt})");
+        assert!(!horde.store().status_of(slot).has(Condition::Frozen), "the ice is gone");
+    }
+
+    #[test]
+    fn held_monsters_do_not_strike() {
+        use crate::world::combat::Condition;
+        use crate::world::protocol::MONSTER_ENTITY_BASE;
+        let mut stage = skill_stage("mage", 10, &[]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 0.8, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        stage.horde_mut().unwrap().store_mut().afflict(slot, Condition::Stunned, 1000);
+        let mut out = Vec::new();
+        for _ in 0..80 {
+            stage.tick(&mut out);
+        }
+        let monster_swings = controls_for(&out, 1)
+            .iter()
+            .flat_map(|m| match m {
+                ServerMsg::Combat { swings, .. } => swings.clone(),
+                _ => Vec::new(),
+            })
+            .filter(|s| s.entity_id >= MONSTER_ENTITY_BASE)
+            .count();
+        assert_eq!(monster_swings, 0);
+        assert_eq!(fighter(&stage, 1).hp, fighter(&stage, 1).max_hp);
+    }
+
+    #[test]
+    fn legendary_resistance_absorbs_three_failed_saves() {
+        use crate::world::combat::Condition;
+        let mut stage = skill_stage("mage", 10, &[("curse", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let kind = king(&mut stage);
+        let boss = stage.horde_mut().unwrap().spawn(kind, px + 8.0, py).unwrap();
+        let store = stage.horde_mut().unwrap().store_mut();
+        assert_eq!(store.legendary[boss as usize], 3);
+        // Stunned: every save fails, so only legendary resistance helps.
+        store.afflict(boss, Condition::Stunned, 1000);
+        let mut out = Vec::new();
+        let petrified =
+            |stage: &mut HubInstance| stage.horde_mut().unwrap().store().status_of(boss).has(Condition::Petrified);
+        for left in [2, 1, 0] {
+            stage.act(1, [0, 0], 1);
+            stage.tick(&mut out);
+            assert!(!petrified(&mut stage));
+            assert_eq!(stage.horde_mut().unwrap().store().legendary[boss as usize], left);
+        }
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        assert!(petrified(&mut stage), "the fourth failure sticks");
     }
 }

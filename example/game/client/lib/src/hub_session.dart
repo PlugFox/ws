@@ -85,6 +85,24 @@ final class _Mob {
   double? dieAt;
   int sentAction = -1;
 
+  /// [MobStatus] bits.
+  int status = 0;
+
+  /// Engine row flags and animation speed of the conditions.
+  int get statusFlags =>
+      (status & MobStatus.frozen != 0 ? Row.flagFrozen : 0) |
+      (status & MobStatus.petrified != 0 ? Row.flagPetrified : 0) |
+      (status & MobStatus.stunned != 0 ? Row.flagStunned : 0) |
+      (status & MobStatus.slowed != 0 ? Row.flagSlowed : 0) |
+      (status & MobStatus.blinded != 0 ? Row.flagBlinded : 0);
+
+  /// Held monsters stop mid-frame; slowed ones animate at half speed.
+  double get animSpeed => status & MobStatus.held != 0
+      ? 0.001
+      : status & MobStatus.slowed != 0
+      ? 0.5
+      : 1;
+
   void set(int x, int y, int vx, int vy, int stamp) {
     this
       ..x = x
@@ -403,19 +421,22 @@ final class HubSession {
     for (var i = 0; i < s.monsterCount; i++) {
       final slot = s.mobSlots[i];
       var m = _mobs[slot];
+      final status = s.mobStatuses[i];
       switch (s.mobOps[i]) {
         case MobOp.spawn:
           // A reused slot (or a keyframe) is a new monster: snap, never
           // slide from the old one.
           if (m != null) view.removeEntity(m.id);
-          m = _mobs[slot] = _Mob(slot, s.mobGenerations[i], s.mobKinds[i]);
+          m = _mobs[slot] = _Mob(slot, s.mobGenerations[i], s.mobKinds[i])..status = status < 0 ? 0 : status;
           m.set(s.mobXs[i], s.mobYs[i], s.mobVxs[i], s.mobVys[i], s.tick);
         case MobOp.move when m != null && m.removeAt == null:
           if (m.dieAt == null) m.set(s.mobXs[i], s.mobYs[i], s.mobVxs[i], s.mobVys[i], s.tick);
+          if (status >= 0) m.status = status;
         case MobOp.nudge when m != null && m.removeAt == null && m.dieAt != null:
           break;
         case MobOp.nudge when m != null && m.removeAt == null:
           m.set(m.x + s.mobXs[i], m.y + s.mobYs[i], s.mobVxs[i], s.mobVys[i], s.tick);
+          if (status >= 0) m.status = status;
         case MobOp.remove when m != null:
           m.removeAt ??= s.tick;
         default:
@@ -1177,8 +1198,11 @@ final class HubSession {
         removed.add(m.slot);
         continue;
       }
+      final held = m.status & MobStatus.held != 0;
       final action = dieAt != null
           ? Act.die
+          : held
+          ? Act.hit
           : now < m.attackUntil
           ? Act.attack
           : now < m.hitUntil
@@ -1224,7 +1248,8 @@ final class HubSession {
         facing: m.facing,
         sprite: sprite,
         action: action,
-        flags: Row.flagFade,
+        speed: m.animSpeed,
+        flags: Row.flagFade | m.statusFlags,
       );
       m.dirty = false;
     }

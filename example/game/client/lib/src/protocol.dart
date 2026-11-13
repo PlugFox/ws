@@ -728,6 +728,19 @@ abstract final class MobOp {
   static const remove = 3;
 }
 
+/// Monster conditions (server `combat::Condition` bits).
+abstract final class MobStatus {
+  static const slowed = 1;
+  static const frozen = 2;
+  static const stunned = 4;
+  static const blinded = 8;
+  static const rooted = 16;
+  static const petrified = 32;
+
+  /// Cannot move or act: the animation holds.
+  static const held = frozen | stunned | petrified;
+}
+
 /// Dead reckoning (server `horde::view`): a record `(p, v, stamp)` is drawn
 /// at `p + v · clamp(t − stamp, −back, horizon)`. Positions are 1/64 cell,
 /// velocities 1/256 cell per tick.
@@ -743,7 +756,8 @@ abstract final class Reckoning {
 /// u8 facing}`. Stage snapshots (`kind=0x03`) append the monster section:
 /// `var baseline` (0 = keyframe, else `tick − baseline` is the frame it
 /// applies to), `var count`, then entries in slot order with
-/// `var head = gap << 2 | op` (see [MobOp]).
+/// `var head = gap << 3 | s << 2 | op` (see [MobOp]); `s = 1` puts a `u8`
+/// status ([MobStatus] bits) right after the head.
 final class Snapshot {
   Snapshot._(this.mapEpoch, this.tick, this.ackSeq, this.ids, this.xs, this.ys, this.facings);
 
@@ -775,6 +789,9 @@ final class Snapshot {
   Int32List mobYs = Int32List(0);
   Int8List mobVxs = Int8List(0);
   Int8List mobVys = Int8List(0);
+
+  /// [MobStatus] bits when the entry carries them, else -1 (unchanged).
+  Int16List mobStatuses = Int16List(0);
 
   int get length => ids.length;
   int get monsterCount => mobOps.length;
@@ -816,15 +833,22 @@ final class Snapshot {
     mobYs = Int32List(n);
     mobVxs = Int8List(n);
     mobVys = Int8List(n);
+    mobStatuses = Int16List(n);
     var prev = -1;
     for (var i = 0; i < n; i++) {
       final head = r.varint();
-      final slot = prev + 1 + (head >> 2);
+      final slot = prev + 1 + (head >> 3);
       if (slot > 0xFFFF) throw const WireFormatError('slot');
       prev = slot;
       final op = head & 3;
       mobOps[i] = op;
       mobSlots[i] = slot;
+      if (head & 4 != 0) {
+        if (op == MobOp.remove) throw const WireFormatError('status on remove');
+        mobStatuses[i] = r.u8();
+      } else {
+        mobStatuses[i] = -1;
+      }
       switch (op) {
         case MobOp.nudge:
           mobXs[i] = r.i8();

@@ -283,6 +283,7 @@ impl Horde {
         let slot = self.store.spawn(kind, x, y, block.hp, flags)?;
         let s = slot as usize;
         self.store.level[s] = level as u8;
+        self.store.legendary[s] = block.legendary_resistance;
         // Stagger first swings so a surround does not land in one tick.
         self.store.cooldown[s] = slot % 8;
         self.stats.spawned += 1;
@@ -352,6 +353,7 @@ impl Horde {
             return;
         }
         let dt = 1.0 / tick_hz as f32;
+        self.store.tick_conditions();
         self.update_field();
         self.plan_steps(tick, dt);
         self.compute_push();
@@ -424,6 +426,10 @@ impl Horde {
             self.stats.stepped += 1;
             self.stats.full += usize::from(full);
 
+            let status = s.status_of(slot);
+            if !status.can_move() {
+                continue; // frozen, stunned, petrified or rooted
+            }
             let def = self.catalog.get(s.kind[k]);
             let (ndx, ndy, nd2) = Self::nearest(&self.players, x, y);
             let contact = def.radius + c.player_radius;
@@ -442,7 +448,7 @@ impl Horde {
             };
             let Some((ux, uy)) = dir else { continue };
             // Never step past the contact distance.
-            let dist = (def.speed * dt * period as f32).min(nd - contact);
+            let dist = (def.speed * status.speed() * dt * period as f32).min(nd - contact);
             self.step[k] = (ux, uy, dist.max(0.0));
         }
     }
@@ -533,6 +539,12 @@ impl Horde {
         let s = &mut self.store;
         for i in 0..s.len() {
             let k = s.alive()[i] as usize;
+            if !s.status_of(k as u16).can_move() {
+                // Held in place: not even the crowd pushes it.
+                s.vel_x[k] = 0.0;
+                s.vel_y[k] = 0.0;
+                continue;
+            }
             let (ux, uy, mut dist) = self.step[k];
             let (ox, oy) = self.push[k];
             let against = -(ox * ux + oy * uy);
