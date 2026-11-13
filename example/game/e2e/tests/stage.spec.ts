@@ -40,8 +40,8 @@ test('a mage lays a Fire Wall and a Quagmire on a mission', async ({ page }, inf
       )
       .toBeGreaterThan(0);
   };
-  await cast('KeyE', 'Quagmire');
-  await cast('KeyQ', 'Fire Wall');
+  await cast('Digit2', 'Quagmire');
+  await cast('Digit1', 'Fire Wall');
   await page.waitForTimeout(1200);
   await info.attach('ground', { body: await page.screenshot(), contentType: 'image/png' });
   await page.screenshot({ path: info.outputPath('ground.png') });
@@ -81,9 +81,9 @@ test('a swordsman provokes the wave and breaks it with fire', async ({ page }, i
       .toBeGreaterThan(0);
   };
   // A self buff needs no target; the taunt and the nova wait for monsters.
-  await cast('KeyR', 'Endure');
-  await cast('KeyQ', 'Provoke');
-  await cast('KeyE', 'Magnum Break');
+  await cast('Digit3', 'Endure');
+  await cast('Digit1', 'Provoke');
+  await cast('Digit2', 'Magnum Break');
   await page.waitForTimeout(600);
   await info.attach('melee', { body: await page.screenshot(), contentType: 'image/png' });
   await page.screenshot({ path: info.outputPath('melee.png') });

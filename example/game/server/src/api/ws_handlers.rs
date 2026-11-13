@@ -353,6 +353,14 @@ impl Conn {
         }
     }
 
+    /// Sends a command whose loss does not matter (emotes, poses, flags).
+    fn cosmetic(&self, cmd: HubCommand) -> Vec<Out> {
+        if let Some(link) = &self.link {
+            let _ = link.commands.try_send(cmd);
+        }
+        Vec::new()
+    }
+
     fn in_hub(&self) -> bool {
         matches!(self.link, Some(Link { place: Place::Hub { .. }, .. }))
     }
@@ -487,11 +495,16 @@ impl Conn {
                 }
                 Vec::new()
             }
+            // Cosmetic and rate limited by the instance: dropped silently
+            // outside an instance or under backpressure.
+            ClientMsg::Emote { emote } => self.cosmetic(HubCommand::Emote { user_id, emote }),
+            ClientMsg::Pose { pose } => self.cosmetic(HubCommand::Pose { user_id, pose }),
+            ClientMsg::Flag { flag, x, y } => self.cosmetic(HubCommand::Flag { user_id, flag, x, y }),
             ClientMsg::NpcInteract { npc } => self.forward(HubCommand::Interact { user_id, npc }),
             ClientMsg::StyleSet { look } => self.forward(HubCommand::Restyle { user_id, look }),
             ClientMsg::MissionSelect { mission, public } => {
                 if !self.in_hub() {
-                    return vec![lobby_error("not_in_hub", "missions are picked at a board in the hub")];
+                    return vec![lobby_error("not_in_hub", "missions are picked from a Kafra employee in the hub")];
                 }
                 self.forward(HubCommand::SelectMission { user_id, mission, public })
             }

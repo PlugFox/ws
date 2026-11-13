@@ -32,6 +32,8 @@ fn synthetic_world() -> HubWorld {
             portals,
             bgm: None,
             npcs: Vec::new(),
+            light_radius: 0.0,
+            residents: Default::default(),
         };
         MapData::new(manifest, walk, Heightmap::flat(w, h)).unwrap()
     };
@@ -78,6 +80,8 @@ fn synthetic_stage() -> HubWorld {
         portals: vec![PortalDef { name: "to_town".into(), trigger: [1, 2, 1], target_map: "town".into(), target_pos: [3, 3] }],
         bgm: None,
         npcs: Vec::new(),
+        light_radius: 0.0,
+        residents: Default::default(),
     };
     HubWorld::new(vec![MapData::new(manifest, walk, Heightmap::flat(w, h)).unwrap()], "prt_fild08").unwrap()
 }

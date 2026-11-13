@@ -46,6 +46,13 @@
 //!                      (flags: 1 ready, 2 leader)
 //! 0x32 LOBBY_LEFT      code reason
 //! 0x33 LOBBY_ERROR     code, str message
+//! 0x37 EMOTE           var entity_id, u8 emote   (everyone on the entity's map,
+//!                      the sender too)
+//! 0x38 POSE            var entity_id, u8 pose (0 stand, 1 sit)   (everyone on
+//!                      the map; after MAP_ENTER, one POSE 1 per entity already
+//!                      sitting there)
+//! 0x39 FLAG            var entity_id, u8 flag (0..=9), pos x, pos y
+//!                      (a ping marker; everyone on the map, the sender too)
 //!
 //! map     = str id, str name, u8 kind (0 hub, 1 indoor, 2 field), var width,
 //!           var height, f32 cell_size, camera, opt str bgm
@@ -82,7 +89,16 @@
 //! 0x4E SKILL_LEARN     str skill (one level up)
 //! 0x4F SKILL_RESET     (in the hub only: every point back)
 //! 0x50 SKILL_SLOT      u8 slot, str skill (empty = clear)
+//! 0x51 EMOTE           u8 emote (0..=127; at most one per 0.5 s)
+//! 0x52 POSE            u8 pose (0 stand, 1 sit; sitting in hubs only, any
+//!                      movement input stands the player up)
+//! 0x53 FLAG            u8 flag (0..=9), pos x, pos y (within 40 cells of the
+//!                      player; at most one per second)
 //! ```
+//!
+//! Town residents (simulated townsfolk in hub channels) look like players:
+//! they come in `MAP_ENTER.players`, snapshots, `EMOTE` and `POSE`, with
+//! entity ids from `RESIDENT_ENTITY_BASE` (0x700000) up, and never vanish.
 //!
 //! `map_epoch` bumps on every map change of the recipient; the client drops
 //! snapshots whose epoch differs from the last `MAP_ENTER`.
@@ -135,6 +151,9 @@ pub mod kind {
     pub const STAGE_END: u8 = 0x34;
     pub const BOSS: u8 = 0x35;
     pub const BUFFS: u8 = 0x36;
+    pub const EMOTE: u8 = 0x37;
+    pub const POSE: u8 = 0x38;
+    pub const FLAG: u8 = 0x39;
 
     pub const PING: u8 = 0x40;
     pub const HUB_JOIN: u8 = 0x41;
@@ -153,6 +172,19 @@ pub mod kind {
     pub const SKILL_LEARN: u8 = 0x4E;
     pub const SKILL_RESET: u8 = 0x4F;
     pub const SKILL_SLOT: u8 = 0x50;
+    pub const EMOTE_REQ: u8 = 0x51;
+    pub const POSE_REQ: u8 = 0x52;
+    pub const FLAG_REQ: u8 = 0x53;
+}
+
+/// Highest valid emote id.
+pub const MAX_EMOTE: u8 = 127;
+/// Highest valid flag (ping marker) id.
+pub const MAX_FLAG: u8 = 9;
+/// [`ServerMsg::Pose`] values.
+pub mod pose {
+    pub const STAND: u8 = 0;
+    pub const SIT: u8 = 1;
 }
 
 /// Character appearance. The dyes index the baked palette tables of the
@@ -334,6 +366,9 @@ pub struct LobbyInfo {
 /// Entity id of a monster in combat events: above every character id and
 /// exact in a float32 (the client's engine id for the slot).
 pub const MONSTER_ENTITY_BASE: u32 = 0x80_0000;
+/// Entity id of the first town resident (simulated townsfolk): above every
+/// character id, below the monsters.
+pub const RESIDENT_ENTITY_BASE: u32 = 0x70_0000;
 
 /// An attack animation starts (player or monster) facing `facing`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -472,14 +507,16 @@ pub enum ServerMsg {
     PlayerAppeared { player: PlayerInfo },
     PlayerVanished { entity_id: u32 },
     /// The player stepped into a portal whose target is not part of the hub
-    /// (e.g. a combat field, which is entered through the mission board).
+    /// (e.g. a combat field, which is entered through a Kafra employee or a
+    /// mission board).
     PortalDenied {
         portal: String,
         target_map: String,
         reason: String,
     },
     HubChannels { channels: Vec<ChannelInfo> },
-    /// Answer to `npc_interact`. `missions` is filled for mission boards.
+    /// Answer to `npc_interact`. `missions` is filled for mission givers
+    /// (kinds `kafra` and `mission_board`).
     NpcDialog {
         npc: String,
         name: String,
@@ -540,6 +577,13 @@ pub enum ServerMsg {
     /// `lobby_full`, `not_leader`, `not_ready`, `stage_full`,
     /// `mission_unavailable`, `not_in_hub`.
     LobbyError { code: String, message: String },
+    /// An entity on the recipient's map (possibly the recipient) plays an
+    /// emote.
+    Emote { entity_id: u32, emote: u8 },
+    /// An entity on the recipient's map sat down (1) or stood up (0).
+    Pose { entity_id: u32, pose: u8 },
+    /// A player on the recipient's map pinged a spot.
+    Flag { entity_id: u32, flag: u8, x: f32, y: f32 },
 }
 
 impl ServerMsg {
@@ -741,6 +785,23 @@ impl ServerMsg {
                 b.put_code(code);
                 b.put_str(message);
             }
+            ServerMsg::Emote { entity_id, emote } => {
+                b.put_u8(kind::EMOTE);
+                b.put_var((*entity_id).into());
+                b.put_u8(*emote);
+            }
+            ServerMsg::Pose { entity_id, pose } => {
+                b.put_u8(kind::POSE);
+                b.put_var((*entity_id).into());
+                b.put_u8(*pose);
+            }
+            ServerMsg::Flag { entity_id, flag, x, y } => {
+                b.put_u8(kind::FLAG);
+                b.put_var((*entity_id).into());
+                b.put_u8(*flag);
+                b.put_pos(*x);
+                b.put_pos(*y);
+            }
         }
         b.freeze()
     }
@@ -873,6 +934,9 @@ impl ServerMsg {
             },
             kind::LOBBY_LEFT => ServerMsg::LobbyLeft { reason: r.code()? },
             kind::LOBBY_ERROR => ServerMsg::LobbyError { code: r.code()?, message: r.str()? },
+            kind::EMOTE => ServerMsg::Emote { entity_id: r.var32()?, emote: r.u8()? },
+            kind::POSE => ServerMsg::Pose { entity_id: r.var32()?, pose: r.u8()? },
+            kind::FLAG => ServerMsg::Flag { entity_id: r.var32()?, flag: r.u8()?, x: r.pos()?, y: r.pos()? },
             _ => return None,
         };
         r.is_empty().then_some(msg)
@@ -895,7 +959,8 @@ pub enum ClientMsg {
     Input { seq: u32, dx: f32, dy: f32, aim: [i8; 2], slots: u16 },
     /// Talk to an NPC on the current map; must be within its radius.
     NpcInteract { npc: String },
-    /// Pick a mission at a mission board the player is standing at: joins
+    /// Pick a mission at a Kafra employee or mission board the player is
+    /// standing at: joins
     /// the oldest public lobby of that mission with room (or opens one), or
     /// opens a private lobby when `public` is false.
     MissionSelect { mission: String, public: bool },
@@ -919,6 +984,12 @@ pub enum ClientMsg {
     SkillReset,
     /// Put a learned active skill in a hotbar slot (empty = clear).
     SkillSlot { slot: u8, skill: String },
+    /// Play an emote (`0..=MAX_EMOTE`; others are ignored).
+    Emote { emote: u8 },
+    /// Sit down (1, hubs only) or stand up (0).
+    Pose { pose: u8 },
+    /// Ping a spot near the player with marker `flag` (`0..=MAX_FLAG`).
+    Flag { flag: u8, x: f32, y: f32 },
 }
 
 /// Why a client frame was rejected.
@@ -989,6 +1060,20 @@ impl ClientMsg {
                 b.put_u8(*slot);
                 b.put_str(skill);
             }
+            ClientMsg::Emote { emote } => {
+                b.put_u8(kind::EMOTE_REQ);
+                b.put_u8(*emote);
+            }
+            ClientMsg::Pose { pose } => {
+                b.put_u8(kind::POSE_REQ);
+                b.put_u8(*pose);
+            }
+            ClientMsg::Flag { flag, x, y } => {
+                b.put_u8(kind::FLAG_REQ);
+                b.put_u8(*flag);
+                b.put_pos(*x);
+                b.put_pos(*y);
+            }
         }
         b.freeze()
     }
@@ -1029,10 +1114,13 @@ impl ClientMsg {
                 kind::SKILL_LEARN => ClientMsg::SkillLearn { skill: r.str()? },
                 kind::SKILL_RESET => ClientMsg::SkillReset,
                 kind::SKILL_SLOT => ClientMsg::SkillSlot { slot: r.u8()?, skill: r.str()? },
+                kind::EMOTE_REQ => ClientMsg::Emote { emote: r.u8()? },
+                kind::POSE_REQ => ClientMsg::Pose { pose: r.u8()? },
+                kind::FLAG_REQ => ClientMsg::Flag { flag: r.u8()?, x: r.pos()?, y: r.pos()? },
                 _ => return None,
             })
         };
-        let known = matches!(k, INPUT_KIND | kind::PING..=kind::SKILL_SLOT);
+        let known = matches!(k, INPUT_KIND | kind::PING..=kind::FLAG_REQ);
         if !known {
             return Err(Unknown);
         }
@@ -1043,7 +1131,9 @@ impl ClientMsg {
     }
 }
 
-/// Shared player block of a snapshot (identical for all recipients on a map).
+/// Player block of a snapshot (shared by every recipient on a map, or
+/// rebuilt per recipient where sight is limited). Reusable via `clear`.
+#[derive(Default)]
 pub struct SnapshotBody {
     buf: BytesMut,
     count: u16,
@@ -1052,6 +1142,11 @@ pub struct SnapshotBody {
 impl SnapshotBody {
     pub fn with_capacity(entities: usize) -> Self {
         Self { buf: BytesMut::with_capacity(entities * SNAPSHOT_ENTRY_LEN), count: 0 }
+    }
+
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.count = 0;
     }
 
     pub fn push(&mut self, entity_id: u32, x: f32, y: f32, facing: u8) {
@@ -1197,6 +1292,9 @@ mod tests {
             ClientMsg::StageLeave,
             ClientMsg::Resync,
             ClientMsg::StyleSet { look: Look { gender: 1, hair: 12, hair_color: 15, body_color: 7 } },
+            ClientMsg::Emote { emote: 127 },
+            ClientMsg::Pose { pose: 1 },
+            ClientMsg::Flag { flag: 9, x: 120.5, y: 33.25 },
         ];
         for m in all {
             let b = m.encode();
@@ -1223,6 +1321,10 @@ mod tests {
         assert_eq!(ClientMsg::decode(&[kind::LOBBY_READY]), Err(ClientDecodeError::Malformed));
         assert_eq!(ClientMsg::decode(&[kind::LOBBY_READY, 1, 0]), Err(ClientDecodeError::Malformed), "trailing");
         assert_eq!(ClientMsg::decode(&[kind::HUB_JOIN, 0xFF, 0xFF, 0x7F]), Err(ClientDecodeError::Malformed));
+        assert_eq!(ClientMsg::decode(&[kind::EMOTE_REQ]), Err(ClientDecodeError::Malformed));
+        assert_eq!(ClientMsg::decode(&[kind::POSE_REQ, 1, 0]), Err(ClientDecodeError::Malformed), "trailing");
+        assert_eq!(ClientMsg::decode(&[kind::FLAG_REQ, 1, 0, 0]), Err(ClientDecodeError::Malformed), "short pos");
+        assert_eq!(ClientMsg::decode(&[0x54]), Err(ClientDecodeError::Unknown));
         assert_eq!(ClientMsg::decode(b"{\"type\":\"ping\"}"), Err(ClientDecodeError::Unknown), "JSON is gone");
     }
 
@@ -1322,6 +1424,9 @@ mod tests {
             },
             ServerMsg::LobbyLeft { reason: "some_new_reason".into() },
             ServerMsg::LobbyError { code: "lobby_full".into(), message: "full".into() },
+            ServerMsg::Emote { entity_id: RESIDENT_ENTITY_BASE + 3, emote: 46 },
+            ServerMsg::Pose { entity_id: 5, pose: pose::SIT },
+            ServerMsg::Flag { entity_id: 5, flag: 3, x: 140.75, y: 12.5 },
         ];
         for m in all {
             let b = m.encode();

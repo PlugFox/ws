@@ -154,7 +154,9 @@ pub struct NpcDef {
     /// Sprite id in the location's `sprites.json`.
     pub sprite: String,
     pub name: String,
-    /// What talking to the NPC opens, e.g. `"mission_board"`.
+    /// What talking to the NPC opens: `"kafra"` (missions, skill reset,
+    /// restyle), `"mission_board"`, `"stylist"`, `"skill_master"`,
+    /// `"changelog"`, `"talk"`.
     #[serde(default = "NpcDef::default_kind")]
     pub kind: String,
     /// Cell coordinates; the NPC stands on the cell centre.
@@ -209,6 +211,51 @@ pub struct LocationManifest {
     pub bgm: Option<String>,
     #[serde(default)]
     pub npcs: Vec<NpcDef>,
+    /// Hub interest radius in cells: snapshots carry only entities within
+    /// it (plus a margin) of the recipient. 0 = the whole map.
+    #[serde(default, rename = "lightRadius")]
+    pub light_radius: f32,
+    /// Authored spots and pets for the town residents (hubs).
+    #[serde(default)]
+    pub residents: ResidentsDef,
+}
+
+/// `residents` of a manifest: where townsfolk go and which pets roam.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct ResidentsDef {
+    #[serde(default)]
+    pub spots: Vec<SpotDef>,
+    #[serde(default)]
+    pub pets: Vec<PetDef>,
+}
+
+/// A place a resident walks to (cell coordinates).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct SpotDef {
+    pub x: f32,
+    pub y: f32,
+    /// `"sit"`, `"stand"` or `"wander"` (anything else stands).
+    #[serde(default = "SpotDef::default_kind")]
+    pub kind: String,
+    /// 0 = north, clockwise in 45° steps.
+    #[serde(default = "NpcDef::default_facing")]
+    pub facing: u8,
+    /// What is there (`"bench"`, `"stall"`, …); informational.
+    #[serde(default)]
+    pub tag: Option<String>,
+}
+
+impl SpotDef {
+    fn default_kind() -> String {
+        "stand".into()
+    }
+}
+
+/// A town animal: drawn from the location atlas sprite `sprite`.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct PetDef {
+    pub sprite: String,
+    pub name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +592,8 @@ mod tests {
             portals,
             bgm: None,
             npcs: Vec::new(),
+            light_radius: 0.0,
+            residents: Default::default(),
         }
     }
 
@@ -649,5 +698,24 @@ mod tests {
         let fixed: CameraConstraint =
             serde_json::from_str(r#"{"type":"fixed","yaw":0.0,"pitch":-45.0,"zoom":18.0}"#).unwrap();
         assert_eq!(fixed, CameraConstraint::Fixed { yaw: 0.0, pitch: -45.0, zoom: 18.0 });
+    }
+
+    #[test]
+    fn manifest_light_radius_and_residents_are_optional() {
+        let base = r#""id":"t","name":"T","type":"hub","dimensions":{"width":4,"height":4,"cellSize":0.5},
+            "heightBounds":{"min":0,"max":0},"camera":{"type":"fixed","yaw":0,"pitch":-45,"zoom":18}"#;
+        let bare: LocationManifest = serde_json::from_str(&format!("{{{base}}}")).unwrap();
+        assert_eq!(bare.light_radius, 0.0);
+        assert_eq!(bare.residents, ResidentsDef::default());
+        let full: LocationManifest = serde_json::from_str(&format!(
+            r#"{{{base},"lightRadius":22,"residents":{{"spots":[{{"x":3,"y":4.5,"kind":"sit","facing":2,"tag":"bench"}},{{"x":1,"y":1}}],
+                "pets":[{{"sprite":"4_cat","name":"Mittens"}}]}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(full.light_radius, 22.0);
+        let r = &full.residents;
+        assert_eq!(r.spots[0], SpotDef { x: 3.0, y: 4.5, kind: "sit".into(), facing: 2, tag: Some("bench".into()) });
+        assert_eq!((r.spots[1].kind.as_str(), r.spots[1].facing), ("stand", 4));
+        assert_eq!(r.pets, vec![PetDef { sprite: "4_cat".into(), name: "Mittens".into() }]);
     }
 }

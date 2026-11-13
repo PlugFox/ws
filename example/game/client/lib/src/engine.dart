@@ -135,6 +135,22 @@ extension type GameView._(JSObject _) implements JSObject {
   /// true when the UI took it, false when it is game input.
   external bool navigateUi(int action);
 
+  /// Emote sprites (`<baseUrl>/emotes.json`); without them emotes show nothing.
+  external JSPromise<JSAny?> loadEmotes(String baseUrl);
+
+  /// `[{id, name}]` JSON of the loaded emotes.
+  external String emoteNames();
+
+  /// Names of the ten flag kinds (JSON array).
+  external String flagNames();
+
+  /// Plays emote [emote] over an entity's head for a moment.
+  external void showEmote(double entityId, int emote);
+
+  /// A ping flag of kind [flag] (0..9) on cell ([x], [y]) for a few seconds,
+  /// [label] under it; a newer flag of the same owner replaces it.
+  external void showFlag(double ownerId, int flag, double x, double y, String label);
+
   /// Passes the rows as a view on the same buffer: under dart2js and
   /// dart2wasm (with a JS-backed list) this crosses without a copy.
   void upsertEntities(Float32List rows, int count) {

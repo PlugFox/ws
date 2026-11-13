@@ -88,6 +88,9 @@ impl AppConfig {
         }
         let dev = env::var("GAME_DEV").is_ok_and(|v| v == "1");
         hub.sim.missions_anywhere = dev;
+        if let Some(n) = env::var("HUB_RESIDENTS").ok().and_then(|v| v.parse().ok()) {
+            hub.sim.residents = n;
+        }
         let dev_level = env::var("GAME_DEV_LEVEL").ok().and_then(|v| v.parse().ok()).filter(|_| dev);
         let mut stages = StageConfig::default();
         if let Some(max) = env::var("MAX_STAGES").ok().and_then(|v| v.parse().ok()) {
@@ -130,7 +133,8 @@ impl AppConfig {
             assets_dir: None,
             hub_maps: vec!["izlude".into(), "izlude_in".into()],
             hub_entry: "izlude".into(),
-            hub: HubConfig::default(),
+            // No town residents: tests count the entities they see.
+            hub: HubConfig { sim: crate::world::HubSimConfig { residents: 0, ..Default::default() }, ..HubConfig::default() },
             stages: StageConfig::default(),
             client_dir: None,
             dev_level: None,

@@ -32,11 +32,12 @@ pub async fn create_app(config: AppConfig) -> Result<(Router, AppState), Box<dyn
             Ok(world) => {
                 info!("Loaded hub maps {:?} from {}", config.hub_maps, dir.display());
                 let has_board = (0..world.map_count()).any(|i| {
-                    world.map(i as world::hub::MapIdx).manifest.npcs.iter().any(|n| n.kind == world::hub::MISSION_BOARD)
+                    world.map(i as world::hub::MapIdx).manifest.npcs.iter().any(|n| world::hub::gives_missions(&n.kind))
                 });
                 if !has_board {
                     warn!(
-                        "No NPC with kind \"{}\" in the hub maps: missions cannot be picked (check the recipe's npcs)",
+                        "No NPC with kind \"{}\" or \"{}\" in the hub maps: missions cannot be picked (check the recipe's npcs)",
+                        world::hub::KAFRA,
                         world::hub::MISSION_BOARD
                     );
                 }

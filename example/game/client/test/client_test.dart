@@ -71,6 +71,18 @@ void main() {
       expect(toHex(ClientMsg.skillSlot(4, 'slide')), '500405736c696465');
     });
 
+    test('emote, pose and flag frames (protocol.rs header layout)', () {
+      expect(toHex(ClientMsg.emote(46)), '512e');
+      expect(toHex(ClientMsg.pose(sitting: true)), '5201');
+      expect(toHex(ClientMsg.flag(3, 1.5, 2.25)), '530360009000');
+      final e = ServerMsg.decode(hex('378080c003' '2e'))! as Emote;
+      expect((e.entityId, e.emote), (0x700000, 46));
+      final p = ServerMsg.decode(hex('380901'))! as Pose;
+      expect((p.entityId, p.sitting), (9, true));
+      final f = ServerMsg.decode(hex('390909' '6000' '9000'))! as FlagPing;
+      expect((f.entityId, f.flag, f.x, f.y), (9, 9, 1.5, 2.25));
+    });
+
     test('server goldens decode', () {
       final err = ServerMsg.decode(hex('280603666172'))! as HubError;
       expect((err.code, err.message), ('npc_too_far', 'far'));

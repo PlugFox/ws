@@ -77,6 +77,9 @@ abstract final class Kind {
   static const stageEnd = 0x34;
   static const boss = 0x35;
   static const buffs = 0x36;
+  static const emote = 0x37;
+  static const pose = 0x38;
+  static const flag = 0x39;
 
   static const ping = 0x40;
   static const hubJoin = 0x41;
@@ -95,6 +98,9 @@ abstract final class Kind {
   static const skillLearn = 0x4E;
   static const skillReset = 0x4F;
   static const skillSlot = 0x50;
+  static const emoteReq = 0x51;
+  static const poseReq = 0x52;
+  static const flagReq = 0x53;
 
   static const extended = 0xFF;
 }
@@ -245,6 +251,13 @@ final class WireWriter {
 
   void boolean(bool v) => u8(v ? 1 : 0);
 
+  /// A cell coordinate in 1/64 cell (the reader's `pos`).
+  void pos(double v) {
+    final q = (v * 64).round().clamp(0, 0xFFFF);
+    u8(q & 0xFF);
+    u8(q >> 8);
+  }
+
   void look(Look l) {
     u8(l.gender);
     u8(l.hair);
@@ -297,6 +310,20 @@ abstract final class ClientMsg {
       (WireWriter(Kind.skillSlot)
             ..u8(slot)
             ..str(skill))
+          .done();
+
+  /// Play emote [emote] (the RO emotion index) over the own character.
+  static Uint8List emote(int emote) => (WireWriter(Kind.emoteReq)..u8(emote)).done();
+
+  /// Sit down (true) or stand up (in town only).
+  static Uint8List pose({required bool sitting}) => (WireWriter(Kind.poseReq)..u8(sitting ? 1 : 0)).done();
+
+  /// A ping flag of kind [flag] (0..9) on cell ([x], [y]) for everyone on the map.
+  static Uint8List flag(int flag, double x, double y) =>
+      (WireWriter(Kind.flagReq)
+            ..u8(flag)
+            ..pos(x)
+            ..pos(y))
           .done();
 }
 
@@ -525,6 +552,9 @@ sealed class ServerMsg {
       ),
       Kind.lobbyLeft => LobbyLeft(r.code()),
       Kind.lobbyError => LobbyError(r.code(), r.str()),
+      Kind.emote => Emote(r.varint(), r.u8()),
+      Kind.pose => Pose(r.varint(), r.u8()),
+      Kind.flag => FlagPing(r.varint(), r.u8(), r.pos(), r.pos()),
       _ => null,
     };
     if (msg == null) return null;
@@ -828,6 +858,30 @@ final class LobbyError extends ServerMsg {
 }
 
 // ------------------------------------------------------------ snapshots
+
+/// An entity on the recipient's map plays an emote (players and residents).
+final class Emote extends ServerMsg {
+  const Emote(this.entityId, this.emote);
+  final int entityId;
+  final int emote;
+}
+
+/// An entity sits down (`pose` 1) or stands up (0).
+final class Pose extends ServerMsg {
+  const Pose(this.entityId, this.pose);
+  final int entityId;
+  final int pose;
+  bool get sitting => pose == 1;
+}
+
+/// A ping flag placed by [entityId] on cell ([x], [y]).
+final class FlagPing extends ServerMsg {
+  const FlagPing(this.entityId, this.flag, this.x, this.y);
+  final int entityId;
+  final int flag;
+  final double x;
+  final double y;
+}
 
 /// Monster delta ops (`horde/view.rs` on the server).
 abstract final class MobOp {

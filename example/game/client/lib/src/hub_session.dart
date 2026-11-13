@@ -6,11 +6,13 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:game_client/src/api.dart';
+import 'package:game_client/src/changelog.dart';
 import 'package:game_client/src/classes.dart';
 import 'package:game_client/src/engine.dart';
 import 'package:game_client/src/input.dart';
 import 'package:game_client/src/input_devices.dart';
 import 'package:game_client/src/interpolation.dart';
+import 'package:game_client/src/key_bindings.dart';
 import 'package:game_client/src/prediction.dart';
 import 'package:game_client/src/protocol.dart';
 import 'package:game_client/src/walk_grid.dart';
@@ -137,6 +139,9 @@ final class _Peer {
 
   /// Class tier (body sprite); 1 until the wire carries other players' tier.
   int tier = 1;
+
+  /// Town pets (`pet:<sprite>`) are drawn with a location sprite, no look.
+  String? get petSprite => archetype.startsWith('pet:') ? archetype.substring(4) : null;
 }
 
 /// One connected hub session: network, prediction, interpolation and the
@@ -240,9 +245,17 @@ final class HubSession {
   Skills? _skills;
   (double, double)? _pointer;
 
-  /// Slot keys: Q E R F Space, with Shift the second page; digits 1–0 too.
-  static const _slotKeys = ['KeyQ', 'KeyE', 'KeyR', 'KeyF', 'Space'];
-  static const _slotCaptions = ['Q', 'E', 'R', 'F', '␣', '⇧Q', '⇧E', '⇧R', '⇧F', '⇧␣'];
+  /// Rebindable keys (hotbar 1–0, emotes Alt+1–0, flags Ctrl+1–0, ...).
+  Bindings _binds = Bindings(const {});
+
+  /// Peers whose name is hidden in the town fog.
+  final _unlit = <int>{};
+
+  /// Entities sitting (players, townsfolk), from `pose` messages.
+  final _sitting = <int>{};
+
+  /// Light radius of the town map in cells (manifest `lightRadius`; 0 = none).
+  double _townLight = 0;
   double _acc = 0;
   double _lastFrame = 0;
   double _lastRender = 0;
@@ -282,6 +295,10 @@ final class HubSession {
     _loadSettings();
     view.loadSkills('$assetsBase/client/skills').toDart.then((_) => _renderSkills()).catchError((Object e) {
       web.console.warn('skills unavailable: $e'.toJS);
+    });
+    view.loadEmotes('$assetsBase/client/emotes').toDart.catchError((Object e) {
+      web.console.warn('emotes unavailable: $e'.toJS);
+      return null;
     });
     web.window.addEventListener(
       'pointermove',
@@ -373,7 +390,7 @@ final class HubSession {
         _channel = channelName;
         _tickHz = tickRate;
         _clock = ServerClock(tickHz: _tickHz);
-        view.setLightRadius(0);
+        view.setLightRadius(_townLight);
         _baseLight = 0;
         view.setBoss('');
         view.setBuffs('[]');
@@ -429,7 +446,17 @@ final class HubSession {
         _removePeer(entityId);
         if (_inStage) _renderStagePanel();
       case PortalDenied(:final targetMap):
-        view.toast('$targetMap is reached through the mission board.');
+        view.toast('$targetMap is reached through the Kafra employee in the town centre.');
+      case Emote(:final entityId, :final emote):
+        view.showEmote(entityId.toDouble(), emote);
+      case Pose(:final entityId, :final sitting):
+        if (sitting) {
+          _sitting.add(entityId);
+        } else {
+          _sitting.remove(entityId);
+        }
+      case FlagPing(:final entityId, :final flag, :final x, :final y):
+        view.showFlag(entityId.toDouble(), flag, x, y, entityId == _me ? _myName : (_peers[entityId]?.name ?? ''));
       case NpcDialog():
         _onNpcDialog(msg);
       case HubLeft(:final reason):
@@ -452,7 +479,14 @@ final class HubSession {
         if (!_loading) _predictor?.reconcile(s.ackSeq, s.xs[i], s.ys[i]);
         continue;
       }
-      (_tracks[id] ??= RemoteTrack(id)).push(s.tick, s.xs[i], s.ys[i], s.facings[i]);
+      var t = _tracks[id];
+      if (t == null) {
+        t = _tracks[id] = RemoteTrack(id);
+        // Back from beyond the fog: its name and look were dropped with it.
+        final peer = _peers[id];
+        if (peer != null) _showPeer(id, peer);
+      }
+      t.push(s.tick, s.xs[i], s.ys[i], s.facings[i]);
       _lastSeen[id] = now;
     }
     if (s.mobBaseline >= 0) _applyMonsters(s);
@@ -558,6 +592,7 @@ final class HubSession {
   int _charAction(int id, bool moving, double now) {
     if ((_vitals[id]?.state ?? 0) != 0) return Act.sit;
     if (moving) return Act.walk;
+    if (_sitting.contains(id)) return Act.sit;
     return now < (_attackUntil[id] ?? 0) ? Act.attack : Act.idle;
   }
 
@@ -627,6 +662,10 @@ final class HubSession {
     for (final id in _tracks.keys.toList()) {
       _removePeer(id);
     }
+    for (final id in _peers.keys.toList()) {
+      _removePeer(id);
+    }
+    _sitting.clear();
     _clearMobs();
     for (final npc in _npcs) {
       view.setLabel(npc.entityId, null, '');
@@ -646,6 +685,11 @@ final class HubSession {
     final grid = WalkGrid.parse(results[1]! as Uint8List);
 
     view.setCamera(jsonEncode(map.camera));
+    // Fog of war in town: the server sends only what is inside the light.
+    if (!_inStage) {
+      _townLight = (manifest['lightRadius'] as num?)?.toDouble() ?? 0;
+      view.setLightRadius(_townLight);
+    }
     final p = _predictor;
     if (p == null) {
       _predictor = LocalPredictor(grid, x, y, rules: MoveRules(tickHz: _tickHz));
@@ -698,7 +742,10 @@ final class HubSession {
       _renderStagePanel();
       view.toast('$_mapName: the mission has begun. Walk to the exit or use the panel to return.');
     } else if (msg.viaPortal == null) {
-      view.toast('Welcome to $_mapName ($_channel). WASD to move, F to talk.');
+      view.toast(
+        'Welcome to $_mapName ($_channel). WASD to move, ${_binds.interact?.caption ?? 'F'} to talk, '
+        'Alt+1–0 emotes, Ctrl+1–0 flags, ${_binds.sit?.caption ?? 'C'} to sit. F10: settings and keys.',
+      );
     }
   }
 
@@ -713,17 +760,15 @@ final class HubSession {
       _applyLook(id, p.look);
       return;
     }
-    _peers[id] = _Peer(name, archetype, p.look)..tier = tierOfLevel(p.level);
-    _applyLook(id, p.look);
-    final t = _tracks[id] ??= RemoteTrack(id);
-    if (t.isEmpty) {
-      t
-        ..x = p.x
-        ..y = p.y
-        ..facing = p.facing;
-    }
-    _lastSeen[id] = _now();
-    view.setLabel(id.toDouble(), name, '');
+    final peer = _peers[id] = _Peer(name, archetype, p.look)..tier = tierOfLevel(p.level);
+    // Drawn from its first snapshot on (with fog in town, maybe never).
+    if (_tracks.containsKey(id)) _showPeer(id, peer);
+  }
+
+  /// Name label and look of a peer (again after it comes back into view).
+  void _showPeer(int id, _Peer peer) {
+    view.setLabel(id.toDouble(), peer.name, peer.petSprite != null ? 'npc' : '');
+    if (peer.petSprite == null) _applyLook(id, peer.look);
   }
 
   void _applyLook(int id, Look l) => view.setLook(id.toDouble(), l.gender, l.hair, l.hairColor, l.bodyColor);
@@ -759,6 +804,14 @@ final class HubSession {
 
   void _removePeer(int id) {
     _peers.remove(id);
+    _sitting.remove(id);
+    _hidePeer(id);
+  }
+
+  /// Out of view (beyond the fog, or silent): the sprite goes, the peer
+  /// stays known until `player_vanished`.
+  void _hidePeer(int id) {
+    _unlit.remove(id);
     _tracks.remove(id);
     _lastSeen.remove(id);
     view.setLabel(id.toDouble(), null, '');
@@ -772,8 +825,30 @@ final class HubSession {
     if (e.target.isA<web.HTMLInputElement>()) return;
     _keys.add(e.code);
     if (!e.repeat) _tapped.add(e.code);
-    // On a stage F is a skill slot; in town it talks to the nearest NPC.
-    if (e.code == 'KeyF' && !e.repeat && !_inStage) _interactNearest();
+    final b = _binds;
+    // Emotes and flags take their keys from the browser (Alt / Ctrl + digit).
+    final emote = b.emoteOf(e);
+    if (emote >= 0) {
+      e.preventDefault();
+      if (!e.repeat) _send(ClientMsg.emote(b.emoteIds[emote]));
+      return;
+    }
+    final flag = b.flagOf(e);
+    if (flag >= 0) {
+      e.preventDefault();
+      if (!e.repeat) _placeFlag(flag);
+      return;
+    }
+    if (e.repeat) {
+      if (_inStage && (e.code == 'Space' || e.code == 'Tab')) e.preventDefault();
+      return;
+    }
+    if (b.interact?.matches(e) ?? false) _interactNearest();
+    if ((b.sit?.matches(e) ?? false) && !_inStage && _myState == 0) {
+      final me = _me;
+      if (me != null) _send(ClientMsg.pose(sitting: !_sitting.contains(me)));
+    }
+    if (b.slots.any((k) => k != null && k.matches(e))) e.preventDefault();
     if (_inStage && (e.code == 'Space' || e.code == 'Tab')) e.preventDefault();
     if (e.code == 'KeyK' && !e.repeat) view.toggleSkillTree(-1);
     if (e.code == 'Escape') view.toggleSkillTree(0);
@@ -808,6 +883,16 @@ final class HubSession {
     }
   }
 
+  /// A flag where the pointer is on the ground (else under the player).
+  void _placeFlag(int kind) {
+    final p = _predictor;
+    if (p == null || _loading) return;
+    final ptr = _pointer;
+    final g = ptr == null || _input.touchOn ? null : view.pickGround(ptr.$1, ptr.$2);
+    final (x, y) = g ?? (p.x, p.y);
+    _send(ClientMsg.flag(kind, x, y));
+  }
+
   void _interactNearest() {
     final npc = _nearNpc;
     if (npc != null && !view.dialogOpen()) _send(ClientMsg.npcInteract(npc.id));
@@ -822,8 +907,11 @@ final class HubSession {
       return;
     }
     final missions = msg.missions;
-    final isBoard = msg.kind == 'mission_board';
-    final isMaster = msg.kind == 'skill_master';
+    final isKafra = msg.kind == 'kafra';
+    // A Kafra employee sends to battle like the old mission board did.
+    final isBoard = msg.kind == 'mission_board' || isKafra;
+    final isMaster = msg.kind == 'skill_master' || isKafra;
+    final isLog = msg.kind == 'changelog';
     final npc = _npcs.where((n) => n.id == msg.npc).firstOrNull;
     _settingsOpen = false;
     final inLobby = _lobby != null;
@@ -834,18 +922,16 @@ final class HubSession {
         'id': 'npc:${msg.npc}',
         'title': msg.name,
         if (cutinUrl != null) 'cutin': cutinUrl,
-        'text': npc?.text ?? (!isBoard
-            ? 'Hello there.'
-            : inLobby
-            ? 'You are already in a party. Leave it to pick another mission.'
-            : 'Pick a mission. Parties of up to four.'),
+        'text': [
+          npc?.text ?? (isBoard ? '' : 'Hello there.'),
+          if (isBoard && inLobby) 'You are already in a party: leave it to pick another mission.',
+          if (isBoard && !inLobby) 'Missions: parties of up to four.',
+        ].where((t) => t.isNotEmpty).join('\n'),
+        if (isLog)
+          'sections': [
+            for (final c in changelog) {'title': c.title, 'date': c.date, 'items': c.items},
+          ],
         'options': [
-          if (isMaster)
-            {
-              'id': 'skill_reset',
-              'label': 'Forget every skill',
-              'detail': 'All skill points come back to spend again. Your hotbar is cleared.',
-            },
           if (isBoard && !inLobby)
             for (final m in missions) ...[
               {
@@ -859,6 +945,18 @@ final class HubSession {
                 'detail': 'Only players with your party code can join.',
               },
             ],
+          if (isKafra)
+            {
+              'id': 'restyle',
+              'label': 'Hair and dyes',
+              'detail': 'A new hair style, hair dye or clothes dye.',
+            },
+          if (isMaster)
+            {
+              'id': 'skill_reset',
+              'label': 'Forget every skill',
+              'detail': 'All skill points come back to spend again. Your hotbar is cleared.',
+            },
         ],
         if (isBoard && !inLobby) 'input': {'id': 'code', 'label': 'Join', 'placeholder': 'Party code', 'maxLength': 8},
       }),
@@ -957,6 +1055,13 @@ final class HubSession {
         final option = e['option']! as String;
         if (option == 'code') {
           _send(ClientMsg.lobbyJoin('${e['value']}'));
+        } else if (option == 'restyle') {
+          final dialog = '${e['dialog']}';
+          view.closeDialog();
+          _stylist = dialog.startsWith('npc:') ? dialog.substring(4) : dialog;
+          _styling = false;
+          _showStylist();
+          return;
         } else if (option == 'skill_reset') {
           _send(ClientMsg.skillReset());
           view.toast('Your skills are forgotten: the points are yours to spend again (K).');
@@ -1010,7 +1115,7 @@ final class HubSession {
         'hotbar': s.hotbar,
         'level': s.level,
         'cls': _myArchetype,
-        'keys': _slotCaptions,
+        'keys': _binds.slotCaptions,
       }),
     );
   }
@@ -1055,13 +1160,11 @@ final class HubSession {
   int _heldSlots() {
     if (!_inStage || _myState != 0 || view.dialogOpen()) return 0;
     bool down(String code) => _keys.contains(code) || _tapped.contains(code);
-    final shift = down('ShiftLeft') || down('ShiftRight');
+    final pressed = {..._keys, ..._tapped};
     var bits = 0;
-    for (var i = 0; i < _slotKeys.length; i++) {
-      if (down(_slotKeys[i])) bits |= 1 << (shift ? i + 5 : i);
-    }
-    for (var i = 0; i < 10; i++) {
-      if (down('Digit${(i + 1) % 10}')) bits |= 1 << i;
+    for (var i = 0; i < Bindings.count; i++) {
+      final k = _binds.slots[i];
+      if (k != null && (down(k.code)) && k.heldIn(pressed)) bits |= 1 << i;
     }
     // Gamepad / touch presses, and auto-cast slots every tick (the server
     // ignores what it cannot honour: cooldown, SP, no target).
@@ -1108,6 +1211,7 @@ final class HubSession {
     _frameCap = (_settings['frameCap'] as num?)?.toInt() ?? 0;
     _clock.bias = ((_settings['interpBiasMs'] as num?) ?? 0) / 1000;
     _autoCast = (_settings['autoCast'] as num?)?.toInt() ?? 0;
+    _binds = Bindings(_settings);
     view
       ..setAutoCast(_autoCast)
       ..setTouchControls((_settings['touchControls'] as num?)?.toInt() ?? -1);
@@ -1122,6 +1226,9 @@ final class HubSession {
         _clock.bias = (value! as num) / 1000;
       case 'touchControls':
         view.setTouchControls((value! as num).toInt());
+      case final String k when k.startsWith('bind.') || k.startsWith('emote.'):
+        _binds = Bindings(_settings);
+        _renderSkills();
       default:
         view.configure(jsonEncode({id: value}));
     }
@@ -1195,6 +1302,7 @@ final class HubSession {
           {'id': 'cutout', 'label': 'See-through buildings', 'type': 'toggle', 'value': e['cutout']},
           range('cutoutRadius', 'See-through radius, m', 0.5, 4, 0.1, e['cutoutRadius']),
           {'id': 'fog', 'label': 'Animated fog beyond the light', 'type': 'toggle', 'value': e['fog']},
+          ..._controlFields(),
           {
             'id': 'touchControls',
             'label': 'Touch controls',
@@ -1209,6 +1317,40 @@ final class HubSession {
         ],
       }),
     );
+  }
+
+  /// Key bindings section of the settings: hotbar, emotes (key and which
+  /// emote), flags and actions.
+  List<Map<String, Object?>> _controlFields() {
+    String bind(String id) => (_settings[id] as String?) ?? Bindings.defaults[id] ?? '';
+    final emotes = <Map<String, Object?>>[
+      for (final e in (jsonDecode(view.emoteNames()) as List).cast<Map<String, Object?>>())
+        {'value': e['id'], 'label': '${e['name']}'},
+    ];
+    final flags = (jsonDecode(view.flagNames()) as List).cast<String>();
+    return [
+      {'id': 'h.keys', 'label': 'Keys: click, then press a key (Backspace clears)', 'type': 'heading'},
+      {'id': 'bind.interact', 'label': 'Talk to an NPC', 'type': 'key', 'value': bind('bind.interact')},
+      {'id': 'bind.sit', 'label': 'Sit / stand (in town)', 'type': 'key', 'value': bind('bind.sit')},
+      {'id': 'h.slots', 'label': 'Hotbar', 'type': 'heading'},
+      for (var i = 0; i < Bindings.count; i++)
+        {'id': 'bind.slot.$i', 'label': 'Slot ${i + 1}', 'type': 'key', 'value': bind('bind.slot.$i')},
+      {'id': 'h.emotes', 'label': 'Emotes', 'type': 'heading'},
+      for (var i = 0; i < Bindings.count; i++) ...[
+        {'id': 'bind.emote.$i', 'label': 'Emote ${i + 1}: key', 'type': 'key', 'value': bind('bind.emote.$i')},
+        if (emotes.isNotEmpty)
+          {'id': 'emote.$i', 'label': 'Emote ${i + 1}: plays', 'type': 'select', 'value': _binds.emoteIds[i], 'options': emotes},
+      ],
+      {'id': 'h.flags', 'label': 'Flags (placed at the pointer)', 'type': 'heading'},
+      for (var i = 0; i < Bindings.count; i++)
+        {
+          'id': 'bind.flag.$i',
+          'label': 'Flag: ${i < flags.length ? flags[i] : '${i + 1}'}',
+          'type': 'key',
+          'value': bind('bind.flag.$i'),
+        },
+      {'id': 'h.video', 'label': 'Other', 'type': 'heading'},
+    ];
   }
 
   /// WASD / arrows → world direction (x east, y north), turned by the camera
@@ -1247,6 +1389,8 @@ final class HubSession {
     // Downed or fallen: the server ignores movement; do not predict any.
     final (dx, dy) = _myState == 0 ? _inputDir() : (0.0, 0.0);
     final moving = dx != 0 || dy != 0;
+    // Walking stands up (the server does the same).
+    if (moving && _me != null) _sitting.remove(_me);
     final slots = _heldSlots();
     _tapped.clear();
     if (moving || slots != 0) _stopSends = 3;
@@ -1306,17 +1450,37 @@ final class HubSession {
     // while standing). The shader interpolates in between.
     final rt = _clock.renderTick(now);
     final stale = <int>[];
+    // Town fog: the server stops sending what leaves the light; it dissolves.
+    final fog = !_inStage && _townLight > 0;
     for (final t in _tracks.values) {
-      if (now - (_lastSeen[t.id] ?? now) > 3) {
+      if (now - (_lastSeen[t.id] ?? now) > (fog ? 0.6 : 3)) {
         stale.add(t.id);
         continue;
       }
       t.segment(rt);
+      // In the town fog a name shows only while its owner is in the light.
+      if (fog) {
+        final dx = t.x1 - mx, dy = t.y1 - my;
+        final lit = dx * dx + dy * dy <= (_townLight - 1) * (_townLight - 1);
+        if (lit == _unlit.contains(t.id)) {
+          final peer = _peers[t.id];
+          if (lit) {
+            _unlit.remove(t.id);
+            if (peer != null) _showPeer(t.id, peer);
+          } else {
+            _unlit.add(t.id);
+            view.setLabel(t.id.toDouble(), null, '');
+          }
+        }
+      }
       final action = _charAction(t.id, t.moving, now);
       final peer = _peers[t.id];
-      final sprite = _spriteFor(t.id, peer?.archetype ?? 'novice', peer?.look, tier: _tierOf(t.id));
+      final pet = peer?.petSprite;
+      final sprite = pet != null
+          ? (_spriteCache['$_mapId:pet:$pet'] ??= view.spriteIndex(pet))
+          : _spriteFor(t.id, peer?.archetype ?? 'novice', peer?.look, tier: _tierOf(t.id));
       final still = t.x0 == t.x1 && t.y0 == t.y1;
-      final flags = Row.flagHigh | statusRowFlags(_vitals[t.id]?.status ?? 0);
+      final flags = Row.flagHigh | (fog ? Row.flagFade : 0) | statusRowFlags(_vitals[t.id]?.status ?? 0);
       if (t.sentFacing == t.facing && t.sentAction == action && t.sentSprite == sprite && _sentFlags[t.id] == flags) {
         if (still ? (t.sentX == t.x1 && t.sentY == t.y1) : (t.sentTick0 == t.tick0 && t.sentTick1 == t.tick1)) {
           continue;
@@ -1345,7 +1509,7 @@ final class HubSession {
         ..sentX = still ? t.x1 : double.nan
         ..sentY = still ? t.y1 : double.nan;
     }
-    stale.forEach(_removePeer);
+    stale.forEach(_hidePeer);
 
     // Monsters: one row per record change. The row is the record's
     // dead-reckoning line from `stamp − back` to `stamp + horizon`; the

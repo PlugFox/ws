@@ -8,7 +8,7 @@
 
 use super::map::{MapData, MapError};
 use super::missions;
-use super::protocol::{Look, MapInfo, PlayerInfo, ServerMsg, SnapshotBody};
+use super::protocol::{pose, Look, MapInfo, PlayerInfo, ServerMsg, SnapshotBody, MAX_EMOTE, MAX_FLAG};
 use super::horde::view::MonsterView;
 use super::horde::{Horde, PlayerView};
 use super::combat::{self, Class, Loadout, SkillBook};
@@ -26,6 +26,7 @@ mod brain;
 mod cast;
 mod fight;
 mod mission;
+mod residents;
 pub use fight::{Fighter, Vital};
 
 /// Where a portal leads.
@@ -34,7 +35,7 @@ pub enum PortalLink {
     /// Another map of the same hub instance.
     Internal { map: MapIdx, arrival: (f32, f32) },
     /// A map outside the hub (combat fields are instanced per mission and
-    /// entered through the mission board, not by walking).
+    /// entered through a Kafra employee, not by walking).
     External { target_map: String },
 }
 
@@ -144,11 +145,14 @@ pub struct HubSimConfig {
     pub input_timeout_ticks: u32,
     /// Test hook (`GAME_DEV=1`): a mission can be picked anywhere in town.
     pub missions_anywhere: bool,
+    /// Simulated townsfolk walking the entry map of every hub channel
+    /// (none on stages).
+    pub residents: u32,
 }
 
 impl Default for HubSimConfig {
     fn default() -> Self {
-        Self { tick_hz: 20, walk_speed: 6.0, input_timeout_ticks: 10, missions_anywhere: false }
+        Self { tick_hz: 20, walk_speed: 6.0, input_timeout_ticks: 10, missions_anywhere: false, residents: 14 }
     }
 }
 
@@ -194,6 +198,11 @@ struct HubPlayer {
     /// the last tick.
     aim: [i8; 2],
     pressed: u16,
+    /// Sitting (hubs only); any movement stands the player up.
+    sitting: bool,
+    /// Earliest ticks of the next emote and flag (rate limits).
+    emote_ready: u32,
+    flag_ready: u32,
 }
 
 impl HubPlayer {
@@ -238,7 +247,7 @@ pub enum HubEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum InstanceKind {
     /// Hub channel `Hub-<id>`: external portals are denied (stages are
-    /// entered through the mission board).
+    /// entered through a Kafra employee).
     Hub { channel: u16 },
     /// Stage instance of a mission: external portals lead back to the hub.
     Stage { stage_id: u32, mission: String },
@@ -294,13 +303,50 @@ pub struct HubInstance {
     kills: u32,
     boss: Option<mission::BossBar>,
     outcome: mission::Outcome,
+    /// Simulated townsfolk on the entry map (hub channels only).
+    residents: residents::Residents,
+    /// Scratch: the player block of the snapshot being built.
+    snapshot_body: SnapshotBody,
 }
 
 pub const MISSION_BOARD: &str = "mission_board";
+/// NPC kind of the Kafra employee: missions, skill resets and restyling.
+pub const KAFRA: &str = "kafra";
+/// NPC kind of the changelog board (talk only).
+pub const CHANGELOG: &str = "changelog";
 /// NPC kind that restyles hair and dyes (`style_set`).
 pub const STYLIST: &str = "stylist";
 /// NPC kind that resets learned skills (`skill_reset`).
 pub const SKILL_MASTER: &str = "skill_master";
+
+/// Whether talking to an NPC of this kind lists the missions.
+pub fn gives_missions(kind: &str) -> bool {
+    kind == MISSION_BOARD || kind == KAFRA
+}
+
+/// Minimum time between two emotes and between two flags of a player (s).
+const EMOTE_GAP_SECS: f32 = 0.5;
+const FLAG_GAP_SECS: f32 = 1.0;
+/// How far from the player a flag may be planted (cells).
+const FLAG_RANGE: f32 = 40.0;
+
+/// Hub snapshots reach this far past the map's light radius (cells), so
+/// entities fade in before they enter the light.
+const SIGHT_MARGIN: f32 = 4.0;
+
+/// Whether `(dx, dy)` lies within `r`: box reject, inscribed-square accept,
+/// squared distance only for the band in between (no sqrt).
+fn in_sight(dx: f32, dy: f32, r: f32) -> bool {
+    let (ax, ay) = (dx.abs(), dy.abs());
+    if ax > r || ay > r {
+        return false;
+    }
+    let inner = r * std::f32::consts::FRAC_1_SQRT_2;
+    if ax <= inner && ay <= inner {
+        return true;
+    }
+    dx * dx + dy * dy <= r * r
+}
 
 fn hub_error(code: &str, message: impl Into<String>) -> ServerMsg {
     ServerMsg::HubError { code: code.into(), message: message.into() }
@@ -329,7 +375,13 @@ impl HubInstance {
             InstanceKind::Hub { channel } => format!("Hub-{channel}"),
             InstanceKind::Stage { stage_id, .. } => format!("Stage-{stage_id}"),
         };
+        let residents = match kind {
+            InstanceKind::Hub { .. } => residents::Residents::spawn(&world, &config, rand::random()),
+            InstanceKind::Stage { .. } => residents::Residents::none(world.entry()),
+        };
         Self {
+            residents,
+            snapshot_body: SnapshotBody::default(),
             kind,
             name,
             world,
@@ -452,6 +504,9 @@ impl HubInstance {
             fighter: None,
             aim: [0, 0],
             pressed: 0,
+            sitting: false,
+            emote_ready: 0,
+            flag_ready: 0,
         };
         let joined = match &self.kind {
             InstanceKind::Hub { channel } => ServerMsg::HubJoined {
@@ -584,17 +639,17 @@ impl HubInstance {
                 npc: n.id.clone(),
                 name: n.name.clone(),
                 kind: n.kind.clone(),
-                missions: if n.kind == MISSION_BOARD { missions::MISSIONS.to_vec() } else { Vec::new() },
+                missions: if gives_missions(&n.kind) { missions::MISSIONS.to_vec() } else { Vec::new() },
             },
         };
         out.push((user_id, HubEvent::Control(reply)));
     }
 
-    /// A skill reset is allowed only next to a skill master.
+    /// A skill reset is allowed only next to a skill master (or a Kafra).
     pub fn skill_reset(&mut self, user_id: u32, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
         let p = &self.players[i];
-        let near = self.world.map(p.map).manifest.npcs.iter().any(|n| n.kind == SKILL_MASTER && n.in_reach(p.x, p.y));
+        let near = self.world.map(p.map).manifest.npcs.iter().any(|n| (n.kind == SKILL_MASTER || n.kind == KAFRA) && n.in_reach(p.x, p.y));
         let event = if near {
             HubEvent::SkillResetApproved
         } else {
@@ -603,7 +658,7 @@ impl HubInstance {
         out.push((user_id, event));
     }
 
-    /// Restyles a player standing at a stylist: hair style and dyes change,
+    /// Restyles a player standing at a stylist (or a Kafra): hair style and dyes change,
     /// the gender is kept. Everyone on the map (the player too) gets
     /// `player_look`; the socket task persists it via [`HubEvent::LookChanged`].
     pub fn restyle(&mut self, user_id: u32, look: Look, out: &mut Outgoing) {
@@ -614,7 +669,7 @@ impl HubInstance {
             out.push((user_id, HubEvent::Control(hub_error("bad_message", "no such style"))));
             return;
         }
-        let at_stylist = self.world.map(p.map).manifest.npcs.iter().any(|n| n.kind == STYLIST && n.in_reach(p.x, p.y));
+        let at_stylist = self.world.map(p.map).manifest.npcs.iter().any(|n| (n.kind == STYLIST || n.kind == KAFRA) && n.in_reach(p.x, p.y));
         if !at_stylist {
             out.push((user_id, HubEvent::Control(hub_error("npc_too_far", "stand next to a stylist to restyle"))));
             return;
@@ -627,16 +682,17 @@ impl HubInstance {
         out.push((user_id, HubEvent::LookChanged(look)));
     }
 
-    /// Validates a mission choice made at a board (position and mission id);
+    /// Validates a mission choice made at a board or a Kafra (position and
+    /// mission id);
     /// a valid choice goes to the socket task as [`HubEvent::MissionChosen`],
     /// which forms or joins a lobby.
     pub fn select_mission(&mut self, user_id: u32, mission: &str, public: bool, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
         let p = &self.players[i];
         let at_board = self.config.missions_anywhere
-            || self.world.map(p.map).manifest.npcs.iter().any(|n| n.kind == MISSION_BOARD && n.in_reach(p.x, p.y));
+            || self.world.map(p.map).manifest.npcs.iter().any(|n| gives_missions(&n.kind) && n.in_reach(p.x, p.y));
         let event = if !at_board {
-            HubEvent::Control(hub_error("npc_too_far", "stand at a mission board to pick a mission"))
+            HubEvent::Control(hub_error("npc_too_far", "talk to a Kafra employee to pick a mission"))
         } else {
             match missions::find(mission) {
                 None => HubEvent::Control(hub_error("unknown_mission", format!("no mission {mission}"))),
@@ -644,6 +700,71 @@ impl HubInstance {
             }
         };
         out.push((user_id, event));
+    }
+
+    /// Sends `msg` to every player on `map`.
+    fn broadcast(&self, map: MapIdx, msg: &ServerMsg, out: &mut Outgoing) {
+        for o in self.players.iter().filter(|o| o.map == map) {
+            out.push((o.profile.user_id, HubEvent::Control(msg.clone())));
+        }
+    }
+
+    /// Plays an emote for everyone on the player's map (hubs and stages).
+    /// Unknown ids and emotes faster than one per 0.5 s are ignored.
+    pub fn emote(&mut self, user_id: u32, emote: u8, out: &mut Outgoing) {
+        let Some(i) = self.find(user_id) else { return };
+        let (tick, gap) = (self.tick, self.ticks_of(EMOTE_GAP_SECS));
+        let p = &mut self.players[i];
+        if emote > MAX_EMOTE || tick < p.emote_ready {
+            return;
+        }
+        p.emote_ready = tick + gap;
+        let (map, entity_id) = (p.map, p.profile.character_id);
+        self.broadcast(map, &ServerMsg::Emote { entity_id, emote }, out);
+    }
+
+    /// Sits down (hubs only) or stands up; everyone on the map learns it.
+    pub fn set_pose(&mut self, user_id: u32, pose: u8, out: &mut Outgoing) {
+        let Some(i) = self.find(user_id) else { return };
+        let sit = match pose {
+            pose::STAND => false,
+            pose::SIT if matches!(self.kind, InstanceKind::Hub { .. }) => true,
+            _ => return,
+        };
+        let p = &mut self.players[i];
+        if p.sitting == sit {
+            return;
+        }
+        p.sitting = sit;
+        if sit {
+            p.dir = (0.0, 0.0);
+        }
+        let (map, entity_id) = (p.map, p.profile.character_id);
+        self.broadcast(map, &ServerMsg::Pose { entity_id, pose }, out);
+    }
+
+    /// Plants a ping marker near the player for everyone on the map. Spots
+    /// further than 40 cells, unknown flags and more than one flag a second
+    /// are ignored.
+    pub fn flag(&mut self, user_id: u32, flag: u8, x: f32, y: f32, out: &mut Outgoing) {
+        let Some(i) = self.find(user_id) else { return };
+        let (tick, gap) = (self.tick, self.ticks_of(FLAG_GAP_SECS));
+        let p = &mut self.players[i];
+        if flag > MAX_FLAG || !x.is_finite() || !y.is_finite() || tick < p.flag_ready {
+            return;
+        }
+        let (dx, dy) = (x - p.x, y - p.y);
+        if dx * dx + dy * dy > FLAG_RANGE * FLAG_RANGE {
+            return;
+        }
+        p.flag_ready = tick + gap;
+        let (map, entity_id) = (p.map, p.profile.character_id);
+        self.broadcast(map, &ServerMsg::Flag { entity_id, flag, x, y }, out);
+    }
+
+    /// `secs` in whole ticks (at least one).
+    fn ticks_of(&self, secs: f32) -> u32 {
+        ((secs * self.config.tick_hz as f32).ceil() as u32).max(1)
     }
 
     /// Advances the simulation by one fixed step and emits snapshots.
@@ -654,9 +775,14 @@ impl HubInstance {
         let world = Arc::clone(&self.world);
 
         let mut transitions: Vec<(usize, usize)> = Vec::new();
+        let mut stood_up: Vec<(MapIdx, u32)> = Vec::new();
         for (idx, p) in self.players.iter_mut().enumerate() {
             if self.tick.wrapping_sub(p.last_input_tick) > timeout || p.fighter.as_ref().is_some_and(|f| !f.is_up()) {
                 p.dir = (0.0, 0.0);
+            }
+            if p.sitting && p.dir != (0.0, 0.0) {
+                p.sitting = false;
+                stood_up.push((p.map, p.profile.character_id));
             }
             let map = world.map(p.map);
             let (mut dx, mut dy) = p.dir;
@@ -696,6 +822,9 @@ impl HubInstance {
             }
         }
 
+        for (map, entity_id) in stood_up {
+            self.broadcast(map, &ServerMsg::Pose { entity_id, pose: pose::STAND }, out);
+        }
         // Descending: a stage exit swap-removes the player, which only moves
         // an already-processed (higher) index into its slot.
         for (idx, portal) in transitions.into_iter().rev() {
@@ -714,6 +843,7 @@ impl HubInstance {
             horde.tick_views(self.tick, self.config.tick_hz, &self.horde_players);
         }
         self.fight(out);
+        self.residents_step(out);
         self.emit_snapshots(out);
     }
 
@@ -756,13 +886,14 @@ impl HubInstance {
                 (p.x, p.y) = *arrival;
                 p.dir = (0.0, 0.0);
                 p.portal_guard = true;
+                p.sitting = false;
                 self.announce_arrival(idx, Some(def.name.clone()), out);
             }
         }
     }
 
-    /// Sends `map_enter` to the player and `player_appeared` to the others on
-    /// that map.
+    /// Sends `map_enter` to the player (then `pose` for everyone sitting
+    /// there) and `player_appeared` to the others on that map.
     fn announce_arrival(&self, idx: usize, via_portal: Option<String>, out: &mut Outgoing) {
         let p = &self.players[idx];
         let others: Vec<&HubPlayer> = self
@@ -770,6 +901,10 @@ impl HubInstance {
             .iter()
             .filter(|o| o.map == p.map && o.profile.user_id != p.profile.user_id)
             .collect();
+        let mut players: Vec<PlayerInfo> = others.iter().map(|o| o.info()).collect();
+        if self.residents.map() == p.map {
+            players.extend(self.residents.iter().map(residents::Resident::info));
+        }
         out.push((
             p.profile.user_id,
             HubEvent::Control(ServerMsg::MapEnter {
@@ -778,9 +913,15 @@ impl HubInstance {
                 x: p.x,
                 y: p.y,
                 via_portal,
-                players: others.iter().map(|o| o.info()).collect(),
+                players,
             }),
         ));
+        let sitting = others.iter().filter(|o| o.sitting).map(|o| o.profile.character_id);
+        let here = self.residents.map() == p.map;
+        let resting = self.residents.iter().filter(|r| here && r.is_sitting()).map(|r| r.id);
+        for entity_id in sitting.chain(resting) {
+            out.push((p.profile.user_id, HubEvent::Control(ServerMsg::Pose { entity_id, pose: pose::SIT })));
+        }
         let info = p.info();
         for o in others {
             out.push((o.profile.user_id, HubEvent::Control(ServerMsg::PlayerAppeared { player: info.clone() })));
@@ -788,14 +929,28 @@ impl HubInstance {
     }
 
     fn emit_snapshots(&mut self, out: &mut Outgoing) {
+        let mut body = std::mem::take(&mut self.snapshot_body);
         for map in 0..self.world.map_count() as MapIdx {
-            let count = self.players.iter().filter(|p| p.map == map).count();
-            if count == 0 {
+            if !self.players.iter().any(|p| p.map == map) {
                 continue;
             }
-            let mut body = SnapshotBody::with_capacity(count);
+            let town = self.residents.map() == map && !self.residents.is_empty();
+            let sight = match self.kind {
+                InstanceKind::Hub { .. } => self.world.map(map).manifest.light_radius,
+                InstanceKind::Stage { .. } => 0.0,
+            };
+            if sight > 0.0 {
+                self.emit_in_sight(map, sight + SIGHT_MARGIN, &mut body, out);
+                continue;
+            }
+            body.clear();
             for p in self.players.iter().filter(|p| p.map == map) {
                 body.push(p.profile.character_id, p.x, p.y, p.facing);
+            }
+            if town {
+                for r in self.residents.iter() {
+                    body.push(r.id, r.x, r.y, r.facing);
+                }
             }
             let horde = self.horde.as_ref().filter(|h| h.map() == map);
             for p in self.players.iter_mut().filter(|p| p.map == map) {
@@ -812,6 +967,28 @@ impl HubInstance {
                 };
                 out.push((p.profile.user_id, HubEvent::Snapshot(frame)));
             }
+        }
+        self.snapshot_body = body;
+    }
+
+    /// Hub maps with a light radius: each recipient's snapshot holds itself
+    /// and the players and residents within `radius` cells of it.
+    fn emit_in_sight(&self, map: MapIdx, radius: f32, body: &mut SnapshotBody, out: &mut Outgoing) {
+        let town = self.residents.map() == map;
+        for me in self.players.iter().filter(|p| p.map == map) {
+            body.clear();
+            body.push(me.profile.character_id, me.x, me.y, me.facing);
+            for o in self.players.iter() {
+                if o.map == map && o.profile.user_id != me.profile.user_id && in_sight(o.x - me.x, o.y - me.y, radius) {
+                    body.push(o.profile.character_id, o.x, o.y, o.facing);
+                }
+            }
+            if town {
+                for r in self.residents.iter().filter(|r| in_sight(r.x - me.x, r.y - me.y, radius)) {
+                    body.push(r.id, r.x, r.y, r.facing);
+                }
+            }
+            out.push((me.profile.user_id, HubEvent::Snapshot(body.frame(me.map_epoch, self.tick, me.last_seq))));
         }
     }
 
@@ -848,6 +1025,8 @@ pub(crate) mod test_support {
             portals,
             bgm: None,
             npcs: Vec::new(),
+            light_radius: 0.0,
+            residents: Default::default(),
         };
         MapData::new(manifest, walk, Heightmap::flat(w, h)).unwrap()
     }
@@ -900,6 +1079,16 @@ pub(crate) mod test_support {
             facing: 4,
             interact_radius: 1.5,
         });
+        town.manifest.npcs.push(crate::world::map::NpcDef {
+            id: "kafra".into(),
+            sprite: "kafra".into(),
+            name: "Kafra Employee".into(),
+            kind: KAFRA.into(),
+            x: 5,
+            y: 1,
+            facing: 0,
+            interact_radius: 1.5,
+        });
         HubWorld::new(vec![town, house], "town").unwrap()
     }
 }
@@ -912,8 +1101,13 @@ mod tests {
     use crate::world::protocol::Snapshot;
     use crate::world::combat::DamageType;
 
-    fn profile(user_id: u32) -> PlayerProfile {
+    pub(super) fn profile(user_id: u32) -> PlayerProfile {
         PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default() }
+    }
+
+    /// Default simulation without town residents.
+    pub(super) fn quiet() -> HubSimConfig {
+        HubSimConfig { residents: 0, ..Default::default() }
     }
 
     fn controls_for(out: &Outgoing, user: u32) -> Vec<ServerMsg> {
@@ -956,7 +1150,7 @@ mod tests {
 
     #[test]
     fn mission_board_requires_standing_next_to_it() {
-        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
         let mut out = Vec::new();
         hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         out.clear();
@@ -998,8 +1192,175 @@ mod tests {
     }
 
     #[test]
+    fn kafra_gives_missions_skill_resets_and_restyles() {
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
+        let mut out = Vec::new();
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        out.clear();
+        hub.skill_reset(1, &mut out);
+        assert!(matches!(controls_for(&out, 1).last(), Some(ServerMsg::HubError { code, .. }) if code == "npc_too_far"));
+        // The Kafra stands at (5,1), two cells south of the spawn.
+        let mut seq = 0;
+        assert!(walk_until(&mut hub, 1, &mut seq, (0.0, -1.0), 40, &mut out, |h| {
+            h.position_of(1).is_some_and(|(_, x, y)| (x - 5.5).hypot(y - 1.5) < 1.0)
+        }));
+        out.clear();
+        hub.interact(1, "kafra", &mut out);
+        match controls_for(&out, 1).last() {
+            Some(ServerMsg::NpcDialog { kind, missions, .. }) => {
+                assert_eq!(kind, KAFRA);
+                assert_eq!(missions.len(), missions::MISSIONS.len());
+            }
+            other => panic!("expected npc_dialog, got {other:?}"),
+        }
+        out.clear();
+        hub.select_mission(1, "poring_island_survival", true, &mut out);
+        assert!(matches!(&out[..], [(1, HubEvent::MissionChosen { public: true, .. })]), "{out:?}");
+        out.clear();
+        hub.skill_reset(1, &mut out);
+        assert!(matches!(&out[..], [(1, HubEvent::SkillResetApproved)]), "{out:?}");
+        out.clear();
+        let look = Look { gender: 0, hair: 3, hair_color: 4, body_color: 5 };
+        hub.restyle(1, look, &mut out);
+        assert!(out.iter().any(|(_, e)| matches!(e, HubEvent::LookChanged(l) if *l == look)), "{out:?}");
+        assert!(gives_missions(MISSION_BOARD) && gives_missions(KAFRA) && !gives_missions(CHANGELOG));
+    }
+
+    fn poses(out: &Outgoing, user: u32) -> Vec<(u32, u8)> {
+        controls_for(out, user)
+            .into_iter()
+            .filter_map(|m| match m {
+                ServerMsg::Pose { entity_id, pose } => Some((entity_id, pose)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sitting_is_broadcast_and_movement_stands_up() {
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
+        let mut out = Vec::new();
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        hub.join(profile(2), Uuid::nil(), None, 0, &mut out);
+        out.clear();
+        hub.set_pose(1, pose::SIT, &mut out);
+        assert_eq!(poses(&out, 1), vec![(101, pose::SIT)]);
+        assert_eq!(poses(&out, 2), vec![(101, pose::SIT)]);
+        hub.set_pose(1, pose::SIT, &mut out);
+        hub.set_pose(1, 7, &mut out);
+        assert_eq!(poses(&out, 2).len(), 1, "repeats and unknown poses are ignored");
+
+        // A newcomer learns who sits, right after map_enter.
+        out.clear();
+        hub.join(profile(3), Uuid::nil(), None, 0, &mut out);
+        let msgs = controls_for(&out, 3);
+        let enter = msgs.iter().position(|m| matches!(m, ServerMsg::MapEnter { .. })).unwrap();
+        assert_eq!(msgs[enter + 1], ServerMsg::Pose { entity_id: 101, pose: pose::SIT });
+        assert_eq!(poses(&out, 3), vec![(101, pose::SIT)]);
+
+        // Seated players do not move; moving stands them up first.
+        let (_, x0, _) = hub.position_of(1).unwrap();
+        out.clear();
+        hub.tick(&mut out);
+        assert!(poses(&out, 2).is_empty());
+        assert_eq!(hub.position_of(1).unwrap().1, x0);
+        hub.input(1, 1, 1.0, 0.0);
+        hub.tick(&mut out);
+        assert_eq!(poses(&out, 2), vec![(101, pose::STAND)]);
+        assert_eq!(poses(&out, 1), vec![(101, pose::STAND)]);
+        assert!(hub.position_of(1).unwrap().1 > x0);
+
+        // Standing up explicitly.
+        hub.set_pose(2, pose::SIT, &mut out);
+        out.clear();
+        hub.set_pose(2, pose::STAND, &mut out);
+        assert_eq!(poses(&out, 1), vec![(102, pose::STAND)]);
+    }
+
+    #[test]
+    fn nobody_sits_on_a_stage_and_portals_reset_sitting() {
+        let mut stage = HubInstance::stage(1, "m1", Arc::new(stage_world()), HubSimConfig::default());
+        let mut out = Vec::new();
+        stage.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        out.clear();
+        stage.set_pose(1, pose::SIT, &mut out);
+        assert!(out.is_empty());
+
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        hub.set_pose(1, pose::SIT, &mut out);
+        let i = hub.find(1).unwrap();
+        hub.players[i].map = 1;
+        hub.players[i].x = 2.5;
+        hub.players[i].y = 2.5;
+        // Simulated walk through the house exit: arriving in town resets it.
+        hub.use_portal(i, 0, &mut out);
+        assert!(!hub.players[i].sitting);
+    }
+
+    #[test]
+    fn emotes_are_broadcast_validated_and_rate_limited() {
+        let mut stage = HubInstance::stage(1, "m1", Arc::new(stage_world()), HubSimConfig::default());
+        let mut out = Vec::new();
+        stage.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        stage.join(profile(2), Uuid::nil(), None, 0, &mut out);
+        out.clear();
+        let emotes = |out: &Outgoing, user: u32| -> Vec<ServerMsg> {
+            controls_for(out, user).into_iter().filter(|m| matches!(m, ServerMsg::Emote { .. })).collect()
+        };
+        stage.emote(1, 128, &mut out);
+        assert!(out.is_empty(), "out of range");
+        stage.emote(1, 27, &mut out);
+        for user in [1, 2] {
+            assert_eq!(emotes(&out, user), vec![ServerMsg::Emote { entity_id: 101, emote: 27 }]);
+        }
+        out.clear();
+        stage.emote(1, 3, &mut out);
+        assert!(out.is_empty(), "too soon");
+        for _ in 0..10 {
+            stage.tick(&mut out);
+        }
+        out.clear();
+        stage.emote(1, 3, &mut out);
+        assert_eq!(emotes(&out, 2), vec![ServerMsg::Emote { entity_id: 101, emote: 3 }], "after 0.5 s");
+    }
+
+    #[test]
+    fn flags_are_broadcast_within_range_and_rate_limited() {
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
+        let mut out = Vec::new();
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        hub.join(profile(2), Uuid::nil(), None, 0, &mut out);
+        out.clear();
+        let (_, x, y) = hub.position_of(1).unwrap();
+        hub.flag(1, 10, x, y, &mut out);
+        hub.flag(1, 1, f32::NAN, y, &mut out);
+        hub.flag(1, 1, x + 41.0, y, &mut out);
+        assert!(out.is_empty(), "bad flag, NaN, too far");
+        hub.flag(1, 9, x + 30.0, y + 20.0, &mut out);
+        for user in [1, 2] {
+            assert_eq!(controls_for(&out, user), vec![ServerMsg::Flag { entity_id: 101, flag: 9, x: x + 30.0, y: y + 20.0 }]);
+        }
+        out.clear();
+        hub.flag(1, 2, x, y, &mut out);
+        for _ in 0..19 {
+            hub.tick(&mut out);
+        }
+        hub.flag(1, 2, x, y, &mut out);
+        assert!(controls_for(&out, 2).iter().all(|m| !matches!(m, ServerMsg::Flag { .. })), "under a second");
+        hub.tick(&mut out);
+        hub.flag(1, 2, x, y, &mut out);
+        assert!(controls_for(&out, 2).iter().any(|m| matches!(m, ServerMsg::Flag { flag: 2, .. })));
+        // Players on another map do not see it.
+        hub.join(profile(3), Uuid::nil(), Some(Arrival { map: "house".into(), x: 3.5, y: 2.5 }), 0, &mut out);
+        out.clear();
+        hub.emote(1, 1, &mut out);
+        assert!(controls_for(&out, 3).is_empty());
+    }
+
+    #[test]
     fn stylist_restyles_hair_and_dyes_but_keeps_gender() {
-        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
         let mut out = Vec::new();
         let her = PlayerProfile { look: Look { gender: 1, hair: 2, hair_color: 0, body_color: 0 }, ..profile(1) };
         hub.join(her, Uuid::nil(), None, 0, &mut out);
@@ -1045,7 +1406,7 @@ mod tests {
 
     #[test]
     fn join_sends_joined_then_map_enter_with_camera() {
-        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
         let mut out = Vec::new();
         assert_eq!(hub.join(profile(1), Uuid::nil(), None, 0, &mut out), JoinOutcome::Joined);
         let msgs = controls_for(&out, 1);
@@ -1062,7 +1423,7 @@ mod tests {
 
     #[test]
     fn walls_block_and_player_slides_along_them() {
-        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
         let mut out = Vec::new();
         hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         let mut seq = 0;
@@ -1081,7 +1442,7 @@ mod tests {
 
     #[test]
     fn input_validation_and_timeout() {
-        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
         let mut out = Vec::new();
         hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         let (_, x0, y0) = hub.position_of(1).unwrap();
@@ -1111,7 +1472,7 @@ mod tests {
 
     #[test]
     fn portal_moves_player_and_guard_prevents_bounce() {
-        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
         let mut out = Vec::new();
         hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         let mut seq = 0;
@@ -1153,7 +1514,7 @@ mod tests {
 
     #[test]
     fn external_portal_is_denied_once() {
-        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
         let mut out = Vec::new();
         hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         let mut seq = 0;
@@ -1170,7 +1531,7 @@ mod tests {
 
     #[test]
     fn visibility_is_per_map() {
-        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
         let mut out = Vec::new();
         hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         out.clear();
@@ -1200,7 +1561,7 @@ mod tests {
 
     #[test]
     fn leave_with_stale_session_is_ignored_and_rejoin_replaces() {
-        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
         let (old, new) = (Uuid::from_u128(1), Uuid::from_u128(2));
         let mut out = Vec::new();
         hub.join(profile(1), old, None, 0, &mut out);
@@ -1297,7 +1658,7 @@ mod tests {
 
     #[test]
     fn hub_join_with_arrival_places_player() {
-        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig::default());
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
         let mut out = Vec::new();
         let arrival = Arrival { map: "town".into(), x: 3.5, y: 3.5 };
         hub.join(profile(1), Uuid::nil(), Some(arrival), 2, &mut out);

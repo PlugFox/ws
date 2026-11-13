@@ -68,6 +68,9 @@ pub enum HubCommand {
     Restyle { user_id: u32, look: Look },
     /// Forget every skill, at a skill master NPC.
     SkillReset { user_id: u32 },
+    Emote { user_id: u32, emote: u8 },
+    Pose { user_id: u32, pose: u8 },
+    Flag { user_id: u32, flag: u8, x: f32, y: f32 },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -364,6 +367,9 @@ pub(crate) async fn run_instance(mut hub: HubInstance, mut commands: mpsc::Recei
                     HubCommand::Resync { user_id } => hub.resync(user_id),
                     HubCommand::Restyle { user_id, look } => hub.restyle(user_id, look, &mut out),
                     HubCommand::SkillReset { user_id } => hub.skill_reset(user_id, &mut out),
+                    HubCommand::Emote { user_id, emote } => hub.emote(user_id, emote, &mut out),
+                    HubCommand::Pose { user_id, pose } => hub.set_pose(user_id, pose, &mut out),
+                    HubCommand::Flag { user_id, flag, x, y } => hub.flag(user_id, flag, x, y, &mut out),
                 }
             }
             _ = interval.tick() => hub.tick(&mut out),
@@ -421,7 +427,8 @@ mod tests {
     }
 
     fn cfg(capacity: usize) -> HubConfig {
-        HubConfig { capacity, base_channels: 1, max_channels: 3, idle_grace: Duration::from_secs(60), ..Default::default() }
+        let sim = HubSimConfig { residents: 0, ..Default::default() };
+        HubConfig { sim, capacity, base_channels: 1, max_channels: 3, idle_grace: Duration::from_secs(60) }
     }
 
     fn outbox() -> (mpsc::Sender<HubEvent>, mpsc::Receiver<HubEvent>) {
