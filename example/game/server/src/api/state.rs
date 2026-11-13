@@ -2,8 +2,10 @@ use crate::auth::JwtManager;
 use crate::config::AppConfig;
 use crate::geo::GeolocationService;
 use crate::session::SessionRegistry;
+use crate::world::combat::SkillBook;
 use crate::world::{HubDirectory, LobbyDirectory};
 use sqlx::{Pool, Sqlite};
+use std::sync::Arc;
 
 /// Shared application state injected into Axum route handlers.
 #[derive(Clone)]
@@ -17,6 +19,8 @@ pub struct AppState {
     pub hub: Option<HubDirectory>,
     /// Mission lobbies and stage instances; `None` without a hub.
     pub lobbies: Option<LobbyDirectory>,
+    /// The skill table (empty without assets): learning and casting.
+    pub skills: Arc<SkillBook>,
 }
 
 impl AppState {
@@ -37,6 +41,7 @@ impl AppState {
             session_registry,
             hub,
             lobbies,
+            skills: Arc::new(SkillBook::default()),
         }
     }
 }

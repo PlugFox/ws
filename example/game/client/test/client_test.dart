@@ -23,7 +23,7 @@ void main() {
   group('protocol', () {
     test('input frame layout matches the server decoder', () {
       final b = encodeInput(7, 1, -0.5);
-      expect(b, hasLength(9));
+      expect(b, hasLength(13));
       final d = ByteData.sublistView(b);
       expect(b[0], 0x02);
       expect(d.getUint32(1, Endian.little), 7);
@@ -66,6 +66,9 @@ void main() {
       expect(toHex(ClientMsg.lobbyJoin('XY')), '46025859');
       expect(toHex(ClientMsg.resync()), '4c');
       expect(toHex(ClientMsg.styleSet(const Look(gender: 1, hair: 5, hairColor: 10, bodyColor: 6))), '4d01050a06');
+      expect(toHex(encodeInput(9, 1, 0, aimX: -8, aimY: 16, slots: 33)), '0209000000ff7f0000f8102100');
+      expect(toHex(ClientMsg.skillLearn('bolt')), '4e04626f6c74');
+      expect(toHex(ClientMsg.skillSlot(4, 'slide')), '500405736c696465');
     });
 
     test('server goldens decode', () {
@@ -135,6 +138,12 @@ void main() {
       expect((miss.target, miss.isMiss, miss.amount), (300, true, 0));
       final pr = ServerMsg.decode(hex('2c1fd8a705e8f505e102'))! as Progress;
       expect((pr.level, pr.exp, pr.expToNext, pr.gained), (31, 87000, 97000, 353));
+      final sk = ServerMsg.decode(hex('2d0c030104626f6c74040204626f6c7400'))! as Skills;
+      expect((sk.level, sk.points), (12, 3));
+      expect(sk.levels, {'bolt': 4});
+      expect(sk.hotbar, ['bolt', '']);
+      final cast = ServerMsg.decode(hex('2eac0204626f6c74a002d0009c04e807'))! as Cast;
+      expect((cast.caster, cast.skill, cast.x, cast.y, cast.castMs, cast.cooldownMs), (300, 'bolt', 10.5, 3.25, 540, 1000));
     });
 
     test('looks come from the REST character JSON', () {

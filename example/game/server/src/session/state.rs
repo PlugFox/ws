@@ -1,3 +1,4 @@
+use crate::world::combat::Loadout;
 use crate::world::protocol::Look;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -18,6 +19,8 @@ pub struct CharacterState {
     pub look: Look,
     /// Held weapon id; empty = the class's starting weapon.
     pub weapon: String,
+    /// Learned skills and the hotbar.
+    pub loadout: Loadout,
 
     pub is_dirty: bool,
     pub last_modified: Instant,
@@ -50,6 +53,7 @@ impl CharacterState {
             last_location_id,
             look,
             weapon: String::new(),
+            loadout: Loadout::default(),
             is_dirty: false,
             last_modified: Instant::now(),
         }
@@ -88,6 +92,15 @@ impl CharacterState {
                 self.is_dirty = true;
                 self.last_modified = Instant::now();
             }
+        }
+    }
+
+    /// Learned skills or hotbar changed, marking state dirty.
+    pub fn set_loadout(&mut self, loadout: Loadout) {
+        if self.loadout != loadout {
+            self.loadout = loadout;
+            self.is_dirty = true;
+            self.last_modified = Instant::now();
         }
     }
 

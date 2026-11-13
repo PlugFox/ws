@@ -128,7 +128,7 @@ fn walk_through_every_house_door_and_back() {
     let mut hub = HubInstance::new(1, Arc::clone(&world), HubSimConfig::default());
     let mut out = Vec::new();
     hub.join(
-        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new() },
+        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default() },
         Uuid::nil(),
         None,
         0,
@@ -222,7 +222,7 @@ fn stage_on_prt_fild08_exits_to_izlude_arrival() {
 
     let mut stage = HubInstance::stage(1, "poring_island_survival", Arc::clone(&stage_world), HubSimConfig::default());
     let mut out = Vec::new();
-    let walker = PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new() };
+    let walker = PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default() };
     stage.join(walker, Uuid::nil(), None, 0, &mut out);
     let path = bfs(field, field.spawn, |cx, cy| exit.contains(cx as f32 + 0.5, cy as f32 + 0.5))
         .expect("the exit is reachable from the stage spawn");
@@ -275,4 +275,24 @@ fn horde_on_prt_fild08_spawns_chases_and_stays_on_walkable_ground() {
     let mut view = game_server::world::horde::view::MonsterView::new(horde.capacity());
     let stats = horde.write_delta(&mut view, &viewer, 75 * hz, &mut buf);
     assert!(stats.spawns > 0 && stats.spawns as usize <= horde.len(), "{stats:?}");
+}
+
+#[test]
+fn baked_skill_table_loads() {
+    use game_server::world::combat::{Class, Loadout, SkillBook};
+    let Some(dir) = dist() else { return };
+    if !dir.join("server/skills.json").exists() {
+        eprintln!("SKIP: skills.json not baked (pipeline/skill_trees.py)");
+        return;
+    }
+    let book = SkillBook::load(&dir).expect("skills.json parses");
+    assert!(book.len() > 20);
+    let castable = book.iter().filter(|(_, s)| s.ready()).count();
+    assert!(castable > 10, "{castable} castable skills");
+    // Every class can open its tree from level 2.
+    for class in Class::ALL {
+        let opener = book.iter().find(|(_, s)| s.class == Some(class) && s.requires.is_empty() && s.tier == 1);
+        let (_, s) = opener.unwrap_or_else(|| panic!("{class:?} has a first skill"));
+        book.can_learn(class, 2, &Loadout::default(), &s.id).unwrap();
+    }
 }

@@ -203,7 +203,7 @@ macro_rules! next_of {
 }
 
 fn input(seq: u32, dx: f32, dy: f32) -> ClientMsg {
-    ClientMsg::Input { seq, dx, dy }
+    ClientMsg::Input { seq, dx, dy, aim: [0, 0], slots: 0 }
 }
 
 fn mission_select(public: bool) -> ClientMsg {

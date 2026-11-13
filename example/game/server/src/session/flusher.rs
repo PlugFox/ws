@@ -30,6 +30,7 @@ impl StateFlusher {
                     &inv_str,
                     &character.last_location_id,
                     character.look,
+                    &serde_json::to_string(&character.loadout).unwrap_or_else(|_| "{}".into()),
                 )
                 .await?;
 

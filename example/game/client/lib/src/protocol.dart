@@ -67,6 +67,8 @@ abstract final class Kind {
   static const playerVitals = 0x2A;
   static const combat = 0x2B;
   static const progress = 0x2C;
+  static const skills = 0x2D;
+  static const cast = 0x2E;
   static const stageJoined = 0x30;
   static const lobbyState = 0x31;
   static const lobbyLeft = 0x32;
@@ -86,6 +88,9 @@ abstract final class Kind {
   static const stageLeave = 0x4B;
   static const resync = 0x4C;
   static const styleSet = 0x4D;
+  static const skillLearn = 0x4E;
+  static const skillReset = 0x4F;
+  static const skillSlot = 0x50;
 
   static const extended = 0xFF;
 }
@@ -276,6 +281,19 @@ abstract final class ClientMsg {
 
   /// Restyle at a stylist NPC (the server keeps the gender).
   static Uint8List styleSet(Look look) => (WireWriter(Kind.styleSet)..look(look)).done();
+
+  /// Spend a skill point on [skill].
+  static Uint8List skillLearn(String skill) => (WireWriter(Kind.skillLearn)..str(skill)).done();
+
+  /// Every skill point back (in town only).
+  static Uint8List skillReset() => _bare(Kind.skillReset);
+
+  /// Put a learned active skill in a hotbar slot ('' clears it).
+  static Uint8List skillSlot(int slot, String skill) =>
+      (WireWriter(Kind.skillSlot)
+            ..u8(slot)
+            ..str(skill))
+          .done();
 }
 
 /// Character appearance: gender (0 male, 1 female), hair style (1..12),
@@ -314,14 +332,18 @@ final class Look {
   String toString() => 'Look($gender, $hair, $hairColor, $bodyColor)';
 }
 
-/// Movement input (client → server): `u8 kind=0x02, u32 seq, i16 dx, i16 dy`
-/// with the direction scaled by 32767.
-Uint8List encodeInput(int seq, double dx, double dy) {
-  final d = ByteData(9)
+/// Input (client → server): `u8 kind=0x02, u32 seq, i16 dx, i16 dy` with the
+/// direction scaled by 32767, then `i8 aimX, i8 aimY` (from the player in
+/// 1/8 m, 0,0 = no aim) and `u16 slots` (skill slots held, bit i = slot i).
+Uint8List encodeInput(int seq, double dx, double dy, {int aimX = 0, int aimY = 0, int slots = 0}) {
+  final d = ByteData(13)
     ..setUint8(0, Kind.input)
     ..setUint32(1, seq, Endian.little)
     ..setInt16(5, (dx.clamp(-1.0, 1.0) * 32767).round(), Endian.little)
-    ..setInt16(7, (dy.clamp(-1.0, 1.0) * 32767).round(), Endian.little);
+    ..setInt16(7, (dy.clamp(-1.0, 1.0) * 32767).round(), Endian.little)
+    ..setInt8(9, aimX.clamp(-127, 127))
+    ..setInt8(10, aimY.clamp(-127, 127))
+    ..setUint16(11, slots & 0xFFFF, Endian.little);
   return d.buffer.asUint8List();
 }
 
@@ -459,6 +481,13 @@ sealed class ServerMsg {
         r.list((r) => Hit._(r.varint(), r.varint(), r.u8())),
       ),
       Kind.progress => Progress(r.varint(), r.varint(), r.varint(), r.varint()),
+      Kind.skills => Skills(
+        r.varint(),
+        r.varint(),
+        {for (final (id, lvl) in r.list((r) => (r.str(), r.u8()))) id: lvl},
+        r.list((r) => r.str()),
+      ),
+      Kind.cast => Cast(r.varint(), r.str(), r.pos(), r.pos(), r.varint(), r.varint()),
       Kind.stageJoined => StageJoined(r.varint(), r.str(), r.varint(), r.varint(), r.list((r) => r.str()), r.f32()),
       Kind.lobbyState => LobbyState(
         LobbyInfo._(
@@ -628,6 +657,32 @@ final class Progress extends ServerMsg {
   final int exp;
   final int expToNext;
   final int gained;
+}
+
+/// The local character's learned skills, unspent points and hotbar.
+final class Skills extends ServerMsg {
+  const Skills(this.level, this.points, this.levels, this.hotbar);
+
+  /// Character level (gates of the tree).
+  final int level;
+  final int points;
+  final Map<String, int> levels;
+
+  /// Skill id per slot; '' = free.
+  final List<String> hotbar;
+}
+
+/// A player starts a skill: telegraph at [x], [y] (cells) for [castMs], then
+/// [cooldownMs]. An empty [skill] cancels the caster's wind-up.
+final class Cast extends ServerMsg {
+  const Cast(this.caster, this.skill, this.x, this.y, this.castMs, this.cooldownMs);
+  final int caster;
+  final String skill;
+  final double x;
+  final double y;
+  final int castMs;
+  final int cooldownMs;
+  bool get isCancel => skill.isEmpty;
 }
 
 final class StageJoined extends ServerMsg {

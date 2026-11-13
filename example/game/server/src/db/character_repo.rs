@@ -20,6 +20,8 @@ pub struct CharacterRecord {
     pub body_color: i64,
     /// Held weapon id (`combat::weapon`); empty = the class's starting weapon.
     pub weapon: String,
+    /// Learned skills and the hotbar (`combat::Loadout` as JSON).
+    pub loadout_json: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -101,7 +103,7 @@ impl CharacterRepo {
             r#"
             SELECT id, user_id, name, archetype, level, base_exp,
                    stats_json, unlocked_skills_json, inventory_json, last_location_id,
-                   gender, hair_style, hair_color, body_color, weapon,
+                   gender, hair_style, hair_color, body_color, weapon, loadout_json,
                    created_at, updated_at
             FROM characters
             WHERE user_id = ?
@@ -122,7 +124,7 @@ impl CharacterRepo {
             r#"
             SELECT id, user_id, name, archetype, level, base_exp,
                    stats_json, unlocked_skills_json, inventory_json, last_location_id,
-                   gender, hair_style, hair_color, body_color, weapon,
+                   gender, hair_style, hair_color, body_color, weapon, loadout_json,
                    created_at, updated_at
             FROM characters
             WHERE id = ?
@@ -144,7 +146,7 @@ impl CharacterRepo {
             r#"
             SELECT id, user_id, name, archetype, level, base_exp,
                    stats_json, unlocked_skills_json, inventory_json, last_location_id,
-                   gender, hair_style, hair_color, body_color, weapon,
+                   gender, hair_style, hair_color, body_color, weapon, loadout_json,
                    created_at, updated_at
             FROM characters
             WHERE user_id = ? AND id = ?
@@ -166,6 +168,7 @@ impl CharacterRepo {
         inventory_json: &str,
         last_location_id: &str,
         look: Look,
+        loadout_json: &str,
     ) -> Result<(), sqlx::Error> {
         let char_id_i64 = character_id as i64;
         let level_i64 = level as i64;
@@ -184,6 +187,7 @@ impl CharacterRepo {
                 hair_style = ?,
                 hair_color = ?,
                 body_color = ?,
+                loadout_json = ?,
                 updated_at = datetime('now')
             WHERE id = ?
             "#,
@@ -198,6 +202,7 @@ impl CharacterRepo {
         .bind(i64::from(look.hair))
         .bind(i64::from(look.hair_color))
         .bind(i64::from(look.body_color))
+        .bind(loadout_json)
         .bind(char_id_i64)
         .execute(pool)
         .await?;

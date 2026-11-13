@@ -182,6 +182,14 @@ final class HubSession {
 
   final _keys = <String>{};
   int _stopSends = 0;
+
+  /// Own skills (`skills` message) and the last pointer position (aim).
+  Skills? _skills;
+  (double, double)? _pointer;
+
+  /// Slot keys: Q E R F Space, with Shift the second page; digits 1–0 too.
+  static const _slotKeys = ['KeyQ', 'KeyE', 'KeyR', 'KeyF', 'Space'];
+  static const _slotCaptions = ['Q', 'E', 'R', 'F', '␣', '⇧Q', '⇧E', '⇧R', '⇧F', '⇧␣'];
   double _acc = 0;
   double _lastFrame = 0;
   double _lastRender = 0;
@@ -219,6 +227,15 @@ final class HubSession {
     );
     view.onUiEvent(_onUiEvent.toJS);
     _loadSettings();
+    view.loadSkills('$assetsBase/client/skills').toDart.then((_) => _renderSkills()).catchError((Object e) {
+      web.console.warn('skills unavailable: $e'.toJS);
+    });
+    web.window.addEventListener(
+      'pointermove',
+      ((web.PointerEvent e) {
+        _pointer = (e.clientX.toDouble(), e.clientY.toDouble());
+      }).toJS,
+    );
     web.window.addEventListener('keydown', _onKeyDown.toJS);
     web.window.addEventListener('keyup', _onKeyUp.toJS);
     web.window.addEventListener('blur', ((web.Event _) => _keys.clear()).toJS);
@@ -272,11 +289,16 @@ final class HubSession {
         _onVitals(v);
       case final Combat c:
         _onCombat(c);
+      case final Skills s:
+        _skills = s;
+        _renderSkills();
+      case final Cast c:
+        _onCast(c);
       case final Progress pr:
         final before = _progress?.level;
         _progress = pr;
         if (before != null && pr.level > before) {
-          view.toast('Level up! Lv ${pr.level} ${_title(_myArchetype, pr.level)}');
+          view.toast('Level up! Lv ${pr.level} ${_title(_myArchetype, pr.level)} — K: skills');
         }
         _renderStatus();
       case Pong():
@@ -667,7 +689,11 @@ final class HubSession {
     // `is` on JS interop types checks only the Dart representation; use isA.
     if (e.target.isA<web.HTMLInputElement>()) return;
     _keys.add(e.code);
-    if (e.code == 'KeyF' && !e.repeat) _interactNearest();
+    // On a stage F is a skill slot; in town it talks to the nearest NPC.
+    if (e.code == 'KeyF' && !e.repeat && !_inStage) _interactNearest();
+    if (_inStage && (e.code == 'Space' || e.code == 'Tab')) e.preventDefault();
+    if (e.code == 'KeyK' && !e.repeat) view.toggleSkillTree(-1);
+    if (e.code == 'Escape') view.toggleSkillTree(0);
     if (e.code == 'F10') {
       e.preventDefault();
       _toggleSettings();
@@ -847,7 +873,69 @@ final class HubSession {
       case 'style_cancel':
         _stylist = null;
         _styling = false;
+      case 'skill_learn':
+        _send(ClientMsg.skillLearn(e['skill']! as String));
+      case 'skill_slot':
+        _send(ClientMsg.skillSlot((e['slot']! as num).toInt(), e['skill']! as String));
     }
+  }
+
+  // ---------------------------------------------------------------- skills
+
+  void _renderSkills() {
+    final s = _skills;
+    if (s == null) return;
+    view.setSkills(
+      jsonEncode({
+        'points': s.points,
+        'levels': s.levels,
+        'hotbar': s.hotbar,
+        'level': s.level,
+        'cls': _myArchetype,
+        'keys': _slotCaptions,
+      }),
+    );
+  }
+
+  void _onCast(Cast c) {
+    final own = c.caster == _me;
+    view.castSkill(
+      jsonEncode({
+        'caster': c.caster,
+        'skill': c.skill,
+        'x': c.x,
+        'y': c.y,
+        'castMs': c.castMs,
+        'cooldownMs': c.cooldownMs,
+        'level': own ? (_skills?.levels[c.skill] ?? 1) : 1,
+        'own': own,
+      }),
+    );
+  }
+
+  /// Skill slots held this tick (bit i = slot i); only on a stage, standing
+  /// up, with no window open.
+  int _heldSlots() {
+    if (!_inStage || _myState != 0 || view.dialogOpen()) return 0;
+    final shift = _keys.contains('ShiftLeft') || _keys.contains('ShiftRight');
+    var bits = 0;
+    for (var i = 0; i < _slotKeys.length; i++) {
+      if (_keys.contains(_slotKeys[i])) bits |= 1 << (shift ? i + 5 : i);
+    }
+    for (var i = 0; i < 10; i++) {
+      if (_keys.contains('Digit${(i + 1) % 10}')) bits |= 1 << i;
+    }
+    return bits;
+  }
+
+  /// Pointer on the ground relative to the player, in 1/8 m (0,0 = none).
+  (int, int) _aim() {
+    final ptr = _pointer, p = _predictor;
+    if (ptr == null || p == null) return (0, 0);
+    final g = view.pickGround(ptr.$1, ptr.$2);
+    if (g == null) return (0, 0);
+    // Cells are 0.5 m: 4 aim units per cell.
+    return (((g.$1 - p.x) * 4).round().clamp(-127, 127), ((g.$2 - p.y) * 4).round().clamp(-127, 127));
   }
 
   // ---------------------------------------------------------------- settings
@@ -980,11 +1068,13 @@ final class HubSession {
     // Downed or fallen: the server ignores movement; do not predict any.
     final (dx, dy) = _myState == 0 ? _inputDir() : (0.0, 0.0);
     final moving = dx != 0 || dy != 0;
-    if (moving) _stopSends = 3;
-    if (moving || _stopSends > 0) {
-      if (!moving) _stopSends--;
+    final slots = _heldSlots();
+    if (moving || slots != 0) _stopSends = 3;
+    if (moving || slots != 0 || _stopSends > 0) {
+      if (!moving && slots == 0) _stopSends--;
+      final (ax, ay) = slots != 0 ? _aim() : (0, 0);
       final seq = p.step(dx, dy);
-      _ws.push(encodeInput(seq, dx, dy)).ignore();
+      _ws.push(encodeInput(seq, dx, dy, aimX: ax, aimY: ay, slots: slots)).ignore();
     } else {
       p.idle();
     }

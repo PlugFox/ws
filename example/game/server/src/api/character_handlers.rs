@@ -3,7 +3,7 @@ use super::state::AppState;
 use crate::db::character_repo::{CharacterRecord, CharacterRepo};
 use crate::world::protocol::Look;
 use crate::session::CharacterState;
-use crate::world::combat::{self, Class, Weapon};
+use crate::world::combat::{self, Class, Loadout, Weapon};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -287,6 +287,12 @@ pub async fn select_character(
         record.look(),
     );
     char_state.weapon = record.weapon.clone();
+    let mut loadout: Loadout = serde_json::from_str(&record.loadout_json).unwrap_or_default();
+    // Without a skill table (no assets) the stored loadout is kept as is.
+    if let (Some(class), false) = (Class::from_id(&record.archetype), state.skills.is_empty()) {
+        state.skills.sanitize(class, &mut loadout);
+    }
+    char_state.loadout = loadout;
 
     if let Some(active_session) = state.session_registry.get(auth.user_id) {
         let mut char_lock = active_session.character.write().await;

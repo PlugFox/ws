@@ -10,6 +10,7 @@ pub mod dice;
 pub mod exp;
 pub mod monster;
 pub mod rules;
+pub mod skills;
 pub mod weapon;
 
 pub use class::{Class, Save};
@@ -17,6 +18,7 @@ pub use dice::{Dice, Rng};
 pub use exp::{exp_to_next, kill_value, level_diff_percent, share_kill};
 pub use monster::{Archetype, MonsterBlock, Size};
 pub use rules::{AttackOutcome, Damage, DamageType, Element, Affinity};
+pub use skills::{Loadout, SkillBook};
 pub use weapon::{Reach, Weapon, WeaponKind};
 
 /// Highest character level.

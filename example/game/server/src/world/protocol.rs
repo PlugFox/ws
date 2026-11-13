@@ -35,6 +35,10 @@
 //!                      high nibble = damage type; monsters are
 //!                      `MONSTER_ENTITY_BASE + slot`
 //! 0x2C PROGRESS        var level, var exp, var exp_to_next, var gained
+//! 0x2D SKILLS          var level, var points, var n, n × {str skill, u8 level},
+//!                      var m, m × str slot skill (empty = free)
+//! 0x2E CAST            var caster, str skill (empty = cancel), pos x, pos y,
+//!                      var cast_ms, var cooldown_ms
 //! 0x30 STAGE_JOINED    var stage_id, str mission, var tick_rate, var entity_id,
 //!                      var n, n × str monster kind, f32 light_radius
 //! 0x31 LOBBY_STATE     var lobby_id, str code, mission, bool public,
@@ -57,7 +61,10 @@
 //! Client → server:
 //!
 //! ```text
-//! 0x02 INPUT           u32 seq, i16 dx, i16 dy (direction × 32767)
+//! 0x02 INPUT           u32 seq, i16 dx, i16 dy (direction × 32767),
+//!                      i8 aim_x, i8 aim_y (from the player, 1/8 m; 0,0 = none),
+//!                      u16 slots (skill slots pressed; bit i = slot i)
+//!                      (the 9-byte form without aim and slots is accepted)
 //! 0x40 PING
 //! 0x41 HUB_JOIN        var channel + 1 (0 = server picks)
 //! 0x42 HUB_LEAVE
@@ -72,6 +79,9 @@
 //! 0x4B STAGE_LEAVE
 //! 0x4C RESYNC          the last monster delta did not apply: send a keyframe
 //! 0x4D STYLE_SET       look (at a stylist; the gender is kept)
+//! 0x4E SKILL_LEARN     str skill (one level up)
+//! 0x4F SKILL_RESET     (in the hub only: every point back)
+//! 0x50 SKILL_SLOT      u8 slot, str skill (empty = clear)
 //! ```
 //!
 //! `map_epoch` bumps on every map change of the recipient; the client drops
@@ -92,7 +102,9 @@ pub const STAGE_SNAPSHOT_KIND: u8 = 0x03;
 pub const SNAPSHOT_HEADER_LEN: usize = 13;
 pub const SNAPSHOT_ENTRY_LEN: usize = 9;
 /// `u8 kind, u32 seq, i16 dx, i16 dy`.
-pub const INPUT_LEN: usize = 9;
+pub const INPUT_LEN: usize = 13;
+/// The first INPUT form, without aim and slots.
+pub const INPUT_LEN_V1: usize = 9;
 
 /// Message kinds (first byte).
 pub mod kind {
@@ -113,6 +125,8 @@ pub mod kind {
     pub const PLAYER_VITALS: u8 = 0x2A;
     pub const COMBAT: u8 = 0x2B;
     pub const PROGRESS: u8 = 0x2C;
+    pub const SKILLS: u8 = 0x2D;
+    pub const CAST: u8 = 0x2E;
     pub const STAGE_JOINED: u8 = 0x30;
     pub const LOBBY_STATE: u8 = 0x31;
     pub const LOBBY_LEFT: u8 = 0x32;
@@ -132,6 +146,9 @@ pub mod kind {
     pub const STAGE_LEAVE: u8 = 0x4B;
     pub const RESYNC: u8 = 0x4C;
     pub const STYLE_SET: u8 = 0x4D;
+    pub const SKILL_LEARN: u8 = 0x4E;
+    pub const SKILL_RESET: u8 = 0x4F;
+    pub const SKILL_SLOT: u8 = 0x50;
 }
 
 /// Character appearance. The dyes index the baked palette tables of the
@@ -428,6 +445,12 @@ pub enum ServerMsg {
     /// The recipient's level and experience into it; `gained` since the
     /// last progress message (kills, or negative-free penalties as 0).
     Progress { level: u32, exp: u64, exp_to_next: u64, gained: u64 },
+    /// The recipient's learned skills, unspent points and hotbar (on join
+    /// and after every change).
+    Skills { level: u32, points: u32, skills: Vec<(String, u8)>, hotbar: Vec<String> },
+    /// A player starts a skill: the telegraph at `x, y` for `cast_ms`, then
+    /// `cooldown_ms`. An empty `skill` cancels the caster's wind-up.
+    Cast { caster: u32, skill: String, x: f32, y: f32, cast_ms: u32, cooldown_ms: u32 },
     /// The recipient joined a stage instance; `map_enter` follows. Sent
     /// instead of `hub_joined` (the hub membership has ended).
     StageJoined {
@@ -560,6 +583,25 @@ impl ServerMsg {
                 b.put_var(*exp_to_next);
                 b.put_var(*gained);
             }
+            ServerMsg::Skills { level, points, skills, hotbar } => {
+                b.put_u8(kind::SKILLS);
+                b.put_var((*level).into());
+                b.put_var((*points).into());
+                put_list(&mut b, skills, |b, (id, lvl)| {
+                    b.put_str(id);
+                    b.put_u8(*lvl);
+                });
+                put_list(&mut b, hotbar, |b, id| b.put_str(id));
+            }
+            ServerMsg::Cast { caster, skill, x, y, cast_ms, cooldown_ms } => {
+                b.put_u8(kind::CAST);
+                b.put_var((*caster).into());
+                b.put_str(skill);
+                b.put_pos(*x);
+                b.put_pos(*y);
+                b.put_var((*cast_ms).into());
+                b.put_var((*cooldown_ms).into());
+            }
             ServerMsg::StageJoined { stage_id, mission, tick_rate, entity_id, monsters, light_radius } => {
                 b.put_u8(kind::STAGE_JOINED);
                 b.put_var((*stage_id).into());
@@ -658,6 +700,20 @@ impl ServerMsg {
                 hits: read_list(&mut r, |r| Some(HitEvent { target: r.var32()?, amount: r.var32()?, flags: r.u8()? }))?,
             },
             kind::PROGRESS => ServerMsg::Progress { level: r.var32()?, exp: r.var()?, exp_to_next: r.var()?, gained: r.var()? },
+            kind::SKILLS => ServerMsg::Skills {
+                level: r.var32()?,
+                points: r.var32()?,
+                skills: read_list(&mut r, |r| Some((r.str()?, r.u8()?)))?,
+                hotbar: read_list(&mut r, |r| r.str())?,
+            },
+            kind::CAST => ServerMsg::Cast {
+                caster: r.var32()?,
+                skill: r.str()?,
+                x: r.pos()?,
+                y: r.pos()?,
+                cast_ms: r.var32()?,
+                cooldown_ms: r.var32()?,
+            },
             kind::STAGE_JOINED => ServerMsg::StageJoined {
                 stage_id: r.var32()?,
                 mission: r.str()?,
@@ -697,7 +753,9 @@ pub enum ClientMsg {
     HubChannels,
     /// Movement intent: desired direction, length ≤ 1 (longer is normalised).
     /// `seq` must increase; older or repeated values are ignored.
-    Input { seq: u32, dx: f32, dy: f32 },
+    /// `aim`: where the player points, relative to them, in 1/8 m (0,0 =
+    /// no aim); `slots`: skill slots pressed this tick (bit i = slot i).
+    Input { seq: u32, dx: f32, dy: f32, aim: [i8; 2], slots: u16 },
     /// Talk to an NPC on the current map; must be within its radius.
     NpcInteract { npc: String },
     /// Pick a mission at a mission board the player is standing at: joins
@@ -718,6 +776,12 @@ pub enum ClientMsg {
     Resync,
     /// Restyle at a stylist NPC (hair style and dyes; the gender is kept).
     StyleSet { look: Look },
+    /// Spend a skill point on `skill`.
+    SkillLearn { skill: String },
+    /// Take every skill point back (hub only).
+    SkillReset,
+    /// Put a learned active skill in a hotbar slot (empty = clear).
+    SkillSlot { slot: u8, skill: String },
 }
 
 /// Why a client frame was rejected.
@@ -740,11 +804,14 @@ impl ClientMsg {
             }
             ClientMsg::HubLeave => b.put_u8(kind::HUB_LEAVE),
             ClientMsg::HubChannels => b.put_u8(kind::HUB_CHANNELS_REQ),
-            ClientMsg::Input { seq, dx, dy } => {
+            ClientMsg::Input { seq, dx, dy, aim, slots } => {
                 b.put_u8(INPUT_KIND);
                 b.put_u32_le(*seq);
                 b.put_i16_le((dx.clamp(-1.0, 1.0) * 32767.0).round() as i16);
                 b.put_i16_le((dy.clamp(-1.0, 1.0) * 32767.0).round() as i16);
+                b.put_i8(aim[0]);
+                b.put_i8(aim[1]);
+                b.put_u16_le(*slots);
             }
             ClientMsg::NpcInteract { npc } => {
                 b.put_u8(kind::NPC_INTERACT);
@@ -775,6 +842,16 @@ impl ClientMsg {
                 b.put_u8(kind::STYLE_SET);
                 look.put(&mut b);
             }
+            ClientMsg::SkillLearn { skill } => {
+                b.put_u8(kind::SKILL_LEARN);
+                b.put_str(skill);
+            }
+            ClientMsg::SkillReset => b.put_u8(kind::SKILL_RESET),
+            ClientMsg::SkillSlot { slot, skill } => {
+                b.put_u8(kind::SKILL_SLOT);
+                b.put_u8(*slot);
+                b.put_str(skill);
+            }
         }
         b.freeze()
     }
@@ -799,7 +876,8 @@ impl ClientMsg {
                     let seq = r.u32()?;
                     let dx = r.u16()? as i16 as f32 / 32767.0;
                     let dy = r.u16()? as i16 as f32 / 32767.0;
-                    ClientMsg::Input { seq, dx, dy }
+                    let (aim, slots) = if r.is_empty() { ([0, 0], 0) } else { ([r.i8()?, r.i8()?], r.u16()?) };
+                    ClientMsg::Input { seq, dx, dy, aim, slots }
                 }
                 kind::NPC_INTERACT => ClientMsg::NpcInteract { npc: r.str()? },
                 kind::MISSION_SELECT => ClientMsg::MissionSelect { mission: r.str()?, public: r.bool()? },
@@ -811,10 +889,13 @@ impl ClientMsg {
                 kind::STAGE_LEAVE => ClientMsg::StageLeave,
                 kind::RESYNC => ClientMsg::Resync,
                 kind::STYLE_SET => ClientMsg::StyleSet { look: Look::read(r)? },
+                kind::SKILL_LEARN => ClientMsg::SkillLearn { skill: r.str()? },
+                kind::SKILL_RESET => ClientMsg::SkillReset,
+                kind::SKILL_SLOT => ClientMsg::SkillSlot { slot: r.u8()?, skill: r.str()? },
                 _ => return None,
             })
         };
-        let known = matches!(k, INPUT_KIND | kind::PING..=kind::STYLE_SET);
+        let known = matches!(k, INPUT_KIND | kind::PING..=kind::SKILL_SLOT);
         if !known {
             return Err(Unknown);
         }
@@ -965,7 +1046,10 @@ mod tests {
             ClientMsg::HubJoin { channel: Some(2) },
             ClientMsg::HubLeave,
             ClientMsg::HubChannels,
-            ClientMsg::Input { seq: 7, dx: 1.0, dy: -0.5 },
+            ClientMsg::Input { seq: 7, dx: 1.0, dy: -0.5, aim: [-12, 100], slots: 0b10_0000_0101 },
+            ClientMsg::SkillLearn { skill: "bolt".into() },
+            ClientMsg::SkillReset,
+            ClientMsg::SkillSlot { slot: 4, skill: "slide".into() },
             ClientMsg::NpcInteract { npc: "board".into() },
             ClientMsg::MissionSelect { mission: "m".into(), public: false },
             ClientMsg::LobbyJoin { code: "AB2CD".into() },
@@ -980,14 +1064,17 @@ mod tests {
         for m in all {
             let b = m.encode();
             match (ClientMsg::decode(&b).unwrap(), &m) {
-                (ClientMsg::Input { seq, dx, dy }, ClientMsg::Input { seq: s, dx: x, dy: y }) => {
-                    assert_eq!(seq, *s);
+                (ClientMsg::Input { seq, dx, dy, aim, slots }, ClientMsg::Input { seq: s, dx: x, dy: y, aim: a, slots: k }) => {
+                    assert_eq!((seq, aim, slots), (*s, *a, *k));
                     assert!((dx - x).abs() < 1e-4 && (dy - y).abs() < 1e-4);
                 }
                 (got, want) => assert_eq!(&got, want),
             }
         }
-        assert_eq!(ClientMsg::Input { seq: 1, dx: 0.0, dy: 0.0 }.encode().len(), INPUT_LEN);
+        let input = ClientMsg::Input { seq: 1, dx: 0.0, dy: 0.0, aim: [0, 0], slots: 0 }.encode();
+        assert_eq!(input.len(), INPUT_LEN);
+        assert_eq!(ClientMsg::decode(&input[..INPUT_LEN_V1]), Ok(ClientMsg::Input { seq: 1, dx: 0.0, dy: 0.0, aim: [0, 0], slots: 0 }), "the first form still decodes");
+        assert_eq!(ClientMsg::decode(&input[..INPUT_LEN - 1]), Err(ClientDecodeError::Malformed));
         assert_eq!(ClientMsg::Ping.encode().len(), 1);
     }
 
@@ -1060,6 +1147,9 @@ mod tests {
                 hits: vec![HitEvent { target: MONSTER_ENTITY_BASE + 7, amount: 13, flags: hit::CRITICAL | hit::KILL | 0x30 }],
             },
             ServerMsg::Progress { level: 31, exp: 87_000, exp_to_next: 97_000, gained: 353 },
+            ServerMsg::Skills { level: 12, points: 3, skills: vec![("bolt".into(), 4), ("slide".into(), 1)], hotbar: vec!["bolt".into(), String::new()] },
+            ServerMsg::Cast { caster: 300, skill: "bolt".into(), x: 10.5, y: 3.25, cast_ms: 540, cooldown_ms: 1000 },
+            ServerMsg::Cast { caster: 300, skill: String::new(), x: 0.0, y: 0.0, cast_ms: 0, cooldown_ms: 0 },
             ServerMsg::StageJoined {
                 stage_id: 4,
                 mission: mission.id.into(),
@@ -1191,6 +1281,11 @@ pub(crate) mod golden {
                 .encode(),
             ),
             ("progress", ServerMsg::Progress { level: 31, exp: 87_000, exp_to_next: 97_000, gained: 353 }.encode()),
+            (
+                "skills",
+                ServerMsg::Skills { level: 12, points: 3, skills: vec![("bolt".into(), 4)], hotbar: vec!["bolt".into(), String::new()] }.encode(),
+            ),
+            ("cast", ServerMsg::Cast { caster: 300, skill: "bolt".into(), x: 10.5, y: 3.25, cast_ms: 540, cooldown_ms: 1000 }.encode()),
         ]
     }
 
@@ -1203,6 +1298,9 @@ pub(crate) mod golden {
             ("lobby_join", ClientMsg::LobbyJoin { code: "XY".into() }.encode()),
             ("resync", ClientMsg::Resync.encode()),
             ("style_set", ClientMsg::StyleSet { look: Look { gender: 1, hair: 5, hair_color: 10, body_color: 6 } }.encode()),
+            ("input", ClientMsg::Input { seq: 9, dx: 1.0, dy: 0.0, aim: [-8, 16], slots: 0b10_0001 }.encode()),
+            ("skill_learn", ClientMsg::SkillLearn { skill: "bolt".into() }.encode()),
+            ("skill_slot", ClientMsg::SkillSlot { slot: 4, skill: "slide".into() }.encode()),
         ]
     }
 
@@ -1250,6 +1348,8 @@ pub(crate) mod golden {
         ("player_vitals", "2aac02287a07830101"),
         ("combat", "2b01ac02060287808004c80115ac020002"),
         ("progress", "2c1fd8a705e8f505e102"),
+        ("skills", "2d0c030104626f6c74040204626f6c7400"),
+        ("cast", "2eac0204626f6c74a002d0009c04e807"),
         ("hub_join_2", "4103"),
         ("hub_join_any", "4100"),
         ("mission_select", "45026d3101"),
@@ -1257,6 +1357,9 @@ pub(crate) mod golden {
         ("lobby_join", "46025859"),
         ("resync", "4c"),
         ("style_set", "4d01050a06"),
+        ("input", "0209000000ff7f0000f8102100"),
+        ("skill_learn", "4e04626f6c74"),
+        ("skill_slot", "500405736c696465"),
         ("stage_snapshot", "030400640000000c000000010009000000600080000201040e05018002000510f000fe0300808d01ffff00007f0103"),
     ];
 

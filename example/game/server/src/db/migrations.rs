@@ -83,6 +83,10 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
     if !columns.iter().any(|c| c == "weapon") {
         sqlx::query("ALTER TABLE characters ADD COLUMN weapon TEXT NOT NULL DEFAULT ''").execute(pool).await?;
     }
+    // Learned skill levels and the hotbar (COMBAT.md §1.4, §4.2).
+    if !columns.iter().any(|c| c == "loadout_json") {
+        sqlx::query("ALTER TABLE characters ADD COLUMN loadout_json TEXT NOT NULL DEFAULT '{}'").execute(pool).await?;
+    }
 
     // Class rework (COMBAT.md §1.2): the first archetypes map to the nearest
     // playable line. Idempotent.

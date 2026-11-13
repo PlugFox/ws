@@ -85,6 +85,20 @@ extension type GameView._(JSObject _) implements JSObject {
   /// Closes the character select or stylist screen.
   external void closeScreen();
 
+  /// Skill table and icons for the hotbar and the tree (`<baseUrl>/tree.json`).
+  external JSPromise<JSAny?> loadSkills(String baseUrl);
+
+  /// Own skills JSON `{points, levels, hotbar, level, cls, keys}`; '' hides
+  /// the hotbar. Events: `skill_learn`, `skill_slot`, `skill_tree`.
+  external void setSkills(String json);
+
+  /// A cast starts (telegraph; `own` also drives the cast bar and cooldown):
+  /// `{caster, skill, x, y, castMs, cooldownMs, level, own}`.
+  external void castSkill(String json);
+
+  /// Opens (1), closes (0) or toggles (-1) the skill tree; returns whether it is open.
+  external bool toggleSkillTree(int mode);
+
   /// Passes the rows as a view on the same buffer: under dart2js and
   /// dart2wasm (with a JS-backed list) this crosses without a copy.
   void upsertEntities(Float32List rows, int count) {

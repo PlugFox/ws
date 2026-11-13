@@ -1,5 +1,6 @@
 use super::state::AppState;
 use crate::session::{ActiveSession, SessionSignal, StateFlusher};
+use crate::world::combat::{Class, Loadout};
 use crate::world::map::LocationKind;
 use crate::world::protocol::ClientDecodeError;
 use crate::world::{
@@ -265,6 +266,7 @@ impl Conn {
             level: ch.level,
             exp: ch.base_exp,
             weapon: ch.weapon.clone(),
+            loadout: ch.loadout.clone(),
         })
     }
 
@@ -460,12 +462,20 @@ impl Conn {
 
         match msg {
             ClientMsg::Ping => vec![Out::Msg(ServerMsg::Pong { ts: chrono::Utc::now().timestamp_millis() })],
-            ClientMsg::Input { seq, dx, dy } => {
+            ClientMsg::Input { seq, dx, dy, aim, slots } => {
                 if let Some(link) = &self.link {
                     // Inputs are latest-wins; dropping one under backpressure is fine.
-                    let _ = link.commands.try_send(HubCommand::Input { user_id, seq, dx, dy });
+                    let _ = link.commands.try_send(HubCommand::Input { user_id, seq, dx, dy, aim, slots });
                 }
                 Vec::new()
+            }
+            ClientMsg::SkillLearn { skill } => self.change_loadout(SkillChange::Learn(skill)).await,
+            ClientMsg::SkillSlot { slot, skill } => self.change_loadout(SkillChange::Slot(slot, skill)).await,
+            ClientMsg::SkillReset => {
+                if matches!(self.link, Some(Link { place: Place::Stage { .. }, .. })) {
+                    return vec![hub_error("not_in_hub", "skills are reset in town")];
+                }
+                self.change_loadout(SkillChange::Reset).await
             }
             ClientMsg::Resync => {
                 if let Some(link) = &self.link {
@@ -533,6 +543,52 @@ impl Conn {
                 Some(l) if l.leave(user_id, session_id, "left") => Vec::new(),
                 _ => vec![Out::Msg(LobbyError::NotInLobby.to_msg())],
             },
+        }
+    }
+}
+
+enum SkillChange {
+    Learn(String),
+    Slot(u8, String),
+    Reset,
+}
+
+impl Conn {
+    /// Learns, slots or resets on the session's character, then hands the
+    /// new loadout to the current hub or stage (which answers `skills`).
+    async fn change_loadout(&mut self, change: SkillChange) -> Vec<Out> {
+        let book = Arc::clone(&self.state.skills);
+        let user_id = self.user_id();
+        let loadout = {
+            let mut guard = self.session.character.write().await;
+            let Some(ch) = guard.as_mut() else {
+                return vec![hub_error("no_character", "select a character first")];
+            };
+            let Some(class) = Class::from_id(&ch.archetype) else {
+                return vec![hub_error("wrong_class", "this class has no skills")];
+            };
+            let mut l = ch.loadout.clone();
+            let result = match change {
+                SkillChange::Learn(id) => book.learn(class, ch.level, &mut l, &id).map(|_| ()),
+                SkillChange::Slot(slot, id) => book.set_slot(&mut l, slot as usize, &id),
+                SkillChange::Reset => {
+                    l = Loadout::default();
+                    Ok(())
+                }
+            };
+            if let Err(e) = result {
+                return vec![hub_error(e.code(), e.to_string())];
+            }
+            ch.set_loadout(l.clone());
+            l
+        };
+        match &self.link {
+            Some(link) => {
+                // Must not be lost: the client waits for `skills`.
+                let _ = link.commands.send(HubCommand::Loadout { user_id, loadout }).await;
+                Vec::new()
+            }
+            None => Vec::new(),
         }
     }
 }

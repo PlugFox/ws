@@ -76,7 +76,20 @@ pub async fn create_app(config: AppConfig) -> Result<(Router, AppState), Box<dyn
         },
         _ => None,
     };
-    create_app_with_monsters(config, world, stages, monsters).await
+    let skills = match &config.assets_dir {
+        Some(dir) => match world::combat::SkillBook::load(dir) {
+            Ok(b) => {
+                info!("Loaded {} skills", b.len());
+                b
+            }
+            Err(err) => {
+                warn!("No skills: {err}");
+                world::combat::SkillBook::default()
+            }
+        },
+        None => world::combat::SkillBook::default(),
+    };
+    create_app_with_skills(config, world, stages, monsters, skills).await
 }
 
 /// Same as [`create_app`] with an already-built hub world and no stage maps
@@ -106,6 +119,18 @@ pub async fn create_app_with_monsters(
     stages: Vec<HubWorld>,
     monsters: Option<world::horde::catalog::MonsterCatalog>,
 ) -> Result<(Router, AppState), Box<dyn std::error::Error + Send + Sync>> {
+    create_app_with_skills(config, world, stages, monsters, world::combat::SkillBook::default()).await
+}
+
+/// Same as [`create_app_with_monsters`] with a skill table.
+pub async fn create_app_with_skills(
+    config: AppConfig,
+    world: Option<HubWorld>,
+    stages: Vec<HubWorld>,
+    monsters: Option<world::horde::catalog::MonsterCatalog>,
+    skills: world::combat::SkillBook,
+) -> Result<(Router, AppState), Box<dyn std::error::Error + Send + Sync>> {
+    let skills = Arc::new(skills);
     let pool = init_db(&config.database_url).await?;
 
     let jwt_manager = JwtManager::new(&config.jwt_secret, config.access_token_ttl);
@@ -125,7 +150,7 @@ pub async fn create_app_with_monsters(
         dir
     });
     let lobbies = hub.as_ref().map(|_| {
-        let mut stages = StageDirectory::new(stages, config.stages.clone());
+        let mut stages = StageDirectory::new(stages, config.stages.clone()).with_skills(Arc::clone(&skills));
         if let Some(m) = monsters {
             stages = stages.with_monsters(m);
         }
@@ -133,7 +158,7 @@ pub async fn create_app_with_monsters(
         LobbyDirectory::new(stages)
     });
 
-    let state = AppState::new(
+    let mut state = AppState::new(
         config,
         pool,
         jwt_manager,
@@ -142,6 +167,7 @@ pub async fn create_app_with_monsters(
         hub,
         lobbies,
     );
+    state.skills = skills;
 
     let router = build_router(state.clone());
     info!("Game server initialized successfully.");

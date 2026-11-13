@@ -18,6 +18,22 @@ pub enum DamageType {
 }
 
 impl DamageType {
+    /// The skill table's names (`skills.json`).
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "physical" => DamageType::Physical,
+            "fire" => DamageType::Fire,
+            "cold" => DamageType::Cold,
+            "lightning" => DamageType::Lightning,
+            "earth" => DamageType::Earth,
+            "poison" => DamageType::Poison,
+            "radiant" => DamageType::Radiant,
+            "necrotic" => DamageType::Necrotic,
+            "force" => DamageType::Force,
+            _ => return None,
+        })
+    }
+
     pub const fn ro_element(self) -> &'static str {
         match self {
             DamageType::Physical => "neutral",

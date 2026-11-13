@@ -3,7 +3,9 @@
 //! [`crate::world::combat`]; this file only applies them to the instance's
 //! players and horde once per tick.
 
+use super::cast::Casting;
 use super::{facing_of, HubEvent, HubInstance, Outgoing};
+use crate::world::combat::skills::SLOTS;
 use crate::world::combat::rules::{attack_roll, AttackOutcome};
 use crate::world::combat::{self, exp_to_next, kill_value, share_kill, Class, Damage, DamageType, Reach, Weapon};
 use crate::world::horde::storage::FLAG_FULL;
@@ -60,9 +62,22 @@ pub struct Fighter {
     pub max_sp: i32,
     pub ac: i32,
     pub state: Vital,
+    /// Learned level per skill of the instance's book (0 = not learned).
+    pub skills: Vec<u8>,
+    /// Skill (book index) per hotbar slot.
+    pub hotbar: [Option<u16>; SLOTS],
+    /// Ticks left per skill.
+    pub(super) cooldowns: Vec<u32>,
+    pub(super) casting: Option<Casting>,
+    /// Rooted after a cast; the basic attack waits.
+    pub(super) recovery: u32,
+    /// Passive SP regeneration, fraction of max SP per second.
+    pub(super) sp_regen: f32,
+    /// Level changed: skill points to resend.
+    pub(super) skills_dirty: bool,
     attack_cd: u32,
     still: u32,
-    quiet: u32,
+    pub(super) quiet: u32,
     revive: u32,
     regen_hp: f32,
     regen_sp: f32,
@@ -88,6 +103,13 @@ impl Fighter {
             max_sp,
             ac: class.base_ac(level),
             state: Vital::Up,
+            skills: Vec::new(),
+            hotbar: [None; SLOTS],
+            cooldowns: Vec::new(),
+            casting: None,
+            recovery: 0,
+            sp_regen: 0.0,
+            skills_dirty: false,
             attack_cd: 0,
             still: 0,
             quiet: 0,
@@ -140,6 +162,7 @@ impl Fighter {
                 self.sp = self.max_sp;
             }
             self.progress_wait = 0;
+            self.skills_dirty = true;
         }
         if self.level >= combat::MAX_LEVEL {
             self.exp = 0;
@@ -154,13 +177,18 @@ fn damage_type_bits(kind: DamageType) -> u8 {
 impl HubInstance {
     /// One combat step on the horde's map, after movement and the horde.
     pub(super) fn fight(&mut self, out: &mut Outgoing) {
+        if self.horde.is_none() {
+            return;
+        }
+        let mut swings: Vec<Swing> = Vec::new();
+        let mut hits: Vec<HitEvent> = Vec::new();
+        let mut kills: Vec<u16> = Vec::new();
+        // 0. Skills: presses, wind-ups and due hits.
+        self.cast_step(out, &mut hits, &mut kills);
         let Some(horde) = self.horde.as_mut() else { return };
         let map = horde.map();
         let hz = self.config.tick_hz as f32;
         let rng = &mut self.dice;
-        let mut swings: Vec<Swing> = Vec::new();
-        let mut hits: Vec<HitEvent> = Vec::new();
-        let mut kills: Vec<u16> = Vec::new();
 
         // 1. Players: the basic attack while standing.
         for p in self.players.iter_mut().filter(|p| p.map == map) {
@@ -168,6 +196,9 @@ impl HubInstance {
             f.attack_cd = f.attack_cd.saturating_sub(1);
             if !f.is_up() || p.dir != (0.0, 0.0) {
                 f.still = 0;
+                continue;
+            }
+            if f.casting.is_some() || f.recovery > 0 {
                 continue;
             }
             f.still += 1;
@@ -364,7 +395,7 @@ impl HubInstance {
                     if f.quiet as f32 >= QUIET_SECS * hz && f.hp < f.max_hp {
                         f.regen_hp += f.max_hp as f32 * 0.005 / hz;
                     }
-                    let sp_rate = if p.dir == (0.0, 0.0) { 0.02 } else { 0.005 };
+                    let sp_rate = if p.dir == (0.0, 0.0) { 0.02 } else { 0.005 } + f.sp_regen;
                     if f.sp < f.max_sp {
                         f.regen_sp += f.max_sp as f32 * sp_rate / hz;
                     }
@@ -400,6 +431,7 @@ impl HubInstance {
 
         // 5. Messages: combat to the map, vitals on change, progress to self.
         let recipients: Vec<u32> = self.players.iter().filter(|p| p.map == map).map(|p| p.profile.user_id).collect();
+        let mut skill_updates: Vec<u32> = Vec::new();
         if !swings.is_empty() || !hits.is_empty() {
             let msg = ServerMsg::Combat { swings, hits };
             for &uid in &recipients {
@@ -418,6 +450,9 @@ impl HubInstance {
                     out.push((r, HubEvent::Control(msg.clone())));
                 }
             }
+            if std::mem::take(&mut f.skills_dirty) {
+                skill_updates.push(uid);
+            }
             f.progress_wait = f.progress_wait.saturating_sub(1);
             if f.progress_dirty && f.progress_wait == 0 {
                 out.push((uid, HubEvent::Control(f.progress())));
@@ -425,6 +460,12 @@ impl HubInstance {
                 f.gained = 0;
                 f.progress_dirty = false;
                 f.progress_wait = PROGRESS_EVERY;
+            }
+        }
+
+        for uid in skill_updates {
+            if let Some(i) = self.find(uid) {
+                out.push((uid, HubEvent::Control(self.skills_msg(i))));
             }
         }
 

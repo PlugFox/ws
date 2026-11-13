@@ -11,7 +11,7 @@ use super::missions;
 use super::protocol::{Look, MapInfo, PlayerInfo, ServerMsg, SnapshotBody};
 use super::horde::view::MonsterView;
 use super::horde::{Horde, PlayerView};
-use super::combat::{self, Class};
+use super::combat::{self, Class, Loadout, SkillBook};
 use bytes::{Bytes, BytesMut};
 use std::path::Path;
 use std::sync::Arc;
@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 pub type MapIdx = u8;
 
+mod cast;
 mod fight;
 pub use fight::{Fighter, Vital};
 
@@ -157,6 +158,8 @@ pub struct PlayerProfile {
     pub exp: u64,
     /// Held weapon id (`combat::weapon`); empty = the class's starting one.
     pub weapon: String,
+    /// Learned skills and the hotbar.
+    pub loadout: Loadout,
 }
 
 #[derive(Debug)]
@@ -181,6 +184,10 @@ struct HubPlayer {
     monsters: Option<Box<MonsterView>>,
     /// Combat state on stages with monsters (`None` in hubs).
     fighter: Option<Fighter>,
+    /// Latest aim (1/8 m from the player) and the skill slots pressed since
+    /// the last tick.
+    aim: [i8; 2],
+    pressed: u16,
 }
 
 impl HubPlayer {
@@ -261,6 +268,10 @@ pub struct HubInstance {
     dice: combat::Rng,
     /// Wave count at the last combat step (the dead return on a new wave).
     last_wave: u32,
+    /// The skill table (empty without assets).
+    skills: Arc<SkillBook>,
+    /// Hits of cast skills still to land.
+    pending: Vec<cast::PendingHit>,
 }
 
 pub const MISSION_BOARD: &str = "mission_board";
@@ -304,12 +315,20 @@ impl HubInstance {
             horde: None,
             dice: combat::Rng::new(rand::random()),
             last_wave: 0,
+            skills: Arc::new(SkillBook::default()),
+            pending: Vec::new(),
             horde_players: Vec::new(),
             monster_buf: BytesMut::new(),
         }
     }
 
     /// Adds a horde to a stage. Its map must be this instance's world entry.
+    /// Skills cast from this table; the default is empty.
+    pub fn with_skills(mut self, skills: Arc<SkillBook>) -> Self {
+        self.skills = skills;
+        self
+    }
+
     pub fn with_horde(mut self, horde: Horde) -> Self {
         debug_assert_eq!(horde.map(), self.world.entry());
         self.horde = Some(horde);
@@ -399,6 +418,8 @@ impl HubInstance {
             portal_guard: true,
             monsters: None,
             fighter: None,
+            aim: [0, 0],
+            pressed: 0,
         };
         let joined = match &self.kind {
             InstanceKind::Hub { channel } => ServerMsg::HubJoined {
@@ -420,13 +441,49 @@ impl HubInstance {
         let mut player = player;
         if self.horde.is_some() {
             let class = Class::from_id(&player.profile.archetype).unwrap_or(Class::Swordsman);
-            player.fighter = Some(Fighter::new(class, player.profile.level, player.profile.exp, &player.profile.weapon));
+            let mut f = Fighter::new(class, player.profile.level, player.profile.exp, &player.profile.weapon);
+            cast::equip(&mut f, &self.skills, &player.profile.loadout);
+            player.fighter = Some(f);
         }
         self.players.push(player);
         let idx = self.players.len() - 1;
         self.announce_arrival(idx, None, out);
         self.announce_fighter(idx, out);
+        out.push((user_id, HubEvent::Control(self.skills_msg(idx))));
         outcome
+    }
+
+    /// The player's skills, points and hotbar.
+    fn skills_msg(&self, idx: usize) -> ServerMsg {
+        let p = &self.players[idx];
+        let level = p.fighter.as_ref().map_or(p.profile.level, |f| f.level);
+        let l = &p.profile.loadout;
+        ServerMsg::Skills {
+            level,
+            points: self.skills.points_left(level, l),
+            skills: l.skills.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            hotbar: (0..combat::skills::SLOTS).map(|i| l.slot(i).to_string()).collect(),
+        }
+    }
+
+    /// New learned skills or hotbar (validated by the caller against the
+    /// book); the fighter picks them up at once, the client gets `skills`.
+    pub fn set_loadout(&mut self, user_id: u32, loadout: Loadout, out: &mut Outgoing) {
+        let Some(i) = self.find(user_id) else { return };
+        let p = &mut self.players[i];
+        p.profile.loadout = loadout;
+        if let Some(f) = p.fighter.as_mut() {
+            cast::equip(f, &self.skills, &p.profile.loadout);
+        }
+        out.push((user_id, HubEvent::Control(self.skills_msg(i))));
+    }
+
+    /// Aim and skill slots of an accepted input (see [`HubInstance::input`]).
+    pub fn act(&mut self, user_id: u32, aim: [i8; 2], slots: u16) {
+        let Some(i) = self.find(user_id) else { return };
+        let p = &mut self.players[i];
+        p.aim = aim;
+        p.pressed |= slots;
     }
 
     /// Removes a player if `session_id` still owns the slot. Returns whether
@@ -458,15 +515,16 @@ impl HubInstance {
 
     /// Applies a movement intent. Non-finite vectors and stale `seq` values are
     /// ignored; vectors longer than 1 are normalised.
-    pub fn input(&mut self, user_id: u32, seq: u32, dx: f32, dy: f32) {
+    /// Returns whether the input was accepted.
+    pub fn input(&mut self, user_id: u32, seq: u32, dx: f32, dy: f32) -> bool {
         let tick = self.tick;
-        let Some(i) = self.find(user_id) else { return };
+        let Some(i) = self.find(user_id) else { return false };
         let p = &mut self.players[i];
         if p.has_seq && seq <= p.last_seq {
-            return;
+            return false;
         }
         if !dx.is_finite() || !dy.is_finite() {
-            return;
+            return false;
         }
         let len_sq = dx * dx + dy * dy;
         let dir = if len_sq > 1.0 {
@@ -479,6 +537,7 @@ impl HubInstance {
         p.last_seq = seq;
         p.has_seq = true;
         p.last_input_tick = tick;
+        true
     }
 
     /// Opens an NPC's dialog if the player stands within its radius.
@@ -798,9 +857,10 @@ mod tests {
     use super::test_support::*;
     use crate::world::map::{CameraConstraint, LocationKind};
     use crate::world::protocol::Snapshot;
+    use crate::world::combat::DamageType;
 
     fn profile(user_id: u32) -> PlayerProfile {
-        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: Look::default(), level: 1, exp: 0, weapon: String::new() }
+        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default() }
     }
 
     fn controls_for(out: &Outgoing, user: u32) -> Vec<ServerMsg> {
@@ -1247,6 +1307,164 @@ mod tests {
             "joining a stage announces the fighter's vitals"
         );
         stage
+    }
+
+    /// A roomy field (20 × 9 cells) with a stage of the test skill table;
+    /// player 1 joins at `level` with `skills` learned and slotted in order.
+    fn skill_stage(archetype: &str, level: u32, skills: &[(&str, u8)]) -> HubInstance {
+        use crate::world::combat::skills::tests::book;
+        use crate::world::horde::catalog::{test_def, MonsterCatalog};
+        use crate::world::horde::{Horde, HordeConfig};
+        let row = format!("#{}#", ".".repeat(20));
+        let wall = "#".repeat(22);
+        let mut rows = vec![wall.as_str()];
+        rows.extend(std::iter::repeat_n(row.as_str(), 9));
+        rows.push(wall.as_str());
+        let field = map(
+            "field",
+            LocationKind::Field,
+            CameraConstraint::Free { pitch: -45.0, min_zoom: 10.0, max_zoom: 40.0, default_zoom: 20.0 },
+            &rows,
+            vec![portal("to_town", [1, 1, 1], "town", [3, 3])],
+        );
+        let world = Arc::new(HubWorld::new(vec![field], "field").unwrap());
+        let catalog = Arc::new(MonsterCatalog::new(vec![test_def("blob", 2.0, 1, 0.0, false)]).unwrap());
+        let cfg = HordeConfig { light_radius: 12.0, director_enabled: false, seed: Some(1), ..HordeConfig::default() };
+        let horde = Horde::new(Arc::clone(&world), catalog, cfg);
+        let mut stage =
+            HubInstance::stage(1, "m1", world, HubSimConfig::default()).with_horde(horde).with_skills(Arc::new(book()));
+        stage.dice = combat::Rng::new(5);
+        let mut loadout = Loadout::default();
+        for (i, (id, lvl)) in skills.iter().enumerate() {
+            loadout.skills.insert(id.to_string(), *lvl);
+            loadout.hotbar.resize(combat::skills::SLOTS, String::new());
+            loadout.hotbar[i] = id.to_string();
+        }
+        let mut out = Vec::new();
+        stage.join(PlayerProfile { archetype: archetype.into(), level, loadout, ..profile(1) }, Uuid::nil(), None, 0, &mut out);
+        assert!(
+            controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Skills { hotbar, .. } if hotbar.len() == combat::skills::SLOTS)),
+            "joining sends the skills"
+        );
+        stage
+    }
+
+    fn fighter(stage: &HubInstance, user: u32) -> &Fighter {
+        stage.players[stage.find(user).unwrap()].fighter.as_ref().unwrap()
+    }
+
+    #[test]
+    fn a_standing_mage_casts_bolts_at_the_crowd() {
+        use crate::world::protocol::MONSTER_ENTITY_BASE;
+        let mut stage = skill_stage("mage", 10, &[("bolt", 3)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slots: Vec<u16> = (0..3).filter_map(|i| stage.horde_mut().unwrap().spawn(0, px + 6.0, py - 1.0 + i as f32)).collect();
+        assert_eq!(slots.len(), 3);
+        let sp = fighter(&stage, 1).sp;
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        let msgs = controls_for(&out, 1);
+        let cast = msgs.iter().find_map(|m| match m {
+            ServerMsg::Cast { caster: 101, skill, x, cast_ms, .. } if skill == "bolt" => Some((*x, *cast_ms)),
+            _ => None,
+        });
+        let (x, cast_ms) = cast.expect("the cast is announced");
+        assert!((x - (px + 6.0)).abs() < 1.5, "aimed at the group, x = {x}");
+        assert_eq!(cast_ms, 500, "0.3 + 0.06·3 s rounded to ticks");
+        assert_eq!(fighter(&stage, 1).sp, sp, "SP is paid when the cast lands");
+        out.clear();
+        for _ in 0..20 {
+            stage.tick(&mut out);
+        }
+        let fire_hits = controls_for(&out, 1)
+            .iter()
+            .flat_map(|m| match m {
+                ServerMsg::Combat { hits, .. } => hits.clone(),
+                _ => Vec::new(),
+            })
+            .filter(|h| h.target >= MONSTER_ENTITY_BASE && h.flags >> 4 == DamageType::Fire as u8)
+            .count();
+        assert!(fire_hits >= 3, "three bolts land, each splashing ({fire_hits} fire hits)");
+        assert_eq!(fighter(&stage, 1).sp, sp - 3, "1 + 0.5·3 rounds to 3 SP (regen is below a point)");
+    }
+
+    #[test]
+    fn moving_cancels_a_wind_up_for_free() {
+        let mut stage = skill_stage("mage", 10, &[("bolt", 3)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        stage.horde_mut().unwrap().spawn(0, px + 6.0, py).unwrap();
+        let sp = fighter(&stage, 1).sp;
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        assert!(fighter(&stage, 1).casting.is_some());
+        out.clear();
+        stage.input(1, 1, 0.0, 1.0);
+        stage.tick(&mut out);
+        assert!(fighter(&stage, 1).casting.is_none());
+        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Cast { caster: 101, skill, .. } if skill.is_empty())));
+        assert_eq!(fighter(&stage, 1).sp, sp);
+        assert_eq!(fighter(&stage, 1).cooldowns.iter().sum::<u32>(), 0, "no cooldown after a cancel");
+    }
+
+    #[test]
+    fn no_target_means_no_cast() {
+        let mut stage = skill_stage("mage", 10, &[("bolt", 3)]);
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        assert!(fighter(&stage, 1).casting.is_none());
+        assert!(!controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Cast { .. })));
+    }
+
+    #[test]
+    fn back_slide_goes_away_from_the_aim_even_while_moving() {
+        let mut stage = skill_stage("swordsman", 5, &[("slide", 1)]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let mut out = Vec::new();
+        stage.input(1, 1, 0.0, 0.0);
+        stage.act(1, [8, 0], 1); // aim 1 m east
+        stage.tick(&mut out);
+        let (_, x, y) = stage.position_of(1).unwrap();
+        assert!(x < px - 2.0, "slid west from {px} to {x}");
+        assert!((y - py).abs() < 0.01);
+        assert!(stage.world.map(0).walk.is_walkable(x, y));
+        assert!(fighter(&stage, 1).cooldowns.iter().any(|&c| c > 0));
+    }
+
+    #[test]
+    fn mending_finds_the_most_wounded_ally() {
+        let mut stage = skill_stage("acolyte", 10, &[("mending", 2)]);
+        let mut out = Vec::new();
+        stage.join(PlayerProfile { archetype: "acolyte".into(), level: 10, ..profile(2) }, Uuid::nil(), None, 0, &mut out);
+        let i2 = stage.find(2).unwrap();
+        let max = stage.players[i2].fighter.as_ref().unwrap().max_hp;
+        stage.players[i2].fighter.as_mut().unwrap().hp = 3;
+        out.clear();
+        stage.act(1, [0, 0], 1);
+        for _ in 0..10 {
+            stage.tick(&mut out);
+        }
+        let hp = fighter(&stage, 2).hp;
+        assert!(hp > 3 && hp <= max, "ally healed to {hp}");
+        assert!(controls_for(&out, 2).iter().any(|m| matches!(m, ServerMsg::Combat { hits, .. }
+            if hits.iter().any(|h| h.target == 102 && h.flags & crate::world::protocol::hit::HEAL != 0))));
+    }
+
+    #[test]
+    fn loadout_changes_reach_the_fighter() {
+        let mut stage = skill_stage("mage", 10, &[]);
+        let mut loadout = Loadout::default();
+        loadout.skills.insert("bolt".into(), 2);
+        loadout.skills.insert("focus".into(), 5);
+        loadout.hotbar = vec![String::new(), "bolt".into()];
+        let mut out = Vec::new();
+        stage.set_loadout(1, loadout, &mut out);
+        let f = fighter(&stage, 1);
+        assert_eq!(f.hotbar[1], stage.skills.find("bolt").map(|(i, _)| i));
+        assert!((f.sp_regen - 0.01).abs() < 1e-6, "Focus 5 = +1% SP/s");
+        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Skills { points, .. } if *points == 9 - 7)));
     }
 
     #[test]

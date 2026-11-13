@@ -7,6 +7,7 @@
 //! the launch grace.
 
 use super::directory::{run_instance, HubCommand};
+use super::combat::SkillBook;
 use super::horde::catalog::MonsterCatalog;
 use super::horde::{Horde, HordeConfig};
 use super::hub::{HubEvent, HubInstance, HubSimConfig, HubWorld, PlayerProfile};
@@ -97,6 +98,7 @@ pub struct StageDirectory {
     worlds: Arc<HashMap<String, Arc<HubWorld>>>,
     /// Monster catalog; stages run without monsters when absent.
     monsters: Option<Arc<MonsterCatalog>>,
+    skills: Arc<SkillBook>,
     config: StageConfig,
     state: Arc<Mutex<StageState>>,
 }
@@ -107,12 +109,18 @@ impl StageDirectory {
             .into_iter()
             .map(|w| (w.map(w.entry()).id().to_string(), Arc::new(w)))
             .collect();
-        Self { worlds: Arc::new(worlds), monsters: None, config, state: Arc::new(Mutex::new(StageState::default())) }
+        Self { worlds: Arc::new(worlds), monsters: None, skills: Arc::new(SkillBook::default()), config, state: Arc::new(Mutex::new(StageState::default())) }
     }
 
     /// Stages launched from now on get a horde of these monsters.
     pub fn with_monsters(mut self, catalog: MonsterCatalog) -> Self {
         self.monsters = (!catalog.is_empty()).then(|| Arc::new(catalog));
+        self
+    }
+
+    /// Skills stage players can cast.
+    pub fn with_skills(mut self, skills: Arc<SkillBook>) -> Self {
+        self.skills = skills;
         self
     }
 
@@ -135,7 +143,8 @@ impl StageDirectory {
         }
         let stage_id = st.next_id;
         let (tx, rx) = mpsc::channel(COMMAND_CAPACITY);
-        let mut instance = HubInstance::stage(stage_id, mission.id, Arc::clone(world), self.config.sim.clone());
+        let mut instance = HubInstance::stage(stage_id, mission.id, Arc::clone(world), self.config.sim.clone())
+            .with_skills(Arc::clone(&self.skills));
         if let Some(catalog) = &self.monsters {
             let config = HordeConfig { waves: mission.waves.clone(), ..self.config.horde.clone() };
             instance = instance.with_horde(Horde::new(Arc::clone(world), Arc::clone(catalog), config));
@@ -285,7 +294,7 @@ mod tests {
     }
 
     fn profile(user_id: u32) -> PlayerProfile {
-        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: crate::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new() }
+        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: crate::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default() }
     }
 
     #[tokio::test]

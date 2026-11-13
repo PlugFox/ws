@@ -6,6 +6,7 @@
 //! tick, so a plain mutex is enough. Per-tick traffic (inputs, snapshots)
 //! goes straight between the socket task and the channel actor over mpsc.
 
+use super::combat::Loadout;
 use super::hub::{Arrival, HubEvent, HubInstance, HubSimConfig, HubWorld, Outgoing, PlayerProfile};
 use super::protocol::{ChannelInfo, Look};
 use std::collections::{BTreeMap, HashMap};
@@ -56,7 +57,9 @@ pub enum HubCommand {
         epoch: u16,
     },
     Leave { user_id: u32, session_id: Uuid },
-    Input { user_id: u32, seq: u32, dx: f32, dy: f32 },
+    Input { user_id: u32, seq: u32, dx: f32, dy: f32, aim: [i8; 2], slots: u16 },
+    /// Learned skills or hotbar changed (already validated).
+    Loadout { user_id: u32, loadout: Loadout },
     Interact { user_id: u32, npc: String },
     SelectMission { user_id: u32, mission: String, public: bool },
     /// The client could not apply a monster delta.
@@ -346,7 +349,12 @@ pub(crate) async fn run_instance(mut hub: HubInstance, mut commands: mpsc::Recei
                             outboxes.remove(&user_id);
                         }
                     }
-                    HubCommand::Input { user_id, seq, dx, dy } => hub.input(user_id, seq, dx, dy),
+                    HubCommand::Input { user_id, seq, dx, dy, aim, slots } => {
+                        if hub.input(user_id, seq, dx, dy) {
+                            hub.act(user_id, aim, slots);
+                        }
+                    }
+                    HubCommand::Loadout { user_id, loadout } => hub.set_loadout(user_id, loadout, &mut out),
                     HubCommand::Interact { user_id, npc } => hub.interact(user_id, &npc, &mut out),
                     HubCommand::SelectMission { user_id, mission, public } => {
                         hub.select_mission(user_id, &mission, public, &mut out)
@@ -406,7 +414,7 @@ mod tests {
     }
 
     fn profile(user_id: u32) -> PlayerProfile {
-        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: crate::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new() }
+        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: crate::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default() }
     }
 
     fn cfg(capacity: usize) -> HubConfig {
@@ -504,7 +512,7 @@ mod tests {
         let (tx2, rx2) = outbox();
         dir.join(profile(2), Uuid::nil(), None, tx2).unwrap();
 
-        t1.commands.try_send(HubCommand::Input { user_id: 1, seq: 1, dx: 1.0, dy: 0.0 }).unwrap();
+        t1.commands.try_send(HubCommand::Input { user_id: 1, seq: 1, dx: 1.0, dy: 0.0, aim: [0, 0], slots: 0 }).unwrap();
         let snap = loop {
             if let HubEvent::Snapshot(b) = tokio::time::timeout(Duration::from_secs(2), rx1.recv()).await.unwrap().unwrap() {
                 let s = crate::world::protocol::Snapshot::decode(&b).unwrap();
