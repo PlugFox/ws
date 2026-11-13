@@ -37,6 +37,7 @@ use field::{FlowField, UNREACHABLE};
 use grid::SpatialGrid;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use crate::world::combat::MonsterBlock;
 use std::sync::Arc;
 use storage::{HordeStorage, FLAG_BOSS, FLAG_FULL, FLAG_LOS};
 /// A player as the horde sees it: position and light radius (cells).
@@ -178,6 +179,8 @@ pub struct Horde {
     recycle: Vec<u16>,
     packs: Vec<Pack>,
     stats: HordeStats,
+    /// Players in the last tick (boss HP scales with the party).
+    party: u32,
 }
 
 impl Horde {
@@ -212,6 +215,7 @@ impl Horde {
             rng,
             max_radius,
             stats: HordeStats::default(),
+            party: 1,
         }
     }
 
@@ -274,9 +278,45 @@ impl Horde {
         }
         let def = self.catalog.get(kind);
         let flags = if def.boss { FLAG_BOSS | FLAG_FULL } else { 0 };
-        let slot = self.store.spawn(kind, x, y, def.max_hp, flags)?;
+        let level = self.spawn_level(kind);
+        let block = MonsterBlock::new(level, def.archetype, self.party);
+        let slot = self.store.spawn(kind, x, y, block.hp, flags)?;
+        let s = slot as usize;
+        self.store.level[s] = level as u8;
+        // Stagger first swings so a surround does not land in one tick.
+        self.store.cooldown[s] = slot % 8;
         self.stats.spawned += 1;
         Some(slot)
+    }
+
+    /// Level a kind spawns at now: its RO level clamped into the mission's
+    /// band, plus one per `level_every_secs` of the run; bosses at the top
+    /// of the band + 5.
+    pub fn spawn_level(&self, kind: u8) -> u32 {
+        let def = self.catalog.get(kind);
+        let rules = &self.config.waves;
+        let (lo, hi) = (rules.levels.0.max(1), rules.levels.1.max(rules.levels.0.max(1)));
+        if def.boss {
+            return (hi + 5).min(u8::MAX as u32);
+        }
+        let grow = if rules.level_every_secs > 0.0 { (self.director.elapsed() / rules.level_every_secs) as u32 } else { 0 };
+        (def.level.clamp(lo, hi) + grow).min(hi)
+    }
+
+    /// Combat numbers of a live monster.
+    pub fn block(&self, slot: u16) -> MonsterBlock {
+        let s = slot as usize;
+        let def = self.catalog.get(self.store.kind[s]);
+        MonsterBlock::new(self.store.level[s] as u32, def.archetype, self.party)
+    }
+
+    /// The pool (combat reads positions and HP, and spends cooldowns).
+    pub fn store(&self) -> &HordeStorage {
+        &self.store
+    }
+
+    pub fn store_mut(&mut self) -> &mut HordeStorage {
+        &mut self.store
     }
 
     pub fn despawn(&mut self, slot: u16) {
@@ -303,6 +343,9 @@ impl Horde {
     pub fn tick_views(&mut self, tick: u32, tick_hz: u32, players: &[PlayerView]) {
         self.players.clear();
         self.players.extend_from_slice(players);
+        if !players.is_empty() {
+            self.party = players.len() as u32;
+        }
         self.stats.stepped = 0;
         self.stats.full = 0;
         if self.players.is_empty() {

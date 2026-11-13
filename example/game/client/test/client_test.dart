@@ -126,6 +126,15 @@ void main() {
       expect((ServerMsg.decode(hex('1105'))! as Pong).ts, -3);
       final look = ServerMsg.decode(hex('29ac02000c0f07'))! as PlayerLook;
       expect((look.entityId, look.look), (300, const Look(hair: 12, hairColor: 15, bodyColor: 7)));
+      final v = ServerMsg.decode(hex('2aac02287a07830101'))! as PlayerVitals;
+      expect((v.entityId, v.hp, v.maxHp, v.sp, v.maxSp, v.state), (300, 40, 122, 7, 131, 1));
+      final c = ServerMsg.decode(hex('2b01ac02060287808004c80115ac020002'))! as Combat;
+      expect((c.swings.single.entityId, c.swings.single.facing), (300, 6));
+      final kill = c.hits[0], miss = c.hits[1];
+      expect((kill.target, kill.amount, kill.isCritical, kill.isKill, kill.damageType), (monsterEntityBase + 7, 200, true, true, 1));
+      expect((miss.target, miss.isMiss, miss.amount), (300, true, 0));
+      final pr = ServerMsg.decode(hex('2c1fd8a705e8f505e102'))! as Progress;
+      expect((pr.level, pr.exp, pr.expToNext, pr.gained), (31, 87000, 97000, 353));
     });
 
     test('looks come from the REST character JSON', () {

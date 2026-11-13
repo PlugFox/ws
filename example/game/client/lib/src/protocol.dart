@@ -64,6 +64,9 @@ abstract final class Kind {
   static const hubLeft = 0x27;
   static const hubError = 0x28;
   static const playerLook = 0x29;
+  static const playerVitals = 0x2A;
+  static const combat = 0x2B;
+  static const progress = 0x2C;
   static const stageJoined = 0x30;
   static const lobbyState = 0x31;
   static const lobbyLeft = 0x32;
@@ -450,6 +453,12 @@ sealed class ServerMsg {
       Kind.hubLeft => HubLeft(r.code()),
       Kind.hubError => HubError(r.code(), r.str()),
       Kind.playerLook => PlayerLook(r.varint(), Look._read(r)),
+      Kind.playerVitals => PlayerVitals(r.varint(), r.varint(), r.varint(), r.varint(), r.varint(), r.u8()),
+      Kind.combat => Combat(
+        r.list((r) => Swing._(r.varint(), r.u8())),
+        r.list((r) => Hit._(r.varint(), r.varint(), r.u8())),
+      ),
+      Kind.progress => Progress(r.varint(), r.varint(), r.varint(), r.varint()),
       Kind.stageJoined => StageJoined(r.varint(), r.str(), r.varint(), r.varint(), r.list((r) => r.str()), r.f32()),
       Kind.lobbyState => LobbyState(
         LobbyInfo._(
@@ -558,6 +567,67 @@ final class PlayerLook extends ServerMsg {
   const PlayerLook(this.entityId, this.look);
   final int entityId;
   final Look look;
+}
+
+/// Health and spell points of a player on the map (stages).
+final class PlayerVitals extends ServerMsg {
+  const PlayerVitals(this.entityId, this.hp, this.maxHp, this.sp, this.maxSp, this.state);
+  final int entityId;
+  final int hp;
+  final int maxHp;
+  final int sp;
+  final int maxSp;
+
+  /// 0 up, 1 downed (an ally can revive), 2 dead (back at the next wave).
+  final int state;
+}
+
+/// Entity id of a monster in combat events (= its engine id).
+const monsterEntityBase = 0x800000;
+
+/// An attack animation starts.
+final class Swing {
+  const Swing._(this.entityId, this.facing);
+  final int entityId;
+  final int facing;
+}
+
+/// A number over `target`: damage, heal or a miss.
+final class Hit {
+  const Hit._(this.target, this.amount, this.flags);
+  final int target;
+  final int amount;
+  final int flags;
+
+  static const critical = 1;
+  static const miss = 2;
+  static const kill = 4;
+  static const heal = 8;
+
+  bool get isCritical => flags & critical != 0;
+  bool get isMiss => flags & miss != 0;
+  bool get isKill => flags & kill != 0;
+  bool get isHeal => flags & heal != 0;
+
+  /// Damage type (server `DamageType` order): 0 physical, 1 fire, 2 cold,
+  /// 3 lightning, 4 earth, 5 poison, 6 radiant, 7 necrotic, 8 force.
+  int get damageType => flags >> 4;
+}
+
+/// Attacks and numbers of one server tick on the map.
+final class Combat extends ServerMsg {
+  const Combat(this.swings, this.hits);
+  final List<Swing> swings;
+  final List<Hit> hits;
+}
+
+/// This character's level and experience into it.
+final class Progress extends ServerMsg {
+  const Progress(this.level, this.exp, this.expToNext, this.gained);
+  final int level;
+  final int exp;
+  final int expToNext;
+  final int gained;
 }
 
 final class StageJoined extends ServerMsg {

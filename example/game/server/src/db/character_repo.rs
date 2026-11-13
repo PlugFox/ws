@@ -18,6 +18,8 @@ pub struct CharacterRecord {
     pub hair_style: i64,
     pub hair_color: i64,
     pub body_color: i64,
+    /// Held weapon id (`combat::weapon`); empty = the class's starting weapon.
+    pub weapon: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -99,7 +101,7 @@ impl CharacterRepo {
             r#"
             SELECT id, user_id, name, archetype, level, base_exp,
                    stats_json, unlocked_skills_json, inventory_json, last_location_id,
-                   gender, hair_style, hair_color, body_color,
+                   gender, hair_style, hair_color, body_color, weapon,
                    created_at, updated_at
             FROM characters
             WHERE user_id = ?
@@ -120,7 +122,7 @@ impl CharacterRepo {
             r#"
             SELECT id, user_id, name, archetype, level, base_exp,
                    stats_json, unlocked_skills_json, inventory_json, last_location_id,
-                   gender, hair_style, hair_color, body_color,
+                   gender, hair_style, hair_color, body_color, weapon,
                    created_at, updated_at
             FROM characters
             WHERE id = ?
@@ -142,7 +144,7 @@ impl CharacterRepo {
             r#"
             SELECT id, user_id, name, archetype, level, base_exp,
                    stats_json, unlocked_skills_json, inventory_json, last_location_id,
-                   gender, hair_style, hair_color, body_color,
+                   gender, hair_style, hair_color, body_color, weapon,
                    created_at, updated_at
             FROM characters
             WHERE user_id = ? AND id = ?

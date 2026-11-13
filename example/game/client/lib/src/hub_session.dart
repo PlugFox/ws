@@ -78,6 +78,13 @@ final class _Mob {
   /// gets there (it renders slightly in the past).
   int? removeAt;
 
+  /// Wall-clock seconds: attack / flinch animations play until then; a
+  /// killed monster plays its death where it stood before it goes.
+  double attackUntil = 0;
+  double hitUntil = 0;
+  double? dieAt;
+  int sentAction = -1;
+
   void set(int x, int y, int vx, int vy, int stamp) {
     this
       ..x = x
@@ -104,9 +111,16 @@ final class _Peer {
 /// One connected hub session: network, prediction, interpolation and the
 /// render loop feeding the engine façade.
 final class HubSession {
-  HubSession(this.api, this.view, {required this.assetsBase, required String characterName, Look look = const Look()})
-    : _myName = characterName,
-      _myLook = look;
+  HubSession(
+    this.api,
+    this.view, {
+    required this.assetsBase,
+    required String characterName,
+    String archetype = 'novice',
+    Look look = const Look(),
+  }) : _myName = characterName,
+       _myArchetype = archetype,
+       _myLook = look;
 
   final Api api;
   final GameView view;
@@ -117,7 +131,7 @@ final class HubSession {
 
   int? _me;
   String _myName;
-  String _myArchetype = 'novice';
+  String _myArchetype;
   Look _myLook;
 
   /// The stylist window is open (NPC id), and a restyle is in flight.
@@ -143,6 +157,16 @@ final class HubSession {
   final _tracks = <int, RemoteTrack>{};
   final _lastSeen = <int, double>{};
   final _peers = <int, _Peer>{};
+
+  /// Combat: last vitals per player, own progress, attack animations
+  /// (wall-clock end and facing) of characters.
+  final _vitals = <int, PlayerVitals>{};
+  Progress? _progress;
+  final _attackUntil = <int, double>{};
+  final _attackFacing = <int, int>{};
+
+  /// Own state from the vitals: 0 up, 1 downed, 2 dead.
+  int get _myState => _vitals[_me]?.state ?? 0;
 
   /// Stage monsters by pool slot, and the kind table from `stage_joined`.
   final _mobs = <int, _Mob>{};
@@ -240,8 +264,21 @@ final class HubSession {
       return;
     }
     switch (msg) {
-      case null || Connected() || HubChannels() || Notification():
+      case null || Connected() || HubChannels():
         break;
+      case Notification(:final message):
+        view.toast(message);
+      case final PlayerVitals v:
+        _onVitals(v);
+      case final Combat c:
+        _onCombat(c);
+      case final Progress pr:
+        final before = _progress?.level;
+        _progress = pr;
+        if (before != null && pr.level > before) {
+          view.toast('Level up! Lv ${pr.level} ${_title(_myArchetype, pr.level)}');
+        }
+        _renderStatus();
       case Pong():
         if (_pingSentAt > 0) _rttMs = (_now() - _pingSentAt) * 1000;
       case HubJoined(:final entityId, :final channelName, :final tickRate):
@@ -250,6 +287,8 @@ final class HubSession {
         _tickHz = tickRate;
         _clock = ServerClock(tickHz: _tickHz);
         view.setLightRadius(0);
+        _vitals.clear();
+        view.setStatus('');
         if (_inStage) {
           _inStage = false;
           view.showPanel('');
@@ -260,6 +299,7 @@ final class HubSession {
         _tickHz = msg.tickRate;
         _clock = ServerClock(tickHz: _tickHz);
         _monsterKinds = msg.monsters;
+        _vitals.clear();
         view.setLightRadius(msg.lightRadius);
         _inStage = true;
         _renderStagePanel();
@@ -349,7 +389,9 @@ final class HubSession {
           m = _mobs[slot] = _Mob(slot, s.mobGenerations[i], s.mobKinds[i]);
           m.set(s.mobXs[i], s.mobYs[i], s.mobVxs[i], s.mobVys[i], s.tick);
         case MobOp.move when m != null && m.removeAt == null:
-          m.set(s.mobXs[i], s.mobYs[i], s.mobVxs[i], s.mobVys[i], s.tick);
+          if (m.dieAt == null) m.set(s.mobXs[i], s.mobYs[i], s.mobVxs[i], s.mobVys[i], s.tick);
+        case MobOp.nudge when m != null && m.removeAt == null && m.dieAt != null:
+          break;
         case MobOp.nudge when m != null && m.removeAt == null:
           m.set(m.x + s.mobXs[i], m.y + s.mobYs[i], s.mobVxs[i], s.mobVys[i], s.tick);
         case MobOp.remove when m != null:
@@ -361,6 +403,96 @@ final class HubSession {
       }
     }
     _mobTick = s.tick;
+  }
+
+  // ------------------------------------------------------------ combat
+
+  void _onVitals(PlayerVitals v) {
+    final wasUp = (_vitals[v.entityId]?.state ?? 0) == 0;
+    _vitals[v.entityId] = v;
+    _applyHealth(v);
+    if (v.entityId == _me) {
+      if (wasUp && v.state == 1) view.toast('You are down! Stand by an ally to be revived.');
+      _renderStatus();
+    }
+  }
+
+  void _applyHealth(PlayerVitals v) {
+    view.setHealth(v.entityId.toDouble(), v.maxHp > 0 ? v.hp / v.maxHp : double.nan);
+  }
+
+  void _onCombat(Combat c) {
+    final now = _now();
+    for (final s in c.swings) {
+      final mob = s.entityId >= monsterEntityBase ? _mobs[s.entityId - monsterEntityBase] : null;
+      if (mob != null) {
+        mob
+          ..attackUntil = now + 0.5
+          ..facing = s.facing;
+      } else {
+        _attackUntil[s.entityId] = now + 0.45;
+        _attackFacing[s.entityId] = s.facing;
+        _tracks[s.entityId]?.resetSent();
+      }
+    }
+    for (final h in c.hits) {
+      final isMob = h.target >= monsterEntityBase;
+      view.showDamage(h.target.toDouble(), h.amount, h.flags, !isMob);
+      if (!isMob) continue;
+      final mob = _mobs[h.target - monsterEntityBase];
+      if (mob == null) continue;
+      if (h.isKill) {
+        mob.dieAt ??= now;
+      } else if (!h.isMiss) {
+        mob.hitUntil = now + 0.25;
+      }
+    }
+  }
+
+  /// Character action: sitting while down, the swing for a moment after an
+  /// attack, otherwise walk / idle.
+  int _charAction(int id, bool moving, double now) {
+    if ((_vitals[id]?.state ?? 0) != 0) return Act.sit;
+    if (moving) return Act.walk;
+    return now < (_attackUntil[id] ?? 0) ? Act.attack : Act.idle;
+  }
+
+  void _renderStatus() {
+    final me = _me;
+    final v = me == null ? null : _vitals[me];
+    if (!_inStage || v == null) {
+      view.setStatus('');
+      return;
+    }
+    final pr = _progress;
+    final level = pr?.level ?? 1;
+    view.setStatus(
+      jsonEncode({
+        'name': _myName,
+        'title': _title(_myArchetype, level),
+        'level': level,
+        'hp': v.hp,
+        'maxHp': v.maxHp,
+        'sp': v.sp,
+        'maxSp': v.maxSp,
+        'exp': pr?.exp ?? 0,
+        'expToNext': pr?.expToNext ?? 0,
+        'state': v.state,
+      }),
+    );
+  }
+
+  /// Class title at a level (tiers at 30 and 60, see COMBAT.md).
+  static String _title(String archetype, int level) {
+    const titles = {
+      'swordsman': ['Swordsman', 'Crusader', 'Paladin'],
+      'mage': ['Mage', 'Wizard', 'High Wizard'],
+      'archer': ['Archer', 'Hunter', 'Sniper'],
+      'acolyte': ['Acolyte', 'Priest', 'High Priest'],
+    };
+    final t = titles[archetype];
+    if (t == null) return archetype;
+    return t[level < 30 ? 0 : level < 60 ? 1 : 2];
   }
 
   void _outOfSync() {
@@ -453,6 +585,8 @@ final class HubSession {
       view.setLabel(e.key.toDouble(), e.value.name, '');
       _applyLook(e.key, e.value.look);
     }
+    _vitals.values.forEach(_applyHealth);
+    _renderStatus();
     final bgm = map.bgm;
     view.playBgm(bgm == null ? null : '$assetsBase/client/$bgm');
     _loading = false;
@@ -843,7 +977,8 @@ final class HubSession {
   void _tick() {
     final p = _predictor;
     if (p == null || _loading) return;
-    final (dx, dy) = _inputDir();
+    // Downed or fallen: the server ignores movement; do not predict any.
+    final (dx, dy) = _myState == 0 ? _inputDir() : (0.0, 0.0);
     final moving = dx != 0 || dy != 0;
     if (moving) _stopSends = 3;
     if (moving || _stopSends > 0) {
@@ -890,9 +1025,9 @@ final class HubSession {
       x1: mx,
       y1: my,
       t1: 0,
-      facing: p.facing,
+      facing: !p.moving && now < (_attackUntil[me] ?? 0) ? _attackFacing[me]! : p.facing,
       sprite: _spriteFor(me, _myArchetype, _myLook),
-      action: p.moving ? Act.walk : Act.idle,
+      action: _charAction(me, p.moving, now),
       flags: Row.flagFocus | Row.flagHigh,
     );
 
@@ -907,7 +1042,7 @@ final class HubSession {
         continue;
       }
       t.segment(rt);
-      final action = t.moving ? Act.walk : Act.idle;
+      final action = _charAction(t.id, t.moving, now);
       final peer = _peers[t.id];
       final sprite = _spriteFor(t.id, peer?.archetype ?? 'novice', peer?.look);
       final still = t.x0 == t.x1 && t.y0 == t.y1;
@@ -946,16 +1081,48 @@ final class HubSession {
     final removed = <int>[];
     for (final m in _mobs.values) {
       final at = m.removeAt;
-      if (at != null && rt >= at) {
+      final dieAt = m.dieAt;
+      // A killed monster finishes its death animation before it goes.
+      if (at != null && rt >= at && (dieAt == null || now - dieAt > 0.75)) {
         removed.add(m.slot);
         continue;
       }
-      if (!m.dirty) continue;
+      final action = dieAt != null
+          ? Act.die
+          : now < m.attackUntil
+          ? Act.attack
+          : now < m.hitUntil
+          ? Act.hit
+          : m.moving
+          ? Act.walk
+          : Act.idle;
+      if (!m.dirty && action == m.sentAction) continue;
+      m.sentAction = action;
       final sprite = _mobSprite(m.kind);
       final px = m.x / Reckoning.posOne, py = m.y / Reckoning.posOne;
       final vx = m.vx / Reckoning.velOne, vy = m.vy / Reckoning.velOne;
-      final moving = m.vx != 0 || m.vy != 0;
       const back = Reckoning.back, ahead = Reckoning.horizon;
+      if (dieAt != null) {
+        // Frozen where it stood at the render clock.
+        final u = (rt - m.stamp).clamp(-back, ahead);
+        final (x, y) = (px + vx * u, py + vy * u);
+        _out.add(
+          id: m.id,
+          x0: x,
+          y0: y,
+          t0: _sec(rt),
+          x1: x,
+          y1: y,
+          t1: _sec(rt),
+          facing: m.facing,
+          sprite: sprite,
+          action: action,
+          flags: Row.flagFade,
+        );
+        m.dirty = false;
+        continue;
+      }
+      final moving = m.vx != 0 || m.vy != 0;
       _out.add(
         id: m.id,
         x0: moving ? px - vx * back : px,
@@ -966,7 +1133,7 @@ final class HubSession {
         t1: _sec(moving ? m.stamp + ahead : m.stamp),
         facing: m.facing,
         sprite: sprite,
-        action: m.moving ? Act.walk : Act.idle,
+        action: action,
         flags: Row.flagFade,
       );
       m.dirty = false;

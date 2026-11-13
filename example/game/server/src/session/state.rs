@@ -16,6 +16,8 @@ pub struct CharacterState {
     pub inventory: serde_json::Value,
     pub last_location_id: String,
     pub look: Look,
+    /// Held weapon id; empty = the class's starting weapon.
+    pub weapon: String,
 
     pub is_dirty: bool,
     pub last_modified: Instant,
@@ -47,6 +49,7 @@ impl CharacterState {
             inventory,
             last_location_id,
             look,
+            weapon: String::new(),
             is_dirty: false,
             last_modified: Instant::now(),
         }
@@ -57,6 +60,16 @@ impl CharacterState {
         self.base_exp += exp_gain;
         self.is_dirty = true;
         self.last_modified = Instant::now();
+    }
+
+    /// Level and experience into it (combat), marking state dirty when changed.
+    pub fn set_progress(&mut self, level: u32, exp: u64) {
+        if (self.level, self.base_exp) != (level, exp) {
+            self.level = level;
+            self.base_exp = exp;
+            self.is_dirty = true;
+            self.last_modified = Instant::now();
+        }
     }
 
     /// Mutates stats, marking state dirty.

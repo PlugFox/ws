@@ -92,8 +92,10 @@ async fn start_with(stages: Vec<HubWorld>) -> (SocketAddr, AppState) {
         name: "Poring".into(),
         radius: 0.35,
         speed: 2.5,
-        max_hp: 55,
-        touch_damage: 4,
+        level: 1,
+        archetype: game_server::world::combat::Archetype::Swarm,
+        element: game_server::world::combat::Element::Water,
+        size: game_server::world::combat::Size::Small,
         spawn_cost: 1,
         unlock_secs: 0.0,
         weight: 100,
@@ -129,7 +131,7 @@ async fn player(addr: SocketAddr, name: &str, select: bool) -> (String, u64) {
     let ch: Value = http
         .post(format!("http://{addr}/api/characters"))
         .bearer_auth(&token)
-        .json(&json!({ "name": format!("{name}_char"), "archetype": "novice" }))
+        .json(&json!({ "name": format!("{name}_char"), "archetype": "mage" }))
         .send()
         .await
         .unwrap()

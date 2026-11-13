@@ -7,13 +7,15 @@ import 'package:game_client/src/engine.dart';
 import 'package:game_client/src/protocol.dart' show Look;
 import 'package:web/web.dart' as web;
 
-/// Classes offered at creation (the server validates the id).
+/// Classes offered at creation (the server validates the id). Each line
+/// grows through three titles with level; see example/docs/COMBAT.md.
 const _classes = [
-  {'id': 'novice', 'name': 'Novice', 'description': 'Balanced start, can grow into anything.'},
-  {'id': 'warrior', 'name': 'Warrior', 'description': 'Front line: high HP, STR and VIT.'},
-  {'id': 'ranger', 'name': 'Ranger', 'description': 'Swift and precise: AGI and DEX.'},
-  {'id': 'mage', 'name': 'Mage', 'description': 'Arcane power: INT, but fragile.'},
-  {'id': 'rogue', 'name': 'Rogue', 'description': 'Quick and lucky: AGI and LUK.'},
+  {'id': 'swordsman', 'name': 'Swordsman', 'description': 'Crusader → Paladin. Front line: taunts the horde, shield and holy blade.'},
+  {'id': 'mage', 'name': 'Mage', 'description': 'Wizard → High Wizard. Storms of fire, frost and lightning; fragile.'},
+  {'id': 'archer', 'name': 'Archer', 'description': 'Hunter → Sniper. Extreme range, traps and a falcon; bursts the biggest target.'},
+  {'id': 'acolyte', 'name': 'Acolyte', 'description': 'Priest → High Priest. Heals the most wounded, blesses the party, smites undead.'},
+  {'id': 'thief', 'name': 'Thief', 'description': 'Assassin → Assassin Cross.', 'locked': true},
+  {'id': 'merchant', 'name': 'Merchant', 'description': 'Blacksmith → Whitesmith.', 'locked': true},
 ];
 
 /// Character slots per account (the server enforces the same limit).
@@ -118,6 +120,7 @@ Future<Map<String, Object?>> _chooseCharacter(Api api, GameView view) {
               'id': (c['id']! as num).toInt(),
               'name': c['name'],
               'archetype': c['archetype'],
+              'title': ?((c['stats'] as Map<String, Object?>?)?['title']),
               'level': c['level'],
               'location': _places[c['last_location_id']] ?? c['last_location_id'],
               'look': Look.fromJson(c['look']).toUi(),

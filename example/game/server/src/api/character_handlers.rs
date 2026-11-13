@@ -3,6 +3,7 @@ use super::state::AppState;
 use crate::db::character_repo::{CharacterRecord, CharacterRepo};
 use crate::world::protocol::Look;
 use crate::session::CharacterState;
+use crate::world::combat::{self, Class, Weapon};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -66,7 +67,7 @@ impl CharacterDto {
         Self {
             id: r.id,
             user_id: r.user_id,
-            stats: serde_json::from_str(&r.stats_json).unwrap_or(json!({})),
+            stats: class_stats(&r.archetype, r.level, &r.weapon),
             unlocked_skills: serde_json::from_str(&r.unlocked_skills_json).unwrap_or(json!([])),
             inventory: serde_json::from_str(&r.inventory_json).unwrap_or(json!([])),
             name: r.name,
@@ -80,30 +81,34 @@ impl CharacterDto {
     }
 }
 
-fn initial_stats_for_archetype(archetype: &str) -> (serde_json::Value, serde_json::Value) {
-    let (stats, skills) = match archetype.to_lowercase().as_str() {
-        "warrior" => (
-            json!({ "max_hp": 150, "hp": 150, "str": 15, "agi": 8, "vit": 14, "int": 5, "dex": 10, "luk": 8 }),
-            json!(["slash", "iron_defense"]),
-        ),
-        "ranger" => (
-            json!({ "max_hp": 110, "hp": 110, "str": 8, "agi": 16, "vit": 8, "int": 8, "dex": 16, "luk": 10 }),
-            json!(["arrow_volley", "dash"]),
-        ),
-        "mage" => (
-            json!({ "max_hp": 90, "hp": 90, "str": 5, "agi": 8, "vit": 7, "int": 18, "dex": 12, "luk": 10 }),
-            json!(["arcane_bolt", "mana_shield"]),
-        ),
-        "rogue" => (
-            json!({ "max_hp": 105, "hp": 105, "str": 11, "agi": 16, "vit": 8, "int": 6, "dex": 14, "luk": 15 }),
-            json!(["backstab", "smoke_bomb"]),
-        ),
-        _ => (
-            json!({ "max_hp": 100, "hp": 100, "str": 10, "agi": 10, "vit": 10, "int": 10, "dex": 10, "luk": 10 }),
-            json!(["strike"]),
-        ),
+/// Derived combat numbers of a class at a level (COMBAT.md §1.3, §2.2).
+/// Computed on read: a character is class + level + learned skills, so
+/// nothing here is stored or can drift from the rules.
+fn class_stats(archetype: &str, level: i64, weapon: &str) -> serde_json::Value {
+    let Some(class) = Class::from_id(archetype) else {
+        return json!({});
     };
-    (stats, skills)
+    let level = level.clamp(1, combat::MAX_LEVEL as i64) as u32;
+    let held = Weapon::held(class, weapon);
+    let (dice, kind) = held.damage(class, level);
+    json!({
+        "title": class.title(level),
+        "tier": combat::tier(level),
+        "max_hp": class.max_hp(level),
+        "max_sp": class.max_sp(level),
+        "ac": class.base_ac(level),
+        "proficiency": combat::proficiency(level),
+        "skill_points": Class::skill_points(level),
+        "exp_to_next": combat::exp_to_next(level),
+        "weapon": {
+            "id": held.id,
+            "name": held.name,
+            "to_hit": held.to_hit(level),
+            "damage": format!("{}d{}{:+}", dice.count, dice.sides, dice.bonus),
+            "damage_type": kind.ro_element(),
+            "interval_ms": held.interval_ms,
+        },
+    })
 }
 
 /// GET /api/characters
@@ -150,13 +155,17 @@ pub async fn create_character(
     }
 
     let archetype = payload.archetype.trim().to_lowercase();
-    let valid_archetypes = ["warrior", "ranger", "mage", "rogue", "novice"];
-    if !valid_archetypes.contains(&archetype.as_str()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("Invalid archetype. Available: {:?}", valid_archetypes) })),
-        ));
-    }
+    // Only the current ids: the legacy aliases `Class::from_id` accepts are
+    // for characters created before the class rework.
+    let Some(class) = Class::ALL.into_iter().find(|c| c.id() == archetype) else {
+        let available: Vec<&str> = Class::ALL.iter().map(|c| c.id()).collect();
+        let error = if combat::class::LOCKED_CLASSES.contains(&archetype.as_str()) {
+            format!("The {archetype} class is not available yet")
+        } else {
+            format!("Invalid class. Available: {available:?}")
+        };
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": error }))));
+    };
 
     let defaults = Look::default();
     let look = Look {
@@ -182,7 +191,9 @@ pub async fn create_character(
         ));
     }
 
-    let (initial_stats, initial_skills) = initial_stats_for_archetype(&archetype);
+    // Nothing is learned at level 1; combat numbers derive from class + level.
+    let initial_stats = json!({});
+    let initial_skills = json!([]);
     let initial_inventory = json!([]);
     let initial_location = "hub_central";
 
@@ -190,7 +201,7 @@ pub async fn create_character(
         &state.pool,
         auth.user_id,
         name,
-        &archetype,
+        class.id(),
         &initial_stats.to_string(),
         &initial_skills.to_string(),
         &initial_inventory.to_string(),
@@ -262,7 +273,7 @@ pub async fn select_character(
     let skills = serde_json::from_str(&record.unlocked_skills_json).unwrap_or(json!([]));
     let inventory = serde_json::from_str(&record.inventory_json).unwrap_or(json!([]));
 
-    let char_state = CharacterState::new(
+    let mut char_state = CharacterState::new(
         record.id as u32,
         record.user_id as u32,
         record.name.clone(),
@@ -275,6 +286,7 @@ pub async fn select_character(
         record.last_location_id.clone(),
         record.look(),
     );
+    char_state.weapon = record.weapon.clone();
 
     if let Some(active_session) = state.session_registry.get(auth.user_id) {
         let mut char_lock = active_session.character.write().await;

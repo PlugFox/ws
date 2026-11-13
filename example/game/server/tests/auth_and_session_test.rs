@@ -210,7 +210,7 @@ async fn test_character_crud_and_dirty_flag_flushing() {
     // 1. Create Character
     let char_payload = json!({
         "name": "SwiftBlade",
-        "archetype": "warrior"
+        "archetype": "swordsman"
     });
 
     let create_char_req = Request::builder()
@@ -229,7 +229,10 @@ async fn test_character_crud_and_dirty_flag_flushing() {
     let char_id = char_json["id"].as_u64().unwrap() as u32;
 
     assert_eq!(char_json["name"], "SwiftBlade");
-    assert_eq!(char_json["archetype"], "warrior");
+    assert_eq!(char_json["archetype"], "swordsman");
+    assert_eq!(char_json["stats"]["max_hp"], 12);
+    assert_eq!(char_json["stats"]["weapon"]["id"], "sword", "a new swordsman holds a sword");
+    assert_eq!(char_json["stats"]["weapon"]["damage"], "1d8+3");
     assert_eq!(char_json["level"], 1);
     assert_eq!(char_json["last_location_id"], "hub_central");
 

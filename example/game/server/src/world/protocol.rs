@@ -27,6 +27,14 @@
 //! 0x27 HUB_LEFT        code reason
 //! 0x28 HUB_ERROR       code, str message
 //! 0x29 PLAYER_LOOK     var entity_id, look (a player on the map restyled)
+//! 0x2A PLAYER_VITALS   var entity_id, var hp, var max_hp, var sp, var max_sp,
+//!                      u8 state (0 up, 1 downed, 2 dead)
+//! 0x2B COMBAT          var n, n × {var entity_id, u8 facing}   (swings)
+//!                      var m, m × {var target, var amount, u8 flags}  (hits)
+//!                      flags: 1 critical, 2 miss, 4 kill, 8 heal,
+//!                      high nibble = damage type; monsters are
+//!                      `MONSTER_ENTITY_BASE + slot`
+//! 0x2C PROGRESS        var level, var exp, var exp_to_next, var gained
 //! 0x30 STAGE_JOINED    var stage_id, str mission, var tick_rate, var entity_id,
 //!                      var n, n × str monster kind, f32 light_radius
 //! 0x31 LOBBY_STATE     var lobby_id, str code, mission, bool public,
@@ -102,6 +110,9 @@ pub mod kind {
     pub const HUB_LEFT: u8 = 0x27;
     pub const HUB_ERROR: u8 = 0x28;
     pub const PLAYER_LOOK: u8 = 0x29;
+    pub const PLAYER_VITALS: u8 = 0x2A;
+    pub const COMBAT: u8 = 0x2B;
+    pub const PROGRESS: u8 = 0x2C;
     pub const STAGE_JOINED: u8 = 0x30;
     pub const LOBBY_STATE: u8 = 0x31;
     pub const LOBBY_LEFT: u8 = 0x32;
@@ -295,6 +306,33 @@ pub struct LobbyInfo {
     pub members: Vec<LobbyMemberInfo>,
 }
 
+/// Entity id of a monster in combat events: above every character id and
+/// exact in a float32 (the client's engine id for the slot).
+pub const MONSTER_ENTITY_BASE: u32 = 0x80_0000;
+
+/// An attack animation starts (player or monster) facing `facing`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Swing {
+    pub entity_id: u32,
+    pub facing: u8,
+}
+
+/// Bits of [`HitEvent::flags`]; the high nibble is the damage type.
+pub mod hit {
+    pub const CRITICAL: u8 = 1;
+    pub const MISS: u8 = 2;
+    pub const KILL: u8 = 4;
+    pub const HEAL: u8 = 8;
+}
+
+/// A number to show over `target` (damage, heal or "Miss").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HitEvent {
+    pub target: u32,
+    pub amount: u32,
+    pub flags: u8,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelInfo {
     pub id: u16,
@@ -382,6 +420,14 @@ pub enum ServerMsg {
     HubError { code: String, message: String },
     /// A player on the recipient's map (possibly the recipient) restyled.
     PlayerLook { entity_id: u32, look: Look },
+    /// Health and spell points of a player on the recipient's map (stages);
+    /// sent on join and whenever they change.
+    PlayerVitals { entity_id: u32, hp: u32, max_hp: u32, sp: u32, max_sp: u32, state: u8 },
+    /// Attacks and numbers of one tick on the recipient's map.
+    Combat { swings: Vec<Swing>, hits: Vec<HitEvent> },
+    /// The recipient's level and experience into it; `gained` since the
+    /// last progress message (kills, or negative-free penalties as 0).
+    Progress { level: u32, exp: u64, exp_to_next: u64, gained: u64 },
     /// The recipient joined a stage instance; `map_enter` follows. Sent
     /// instead of `hub_joined` (the hub membership has ended).
     StageJoined {
@@ -488,6 +534,32 @@ impl ServerMsg {
                 b.put_var((*entity_id).into());
                 look.put(&mut b);
             }
+            ServerMsg::PlayerVitals { entity_id, hp, max_hp, sp, max_sp, state } => {
+                b.put_u8(kind::PLAYER_VITALS);
+                for v in [*entity_id, *hp, *max_hp, *sp, *max_sp] {
+                    b.put_var(v.into());
+                }
+                b.put_u8(*state);
+            }
+            ServerMsg::Combat { swings, hits } => {
+                b.put_u8(kind::COMBAT);
+                put_list(&mut b, swings, |b, s| {
+                    b.put_var(s.entity_id.into());
+                    b.put_u8(s.facing);
+                });
+                put_list(&mut b, hits, |b, h| {
+                    b.put_var(h.target.into());
+                    b.put_var(h.amount.into());
+                    b.put_u8(h.flags);
+                });
+            }
+            ServerMsg::Progress { level, exp, exp_to_next, gained } => {
+                b.put_u8(kind::PROGRESS);
+                b.put_var((*level).into());
+                b.put_var(*exp);
+                b.put_var(*exp_to_next);
+                b.put_var(*gained);
+            }
             ServerMsg::StageJoined { stage_id, mission, tick_rate, entity_id, monsters, light_radius } => {
                 b.put_u8(kind::STAGE_JOINED);
                 b.put_var((*stage_id).into());
@@ -573,6 +645,19 @@ impl ServerMsg {
             kind::HUB_LEFT => ServerMsg::HubLeft { reason: r.code()? },
             kind::HUB_ERROR => ServerMsg::HubError { code: r.code()?, message: r.str()? },
             kind::PLAYER_LOOK => ServerMsg::PlayerLook { entity_id: r.var32()?, look: Look::read(&mut r)? },
+            kind::PLAYER_VITALS => ServerMsg::PlayerVitals {
+                entity_id: r.var32()?,
+                hp: r.var32()?,
+                max_hp: r.var32()?,
+                sp: r.var32()?,
+                max_sp: r.var32()?,
+                state: r.u8()?,
+            },
+            kind::COMBAT => ServerMsg::Combat {
+                swings: read_list(&mut r, |r| Some(Swing { entity_id: r.var32()?, facing: r.u8()? }))?,
+                hits: read_list(&mut r, |r| Some(HitEvent { target: r.var32()?, amount: r.var32()?, flags: r.u8()? }))?,
+            },
+            kind::PROGRESS => ServerMsg::Progress { level: r.var32()?, exp: r.var()?, exp_to_next: r.var()?, gained: r.var()? },
             kind::STAGE_JOINED => ServerMsg::StageJoined {
                 stage_id: r.var32()?,
                 mission: r.str()?,
@@ -969,6 +1054,12 @@ mod tests {
             ServerMsg::HubLeft { reason: "evicted".into() },
             ServerMsg::HubError { code: "bad_message".into(), message: "nope".into() },
             ServerMsg::PlayerLook { entity_id: 5, look: Look { gender: 0, hair: 3, hair_color: 9, body_color: 2 } },
+            ServerMsg::PlayerVitals { entity_id: 5, hp: 40, max_hp: 122, sp: 0, max_sp: 131, state: 1 },
+            ServerMsg::Combat {
+                swings: vec![Swing { entity_id: 5, facing: 3 }],
+                hits: vec![HitEvent { target: MONSTER_ENTITY_BASE + 7, amount: 13, flags: hit::CRITICAL | hit::KILL | 0x30 }],
+            },
+            ServerMsg::Progress { level: 31, exp: 87_000, exp_to_next: 97_000, gained: 353 },
             ServerMsg::StageJoined {
                 stage_id: 4,
                 mission: mission.id.into(),
@@ -1087,6 +1178,19 @@ pub(crate) mod golden {
                 ServerMsg::PlayerLook { entity_id: 300, look: Look { gender: 0, hair: 12, hair_color: 15, body_color: 7 } }
                     .encode(),
             ),
+            ("player_vitals", ServerMsg::PlayerVitals { entity_id: 300, hp: 40, max_hp: 122, sp: 7, max_sp: 131, state: 1 }.encode()),
+            (
+                "combat",
+                ServerMsg::Combat {
+                    swings: vec![Swing { entity_id: 300, facing: 6 }],
+                    hits: vec![
+                        HitEvent { target: MONSTER_ENTITY_BASE + 7, amount: 200, flags: hit::CRITICAL | hit::KILL | 0x10 },
+                        HitEvent { target: 300, amount: 0, flags: hit::MISS },
+                    ],
+                }
+                .encode(),
+            ),
+            ("progress", ServerMsg::Progress { level: 31, exp: 87_000, exp_to_next: 97_000, gained: 353 }.encode()),
         ]
     }
 
@@ -1143,6 +1247,9 @@ pub(crate) mod golden {
         ("lobby_left", "32ff06637573746f6d"),
         ("pong", "1105"),
         ("player_look", "29ac02000c0f07"),
+        ("player_vitals", "2aac02287a07830101"),
+        ("combat", "2b01ac02060287808004c80115ac020002"),
+        ("progress", "2c1fd8a705e8f505e102"),
         ("hub_join_2", "4103"),
         ("hub_join_any", "4100"),
         ("mission_select", "45026d3101"),

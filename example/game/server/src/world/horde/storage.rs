@@ -24,6 +24,10 @@ pub struct HordeStorage {
     pub vel_x: Vec<f32>,
     pub vel_y: Vec<f32>,
     pub hp: Vec<i32>,
+    /// Level it spawned at (its combat numbers derive from it).
+    pub level: Vec<u8>,
+    /// Ticks until its next melee attack.
+    pub cooldown: Vec<u16>,
     pub kind: Vec<u8>,
     pub flags: Vec<u8>,
     pub generation: Vec<u8>,
@@ -47,6 +51,8 @@ impl HordeStorage {
             vel_x: vec![0.0; capacity],
             vel_y: vec![0.0; capacity],
             hp: vec![0; capacity],
+            level: vec![1; capacity],
+            cooldown: vec![0; capacity],
             kind: vec![0; capacity],
             flags: vec![0; capacity],
             generation: vec![0; capacity],
@@ -86,6 +92,8 @@ impl HordeStorage {
         self.vel_x[s] = 0.0;
         self.vel_y[s] = 0.0;
         self.hp[s] = hp;
+        self.level[s] = 1;
+        self.cooldown[s] = 0;
         self.kind[s] = kind;
         self.flags[s] = flags;
         self.far_ticks[s] = 0;

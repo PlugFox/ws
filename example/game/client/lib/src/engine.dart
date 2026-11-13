@@ -69,6 +69,12 @@ extension type GameView._(JSObject _) implements JSObject {
   /// Health bar under a player's name on combat maps (0..1; NaN hides it).
   external void setHealth(double entityId, double fraction);
 
+  /// Floating combat number (`flags` as in [Hit]); [hurt] = the target is a player.
+  external void showDamage(double entityId, int amount, int flags, bool hurt);
+
+  /// The local player's bars as JSON (see the engine); '' hides them.
+  external void setStatus(String json);
+
   /// Full-screen character slots and creation (`CharacterSelectSpec` JSON).
   /// Events: `char_select`, `char_create`.
   external void showCharacterSelect(String specJson);
@@ -97,6 +103,9 @@ abstract final class Act {
   static const idle = 0;
   static const walk = 1;
   static const sit = 2;
+  static const attack = 3;
+  static const hit = 4;
+  static const die = 5;
 }
 
 /// Entity row layout for `upsertEntities` (engine `units.ts`):

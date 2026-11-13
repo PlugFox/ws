@@ -11,6 +11,7 @@ use super::missions;
 use super::protocol::{Look, MapInfo, PlayerInfo, ServerMsg, SnapshotBody};
 use super::horde::view::MonsterView;
 use super::horde::{Horde, PlayerView};
+use super::combat::{self, Class};
 use bytes::{Bytes, BytesMut};
 use std::path::Path;
 use std::sync::Arc;
@@ -18,6 +19,9 @@ use tracing::info;
 use uuid::Uuid;
 
 pub type MapIdx = u8;
+
+mod fight;
+pub use fight::{Fighter, Vital};
 
 /// Where a portal leads.
 #[derive(Clone, Debug, PartialEq)]
@@ -148,6 +152,11 @@ pub struct PlayerProfile {
     pub name: String,
     pub archetype: String,
     pub look: Look,
+    pub level: u32,
+    /// Experience into the current level.
+    pub exp: u64,
+    /// Held weapon id (`combat::weapon`); empty = the class's starting one.
+    pub weapon: String,
 }
 
 #[derive(Debug)]
@@ -170,6 +179,8 @@ struct HubPlayer {
     portal_guard: bool,
     /// What this player's client knows about the horde (stages only).
     monsters: Option<Box<MonsterView>>,
+    /// Combat state on stages with monsters (`None` in hubs).
+    fighter: Option<Fighter>,
 }
 
 impl HubPlayer {
@@ -201,6 +212,9 @@ pub enum HubEvent {
     /// Internal: the player restyled; the socket task persists the look
     /// (`player_look` goes out separately).
     LookChanged(Look),
+    /// Internal: level or experience changed; the socket task updates the
+    /// session's character (persisted by the flusher).
+    Progress { level: u32, exp: u64 },
 }
 
 /// What an instance simulates.
@@ -243,6 +257,10 @@ pub struct HubInstance {
     /// encoded monster section.
     horde_players: Vec<PlayerView>,
     monster_buf: BytesMut,
+    /// Dice of this instance's combat.
+    dice: combat::Rng,
+    /// Wave count at the last combat step (the dead return on a new wave).
+    last_wave: u32,
 }
 
 pub const MISSION_BOARD: &str = "mission_board";
@@ -284,6 +302,8 @@ impl HubInstance {
             players: Vec::new(),
             tick: 0,
             horde: None,
+            dice: combat::Rng::new(rand::random()),
+            last_wave: 0,
             horde_players: Vec::new(),
             monster_buf: BytesMut::new(),
         }
@@ -378,6 +398,7 @@ impl HubInstance {
             last_input_tick: self.tick,
             portal_guard: true,
             monsters: None,
+            fighter: None,
         };
         let joined = match &self.kind {
             InstanceKind::Hub { channel } => ServerMsg::HubJoined {
@@ -396,9 +417,15 @@ impl HubInstance {
             },
         };
         out.push((user_id, HubEvent::Control(joined)));
+        let mut player = player;
+        if self.horde.is_some() {
+            let class = Class::from_id(&player.profile.archetype).unwrap_or(Class::Swordsman);
+            player.fighter = Some(Fighter::new(class, player.profile.level, player.profile.exp, &player.profile.weapon));
+        }
         self.players.push(player);
         let idx = self.players.len() - 1;
         self.announce_arrival(idx, None, out);
+        self.announce_fighter(idx, out);
         outcome
     }
 
@@ -529,7 +556,7 @@ impl HubInstance {
 
         let mut transitions: Vec<(usize, usize)> = Vec::new();
         for (idx, p) in self.players.iter_mut().enumerate() {
-            if self.tick.wrapping_sub(p.last_input_tick) > timeout {
+            if self.tick.wrapping_sub(p.last_input_tick) > timeout || p.fighter.as_ref().is_some_and(|f| !f.is_up()) {
                 p.dir = (0.0, 0.0);
             }
             let map = world.map(p.map);
@@ -566,11 +593,16 @@ impl HubInstance {
             // Everyone has the default light radius until upgrades exist.
             let light = horde.light_radius();
             self.horde_players.clear();
+            // Downed and dead players are no longer hunted.
             self.horde_players.extend(
-                self.players.iter().filter(|p| p.map == horde.map()).map(|p| PlayerView { x: p.x, y: p.y, light }),
+                self.players
+                    .iter()
+                    .filter(|p| p.map == horde.map() && p.fighter.as_ref().is_none_or(Fighter::is_up))
+                    .map(|p| PlayerView { x: p.x, y: p.y, light }),
             );
             horde.tick_views(self.tick, self.config.tick_hz, &self.horde_players);
         }
+        self.fight(out);
         self.emit_snapshots(out);
     }
 
@@ -768,7 +800,7 @@ mod tests {
     use crate::world::protocol::Snapshot;
 
     fn profile(user_id: u32) -> PlayerProfile {
-        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: Look::default() }
+        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: Look::default(), level: 1, exp: 0, weapon: String::new() }
     }
 
     fn controls_for(out: &Outgoing, user: u32) -> Vec<ServerMsg> {
@@ -1197,5 +1229,85 @@ mod tests {
         };
         assert!(HubWorld::new(vec![town(), house()], "town").is_err(), "arrival (0,0) is a wall");
         assert!(HubWorld::new(vec![house()], "town").is_err(), "entry missing");
+    }
+
+    fn fighting_stage(archetype: &str) -> HubInstance {
+        use crate::world::horde::catalog::{test_def, MonsterCatalog};
+        use crate::world::horde::{Horde, HordeConfig};
+        let world = Arc::new(stage_world());
+        let catalog = Arc::new(MonsterCatalog::new(vec![test_def("blob", 2.0, 1, 0.0, false)]).unwrap());
+        let cfg = HordeConfig { light_radius: 6.0, director_enabled: false, seed: Some(1), ..HordeConfig::default() };
+        let horde = Horde::new(Arc::clone(&world), catalog, cfg);
+        let mut stage = HubInstance::stage(1, "m1", world, HubSimConfig::default()).with_horde(horde);
+        stage.dice = combat::Rng::new(3);
+        let mut out = Vec::new();
+        stage.join(PlayerProfile { archetype: archetype.into(), ..profile(1) }, Uuid::nil(), None, 0, &mut out);
+        assert!(
+            controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::PlayerVitals { entity_id: 101, state: 0, .. })),
+            "joining a stage announces the fighter's vitals"
+        );
+        stage
+    }
+
+    #[test]
+    fn standing_player_kills_a_monster_and_gains_experience() {
+        use crate::world::protocol::{hit, MONSTER_ENTITY_BASE};
+        let mut stage = fighting_stage("mage");
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 2.0, py).unwrap();
+        let mut out = Vec::new();
+        let mut killed = false;
+        for _ in 0..200 {
+            stage.tick(&mut out);
+            killed |= controls_for(&out, 1).iter().any(|m| {
+                matches!(m, ServerMsg::Combat { hits, .. }
+                    if hits.iter().any(|h| h.target == MONSTER_ENTITY_BASE + slot as u32 && h.flags & hit::KILL != 0))
+            });
+            if killed {
+                break;
+            }
+        }
+        assert!(killed, "the mage's basic attack kills the blob");
+        assert!(!stage.horde().unwrap().store().is_alive(slot));
+        for _ in 0..10 {
+            stage.tick(&mut out);
+        }
+        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Progress { gained, .. } if *gained > 0)));
+        assert!(out.iter().any(|(u, e)| *u == 1 && matches!(e, HubEvent::Progress { exp, .. } if *exp > 0)));
+    }
+
+    #[test]
+    fn moving_player_does_not_attack() {
+        let mut stage = fighting_stage("archer");
+        let (_, px, py) = stage.position_of(1).unwrap();
+        stage.horde_mut().unwrap().spawn(0, px + 3.0, py).unwrap();
+        let mut out = Vec::new();
+        for seq in 1..20 {
+            stage.input(1, seq, 0.0, if seq % 2 == 0 { 1.0 } else { -1.0 });
+            stage.tick(&mut out);
+        }
+        assert!(
+            !controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Combat { swings, .. } if swings.iter().any(|s| s.entity_id == 101))),
+            "no swing while the stick is held"
+        );
+    }
+
+    #[test]
+    fn solo_player_downed_means_defeat_and_exit() {
+        let mut stage = fighting_stage("swordsman");
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 1.0, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        stage.players[0].fighter.as_mut().unwrap().hp = 1;
+        let mut out = Vec::new();
+        for _ in 0..400 {
+            stage.tick(&mut out);
+            if stage.position_of(1).is_none() {
+                break;
+            }
+        }
+        assert!(stage.position_of(1).is_none(), "the defeated party leaves the stage");
+        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Notification { .. })));
+        assert!(out.iter().any(|(u, e)| *u == 1 && matches!(e, HubEvent::Transfer { target_map, .. } if target_map == "town")));
     }
 }

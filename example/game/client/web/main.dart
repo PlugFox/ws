@@ -23,6 +23,7 @@ Future<void> main() async {
     view,
     assetsBase: _assets,
     characterName: character['name']! as String,
+    archetype: character['archetype'] as String? ?? 'novice',
     look: Look.fromJson(character['look']),
   );
   web.console.info('Entering the hub as ${character['name']}'.toJS);

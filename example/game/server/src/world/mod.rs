@@ -1,6 +1,7 @@
 //! Game world: baked map data, hub channels, mission lobbies, stage
 //! instances and their wire protocol.
 
+pub mod combat;
 pub mod directory;
 pub mod horde;
 pub mod hub;

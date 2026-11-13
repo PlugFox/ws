@@ -262,6 +262,9 @@ impl Conn {
             name: ch.name.clone(),
             archetype: ch.archetype.clone(),
             look: ch.look,
+            level: ch.level,
+            exp: ch.base_exp,
+            weapon: ch.weapon.clone(),
         })
     }
 
@@ -368,6 +371,12 @@ impl Conn {
             Some(HubEvent::LookChanged(look)) => {
                 if let Some(ch) = self.session.character.write().await.as_mut() {
                     ch.set_look(look);
+                }
+                Vec::new()
+            }
+            Some(HubEvent::Progress { level, exp }) => {
+                if let Some(ch) = self.session.character.write().await.as_mut() {
+                    ch.set_progress(level, exp);
                 }
                 Vec::new()
             }

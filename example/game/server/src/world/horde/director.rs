@@ -46,6 +46,11 @@ pub struct WaveRules {
     /// Monsters land this many cells beyond a player's light radius
     /// (`[min, max)`), and never closer to anyone's light than `min`.
     pub spawn_margin: (f32, f32),
+    /// Monster levels of the mission (`[min, max]`): a kind spawns at its RO
+    /// level clamped into the band, plus one level per `level_every_secs`
+    /// of the run (still clamped); bosses spawn at `max + 5`.
+    pub levels: (u32, u32),
+    pub level_every_secs: f32,
 }
 
 impl WaveRules {
@@ -61,6 +66,8 @@ impl WaveRules {
         cluster_chance: 0.35,
         surround_chance: 0.15,
         spawn_margin: (4.0, 12.0),
+        levels: (1, 20),
+        level_every_secs: 90.0,
     };
 }
 

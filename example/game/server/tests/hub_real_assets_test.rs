@@ -109,8 +109,10 @@ fn real_maps_load_and_portals_resolve() {
         assert!(city.is_reachable_cell(p.trigger[0], p.trigger[1]), "portal {} unreachable from spawn", p.name);
     }
     let links: Vec<_> = (0..city.manifest.portals.len()).map(|i| world.link(izlude, i).clone()).collect();
-    assert!(matches!(&links[0], PortalLink::External { target_map } if target_map == "prt_fild08"));
-    assert!(links[1..].iter().all(|l| matches!(l, PortalLink::Internal { map, .. } if *map == izlude_in)));
+    // Stages are entered through the mission board only: the city has no
+    // portal to the field, every door leads indoors.
+    assert!(!links.is_empty());
+    assert!(links.iter().all(|l| matches!(l, PortalLink::Internal { map, .. } if *map == izlude_in)));
 
     // Heights decode within the manifest bounds.
     let b = city.manifest.height_bounds;
@@ -126,7 +128,7 @@ fn walk_through_every_house_door_and_back() {
     let mut hub = HubInstance::new(1, Arc::clone(&world), HubSimConfig::default());
     let mut out = Vec::new();
     hub.join(
-        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default() },
+        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new() },
         Uuid::nil(),
         None,
         0,
@@ -203,29 +205,6 @@ fn walk_through_every_house_door_and_back() {
 }
 
 #[test]
-fn field_portal_is_denied_in_the_hub() {
-    let Some(world) = load_world() else { return };
-    let world = Arc::new(world);
-    let city_idx = world.map_index("izlude").unwrap();
-    let mut hub = HubInstance::new(1, Arc::clone(&world), HubSimConfig::default());
-    let mut out = Vec::new();
-    hub.join(
-        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default() },
-        Uuid::nil(),
-        None,
-        0,
-        &mut out,
-    );
-    let city = world.map(city_idx);
-    let field = city.manifest.portals.iter().find(|p| p.target_map == "prt_fild08").unwrap();
-    let path = bfs(city, city.spawn, |cx, cy| field.contains(cx as f32 + 0.5, cy as f32 + 0.5)).unwrap();
-    let mut seq = 0;
-    let events = follow(&mut hub, 1, &mut seq, &path);
-    assert!(events.iter().any(|(_, e)| matches!(e, HubEvent::Control(ServerMsg::PortalDenied { target_map, .. }) if target_map == "prt_fild08")));
-    assert_eq!(hub.position_of(1).unwrap().0, "izlude");
-}
-
-#[test]
 fn stage_on_prt_fild08_exits_to_izlude_arrival() {
     let Some(dir) = dist() else { return };
     let hub = load_world().unwrap();
@@ -243,7 +222,7 @@ fn stage_on_prt_fild08_exits_to_izlude_arrival() {
 
     let mut stage = HubInstance::stage(1, "poring_island_survival", Arc::clone(&stage_world), HubSimConfig::default());
     let mut out = Vec::new();
-    let walker = PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default() };
+    let walker = PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new() };
     stage.join(walker, Uuid::nil(), None, 0, &mut out);
     let path = bfs(field, field.spawn, |cx, cy| exit.contains(cx as f32 + 0.5, cy as f32 + 0.5))
         .expect("the exit is reachable from the stage spawn");

@@ -4,6 +4,7 @@
 //! by id so it is stable across restarts; it is what snapshots carry and
 //! what `stage_joined.monsters` names.
 
+use crate::world::combat::{Archetype, Element, Size};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -35,10 +36,18 @@ struct RawDirector {
 
 #[derive(Deserialize)]
 struct RawStats {
-    max_hp: i32,
     move_speed: f32,
+    /// RO level (rAthena); places the kind inside a mission's level band.
+    #[serde(default = "one")]
+    level: u32,
     #[serde(default)]
-    touch_damage: i32,
+    element: String,
+    #[serde(default)]
+    size: String,
+}
+
+fn one() -> u32 {
+    1
 }
 
 #[derive(Deserialize)]
@@ -58,8 +67,12 @@ pub struct MonsterDef {
     pub radius: f32,
     /// Cells per second.
     pub speed: f32,
-    pub max_hp: i32,
-    pub touch_damage: i32,
+    /// RO level; combat numbers come from the level it spawns at
+    /// ([`crate::world::combat::MonsterBlock`]).
+    pub level: u32,
+    pub archetype: Archetype,
+    pub element: Element,
+    pub size: Size,
     /// Director credits one spawn costs.
     pub spawn_cost: u32,
     /// Seconds into the stage before the director may spawn it.
@@ -108,9 +121,6 @@ impl MonsterCatalog {
             if !(d.speed.is_finite() && d.speed > 0.0 && d.speed <= MAX_SPEED) {
                 return bad("move_speed must be in (0, 9] cells/s");
             }
-            if d.max_hp <= 0 {
-                return bad("max_hp must be positive");
-            }
             if !d.unlock_secs.is_finite() || d.unlock_secs < 0.0 {
                 return bad("min_wave_time must be >= 0");
             }
@@ -131,12 +141,14 @@ impl MonsterCatalog {
             .map(|m| MonsterDef {
                 boss: m.director.archetype == "boss",
                 pack: pack_of(&m.director.archetype),
+                archetype: Archetype::from_id(&m.director.archetype),
+                level: m.stats.level.max(1),
+                element: Element::from_id(&m.stats.element),
+                size: Size::from_id(&m.stats.size),
                 id: m.id,
                 name: m.name,
                 radius: m.radius,
                 speed: m.stats.move_speed,
-                max_hp: m.stats.max_hp,
-                touch_damage: m.stats.touch_damage,
                 spawn_cost: m.director.spawn_cost,
                 unlock_secs: m.director.min_wave_time,
                 weight: m.director.weight,
@@ -183,8 +195,10 @@ pub(crate) fn test_def(id: &str, speed: f32, cost: u32, unlock: f32, boss: bool)
         name: id.into(),
         radius: if boss { 1.2 } else { 0.35 },
         speed,
-        max_hp: 50,
-        touch_damage: 5,
+        level: 1,
+        archetype: if boss { Archetype::Boss } else { Archetype::Swarm },
+        element: Element::Neutral,
+        size: if boss { Size::Large } else { Size::Small },
         spawn_cost: cost,
         unlock_secs: unlock,
         weight: 10,
@@ -203,7 +217,7 @@ mod tests {
         let json = br#"{
           "zombie": {"id":"zombie","name":"Zombie","radius":0.6,
             "director":{"archetype":"tank","spawn_cost":6,"min_wave_time":90,"tier":2,"weight":30,"xp_reward":25},
-            "stats":{"max_hp":204,"move_speed":1.8,"touch_damage":18,"defense":20}, "skills": []},
+            "stats":{"max_hp":204,"move_speed":1.8,"touch_damage":18,"defense":20,"level":17,"element":"undead","size":"medium"}, "skills": []},
           "baphomet": {"id":"baphomet","name":"Baphomet","radius":1.2,
             "director":{"archetype":"boss","spawn_cost":50,"min_wave_time":300,"tier":3,"weight":5,"xp_reward":500},
             "stats":{"max_hp":8000,"move_speed":5.0,"touch_damage":65}}
@@ -215,6 +229,8 @@ mod tests {
         assert_eq!(c.get(1).unlock_secs, 90.0);
         assert_eq!(c.get(1).pack, (1, 3), "tanks come alone or in twos and threes");
         assert_eq!(c.get(0).pack, (1, 1));
+        assert_eq!((c.get(1).level, c.get(1).element, c.get(1).archetype), (17, Element::Undead, Archetype::Tank));
+        assert_eq!((c.get(0).level, c.get(0).element), (1, Element::Neutral), "defaults");
     }
 
     #[test]

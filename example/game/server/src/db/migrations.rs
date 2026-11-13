@@ -80,5 +80,20 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
         }
     }
 
+    if !columns.iter().any(|c| c == "weapon") {
+        sqlx::query("ALTER TABLE characters ADD COLUMN weapon TEXT NOT NULL DEFAULT ''").execute(pool).await?;
+    }
+
+    // Class rework (COMBAT.md §1.2): the first archetypes map to the nearest
+    // playable line. Idempotent.
+    sqlx::query(
+        "UPDATE characters SET archetype = CASE archetype \
+             WHEN 'warrior' THEN 'swordsman' WHEN 'novice' THEN 'swordsman' \
+             WHEN 'ranger' THEN 'archer' WHEN 'rogue' THEN 'archer' ELSE archetype END \
+         WHERE archetype IN ('warrior', 'novice', 'ranger', 'rogue')",
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
