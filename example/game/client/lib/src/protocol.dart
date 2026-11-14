@@ -751,25 +751,45 @@ abstract final class EquipSlot {
 }
 
 /// Weapon family of a weapon item id (what the engine draws and swings:
-/// `setWeapon`), or null for none / unknown.
-String? weaponFamilyOf(String weapon) => switch (weapon) {
-  'knife' || 'cutter' || 'main_gauche' || 'stiletto' => 'dagger',
-  'sword' || 'falchion' || 'blade' => 'sword',
-  'katana' || 'claymore' => 'two_hand_sword',
-  'javelin' || 'pike' => 'spear',
-  'axe' => 'axe',
-  'battle_axe' => 'two_hand_axe',
-  'club' || 'mace' => 'mace',
-  'bow' || 'composite_bow' || 'great_bow' => 'bow',
-  'rod' || 'wand' || 'staff' => 'staff',
-  'bible' => 'book',
-  'jur' || 'katar' || 'jamadhar' => 'katar',
-  _ => null,
+/// `setWeapon`), or null for none / unknown. A magic weapon (server
+/// combat/magic.rs) is `family:item`: the engine draws it in its own
+/// colours when the pack has them.
+String? weaponFamilyOf(String weapon) {
+  final id = weapon.split(RegExp('[+\\[]')).first;
+  final family = switch (id) {
+    'knife' || 'cutter' || 'main_gauche' || 'stiletto' || 'viper_fang' => 'dagger',
+    'sword' || 'falchion' || 'blade' || 'ember_blade' => 'sword',
+    'katana' || 'claymore' => 'two_hand_sword',
+    'javelin' || 'pike' || 'wyvern_spear' => 'spear',
+    'axe' => 'axe',
+    'battle_axe' || 'berserker_axe' => 'two_hand_axe',
+    'club' || 'mace' || 'dawn_mace' => 'mace',
+    'bow' || 'composite_bow' || 'great_bow' || 'wind_bow' || 'sunshot_bow' => 'bow',
+    'rod' || 'wand' || 'staff' || 'war_mage_wand' || 'ember_staff' => 'staff',
+    'bible' || 'tome_of_mercy' => 'book',
+    'jur' || 'katar' || 'jamadhar' || 'shadowfang' => 'katar',
+    _ => null,
+  };
+  return family == null || !_magicWeapons.contains(id) ? family : '$family:$id';
+}
+
+const _magicWeapons = {
+  'viper_fang',
+  'ember_blade',
+  'wyvern_spear',
+  'berserker_axe',
+  'wind_bow',
+  'sunshot_bow',
+  'dawn_mace',
+  'war_mage_wand',
+  'ember_staff',
+  'tome_of_mercy',
+  'shadowfang',
 };
 
 /// One row of the item catalogue ([ItemDefs]).
 final class ItemDef {
-  ItemDef._(this.id, this.name, this.kind, this.slot, this.price, this.classes, this.desc);
+  ItemDef._(this.id, this.name, this.kind, this.slot, this.price, this.classes, this.desc, this.rarity);
   final String id;
   final String name;
 
@@ -788,9 +808,13 @@ final class ItemDef {
   /// Tooltip text (the engine's `markup()`).
   final String desc;
 
+  /// 0 common, 1 uncommon (green), 2 rare (blue): the name's colour.
+  final int rarity;
+
   static ItemDef _read(WireReader r) {
     final id = r.str(), name = r.str(), kind = r.u8(), slot = r.u8();
-    return ItemDef._(id, name, kind, slot == 0xFF ? null : slot, r.varint(), r.u8(), r.str());
+    final price = r.varint(), classes = r.u8(), desc = r.str();
+    return ItemDef._(id, name, kind, slot == 0xFF ? null : slot, price, classes, desc, r.u8());
   }
 }
 

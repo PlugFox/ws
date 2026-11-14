@@ -339,6 +339,7 @@ impl BuffFx {
             cloak: self.cloak,
             ambush: self.ambush,
             amplify: n(self.amplify).max(0.0),
+            ..Mods::NONE
         }
     }
 

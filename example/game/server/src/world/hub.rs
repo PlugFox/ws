@@ -1129,6 +1129,15 @@ impl HubInstance {
             self.end_stage(map, how == "win", out);
             return;
         }
+        // Test hook (`GAME_DEV=1`): `/give <item id>` puts one in the
+        // speaker's bag (the e2e magic items; anywhere, as loot).
+        if self.config.missions_anywhere
+            && let Some(id) = text.strip_prefix("/give ")
+            && let Some(e) = crate::world::combat::items::find(id.trim())
+        {
+            out.push((user_id, HubEvent::Loot { items: vec![(e.id, 1)] }));
+            return;
+        }
         // Test hook (`GAME_DEV=1`): `/spawn <monster id>` puts a monster of
         // the stage's roster 6 cells east of the speaker (a boss for the
         // e2e smoke tests without waiting ten minutes).

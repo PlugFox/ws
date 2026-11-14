@@ -318,7 +318,9 @@ pub(super) struct Landing<'a> {
 pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, horde: &Horde, walk: &WalkGrid, rng: &mut Rng, lives: &mut Vec<Live>) {
     let Some(f) = caster.fighter.as_ref() else { return };
     let (cl, class, weapon, mods) = (cx.power.unwrap_or(f.level), f.class, f.weapon, f.mods);
-    let dc = save_dc(cl);
+    // A pickup bonus casts for the player without their gear.
+    let own = cx.power.is_none();
+    let dc = save_dc(cl) + if own { mods.spell_dc } else { 0 };
     let (slv, hz, now, def) = (cx.slv, cx.hz, cx.now, cx.def);
     let uid = caster.profile.user_id;
     let mut zone = cx.zone;
@@ -351,6 +353,9 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
                 let (base, kind, to_hit) = match dice {
                     EffectDice::Fixed(d) => {
                         let mut d = scaled(*d, *scale_k, mult.at(slv), bonus.at(slv), cl);
+                        if own {
+                            d.bonus += mods.spell_power;
+                        }
                         // Mystical Amplification: this cast is the next
                         // spell; the buff ends with it.
                         if mods.amplify > 0.0 && cx.power.is_none() {
@@ -388,7 +393,13 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
                 };
                 Load::Damage { blow, knock: knockback.at(slv) }
             }
-            Payload::Heal(HealFx { dice, scale_k, mult }) => Load::Heal(scaled(*dice, *scale_k, mult.at(slv), 0.0, cl)),
+            Payload::Heal(HealFx { dice, scale_k, mult }) => {
+                let mut d = scaled(*dice, *scale_k, mult.at(slv), 0.0, cl);
+                if own {
+                    d.bonus += mods.heal_power;
+                }
+                Load::Heal(d)
+            }
             Payload::Condition { condition, save, secs, mired } => {
                 let ticks = match (*save, t.lasting(slv)) {
                     (true, _) => ticks16(secs.at(slv), hz),

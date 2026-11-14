@@ -66,6 +66,52 @@ pub struct Mods {
     /// its dice rolled their maximum; casting it ends the buff (Mystical
     /// Amplification).
     pub amplify: f32,
+    /// Spell save DC raised by this much (a war mage's wand).
+    pub spell_dc: i32,
+    /// Flat bonus to the fixed dice of damaging spells (one per cast's hit).
+    pub spell_power: i32,
+    /// Flat bonus to every heal cast.
+    pub heal_power: i32,
+    /// Potions and food restore this fraction more.
+    pub potion: f32,
+}
+
+impl Mods {
+    /// Nothing changed: the const base of item enchantments
+    /// (`Mods { haste: 0.1, ..Mods::NONE }`).
+    pub const NONE: Mods = Mods {
+        ac: 0,
+        to_hit: 0,
+        to_hit_die: 0,
+        damage: None,
+        damage_flat: 0,
+        haste: 0.0,
+        speed: 0.0,
+        resist: 0.0,
+        reduce: 0,
+        block: 0,
+        light: 0.0,
+        sp_regen: 0.0,
+        hp_regen: 0.0,
+        crit: 0,
+        advantage: false,
+        hidden: false,
+        steady: false,
+        mana_shield: false,
+        evil_resist: 0.0,
+        evil_damage: 0,
+        soul_drain: 0,
+        double: 0,
+        venom: 0,
+        loot: 0.0,
+        cloak: false,
+        ambush: false,
+        amplify: 0.0,
+        spell_dc: 0,
+        spell_power: 0,
+        heal_power: 0,
+        potion: 0.0,
+    };
 }
 
 impl Mods {
@@ -102,6 +148,10 @@ impl Mods {
         self.cloak |= o.cloak;
         self.ambush |= o.ambush;
         self.amplify += o.amplify;
+        self.spell_dc += o.spell_dc;
+        self.spell_power += o.spell_power;
+        self.heal_power += o.heal_power;
+        self.potion += o.potion;
     }
 
     /// Multiplier of the basic attack interval (never below a third).

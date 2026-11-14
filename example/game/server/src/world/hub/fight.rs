@@ -248,6 +248,7 @@ impl Fighter {
         self.weapon = Weapon::held(self.class, bag.weapon());
         self.gear = bag.gear(self.class);
         self.rescale();
+        self.sum_mods();
         if full.0 {
             self.hp = self.max_hp;
         }
@@ -329,8 +330,16 @@ impl Fighter {
         self.sum_mods();
     }
 
-    fn sum_mods(&mut self) {
+    /// The passives and the magic items worn: the mods without buffs.
+    fn base_mods(&self) -> Mods {
         let mut m = self.passive;
+        m.add(&self.gear.mods);
+        m
+    }
+
+    fn sum_mods(&mut self) {
+        // Magic items worn count like passives.
+        let mut m = self.base_mods();
         for b in &self.buffs {
             m.add(&b.mods);
         }
@@ -341,7 +350,7 @@ impl Fighter {
     pub(super) fn refresh(&mut self, now: u32) {
         let n = self.buffs.len();
         self.buffs.retain(|b| b.until > now);
-        if self.buffs.len() != n || self.buffs.is_empty() && self.mods != self.passive {
+        if self.buffs.len() != n || self.buffs.is_empty() && self.mods != self.base_mods() {
             self.sum_mods();
         }
         if self.temp_hp > 0 && !self.buffs.iter().any(|b| b.temp) {
@@ -1247,5 +1256,30 @@ mod tests {
     fn fighters_hold_a_weapon_their_class_allows() {
         assert_eq!(Fighter::new(Class::Swordsman, 1, 0, "katana").weapon.id, "katana");
         assert_eq!(Fighter::new(Class::Archer, 1, 0, "katana").weapon.id, "bow");
+    }
+
+    /// Magic items worn add their enchantment to the fighter's mods (on top
+    /// of the passives and buffs), their HP and every save; taking them off
+    /// takes it away.
+    #[test]
+    fn magic_items_enchant_whoever_wears_them() {
+        let mut f = Fighter::new(Class::Mage, 10, 0, "");
+        let plain = (f.mods.speed, f.max_hp, f.gear.saves);
+        let mut bag = Bag::starting(Class::Mage, "");
+        bag.equip[items::Slot::Shoes as usize] = "striding_boots".into();
+        bag.equip[items::Slot::Accessory1 as usize] = "protection_ring".into();
+        bag.equip[items::Slot::Weapon as usize] = "war_mage_wand".into();
+        f.wear(&bag);
+        assert!((f.mods.speed - plain.0 - 0.1).abs() < 1e-6, "boots: +10% speed");
+        assert_eq!(f.mods.spell_dc, 1, "the wand");
+        assert_eq!(f.mods.ac, 1, "the ring's AC");
+        assert_eq!(f.max_hp, plain.1 + 8, "the boots' HP");
+        assert_eq!(f.gear.saves, plain.2.map(|s| s + 1), "the ring: every save");
+        assert_eq!(f.weapon.id, "war_mage_wand");
+        // A passive set later keeps the gear's enchantment.
+        f.set_passive(Mods { haste: 0.2, ..Mods::default() });
+        assert!((f.mods.speed - plain.0 - 0.1).abs() < 1e-6 && (f.mods.haste - 0.2).abs() < 1e-6);
+        f.wear(&Bag::starting(Class::Mage, ""));
+        assert_eq!((f.mods.spell_dc, f.mods.ac), (0, 0), "off with the items");
     }
 }

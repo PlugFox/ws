@@ -99,11 +99,11 @@ void main() {
       expect(inv.count('red_potion'), 5);
       expect(inv.equip, ['', '', '', 'cotton_shirt', 'sword', '', '', '', '', '']);
       expect(inv.statsJson, '{"ac":12}');
-      final defs = ServerMsg.decode(hex('3b0103636170034361700500a01f0b052b31204143'))! as ItemDefs;
+      final defs = ServerMsg.decode(hex('3b0103636170034361700500a01f0b052b3120414302'))! as ItemDefs;
       final cap = defs.items.single;
       expect(
-        (cap.id, cap.name, cap.kind, cap.slot, cap.price, cap.classes, cap.desc),
-        ('cap', 'Cap', 5, 0, 4000, 11, '+1 AC'),
+        (cap.id, cap.name, cap.kind, cap.slot, cap.price, cap.classes, cap.desc, cap.rarity),
+        ('cap', 'Cap', 5, 0, 4000, 11, '+1 AC', 2),
       );
       final shop = ServerMsg.decode(hex('3c04646567610444656761010573776f7264'))! as Shop;
       expect((shop.npc, shop.name), ('dega', 'Dega'));

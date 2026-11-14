@@ -253,3 +253,19 @@ fn a_press_keeps_its_aim_when_a_later_frame_lands_in_the_same_tick() {
     let (_, x, y) = stage.position_of(1).unwrap();
     assert!(x > 6.5 + 4.0 && (y - 5.5).abs() < 0.01, "slid east toward the pointer: ({x}, {y})");
 }
+
+#[test]
+fn auto_cast_aims_itself_while_a_press_by_hand_follows_the_pointer() {
+    let mut stage = stage("archer", &[("arrow", 1)], 0);
+    put(&mut stage, 1, 10.5, 5.5);
+    stage.horde_mut().unwrap().spawn(0, 13.5, 5.5).unwrap(); // east
+    let west = [-32, 0]; // pointing away from it
+    let casts = press(&mut stage, west, 1);
+    assert!(casts[0].1 < 10.5, "by hand: toward the pointer, {casts:?}");
+    fighter_mut(&mut stage, 1).cooldowns.fill(0);
+    manual(&mut stage, true);
+    auto(&mut stage, 1);
+    stage.tick(&mut Vec::new());
+    let casts = press(&mut stage, west, 1);
+    assert!(casts[0].1 > 10.5, "auto-cast: toward the monster, wherever the mouse is, {casts:?}");
+}

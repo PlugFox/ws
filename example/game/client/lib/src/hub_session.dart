@@ -14,6 +14,7 @@ import 'package:game_client/src/classes.dart';
 import 'package:game_client/src/click_move.dart';
 import 'package:game_client/src/engine.dart';
 import 'package:game_client/src/feedback.dart';
+import 'package:game_client/src/guide.dart';
 import 'package:game_client/src/input.dart';
 import 'package:game_client/src/input_devices.dart';
 import 'package:game_client/src/interpolation.dart';
@@ -923,6 +924,7 @@ final class HubSession {
                   'price': d.price,
                   'classes': d.classes,
                   'desc': d.desc,
+                  'rarity': d.rarity,
                 },
             ],
           }),
@@ -943,8 +945,14 @@ final class HubSession {
       case Loot(:final entityId, :final x, :final y, :final item, :final count, :final rare):
         view.showLoot(entityId.toDouble(), x, y, item, count, rare);
         if (rare) {
-          final name = _itemDefs[item]?.name ?? item;
-          view.toast('Rare drop: ${count > 1 ? '$count × ' : ''}$name!');
+          final def = _itemDefs[item];
+          final name = def?.name ?? item;
+          final what = switch (def?.rarity ?? 0) {
+            2 => 'Rare magic item',
+            1 => 'Magic item',
+            _ => 'Rare drop',
+          };
+          view.toast('$what: ${count > 1 ? '$count × ' : ''}$name!');
         }
       case Combo(:final count, :final rank, :final windowMs, :final leftMs):
         _combo = count;
@@ -1486,8 +1494,14 @@ final class HubSession {
     } else if (msg.viaPortal == null) {
       // The keys once per visit (never on touch); back from a mission or a
       // reconnect, a short greeting is enough.
-      final keys = !_welcomed && !_input.touchOn;
+      final first = !_welcomed;
+      final keys = first && !_input.touchOn;
       _welcomed = true;
+      // A brand-new character's first arrival after signing in: the guide
+      // opens on its own (minimise or close it; the Kafra has it too).
+      // (`?guide=welcome`: as if new, for e2e runs whose heroes start higher.)
+      final fresh = (_progress?.level ?? _myLevel) <= 1 || Uri.base.queryParameters['guide'] == 'welcome';
+      if (first && fresh && _settings['guideAuto'] != false) _showGuide(welcome: true);
       view.toast(
         keys
             ? 'Welcome to $_mapName ($_channel). WASD to move, ${_binds.interact?.caption ?? 'F'} or Space to talk, '
@@ -2209,6 +2223,12 @@ final class HubSession {
               },
             },
           if (isKafra)
+            {
+              'id': 'menu:guide',
+              'label': "Adventurer's Guide",
+              'detail': 'How the game works: town, expeditions, the horde, skills, items and parties.',
+            },
+          if (isKafra)
             {'id': 'restyle', 'label': 'Hair and dyes', 'detail': 'A new hair style, hair dye or clothes dye.'},
           if (isMaster)
             {
@@ -2704,6 +2724,10 @@ final class HubSession {
         view.closeDialog();
       case 'missions_close':
         _missionsShown = false;
+      case 'guide_close':
+        break;
+      case 'guide_auto':
+        _applySetting('guideAuto', e['on'] == true);
       case 'mission_select':
         final tier = (e['tier'] as num?)?.toInt() ?? 0, mask = (e['mask'] as num?)?.toInt() ?? 0;
         _pendingMods = tier == 0 && mask == 0 ? null : (tier, mask);
@@ -3292,6 +3316,7 @@ final class HubSession {
           {'id': 'menu:resume', 'label': 'Return to game', 'detail': 'Close this menu (Esc)'},
           {'id': 'menu:settings', 'label': 'Settings', 'detail': 'Graphics, sound, keys, interface (F10)'},
           {'id': 'menu:controls', 'label': 'Controls', 'detail': 'Every key and mouse action at a glance'},
+          {'id': 'menu:guide', 'label': "Adventurer's Guide", 'detail': 'How the game works, topic by topic'},
           {'id': 'menu:fullscreen', 'label': 'Full screen', 'detail': 'Hide the browser around the game (on / off)'},
           {'id': 'menu:friends', 'label': 'Friends', 'detail': _friendsDetail()},
           {
@@ -3317,6 +3342,9 @@ final class HubSession {
         _toggleSettings();
       case 'controls':
         _showControls();
+      case 'guide':
+        view.closeDialog();
+        _showGuide();
       case 'fullscreen':
         view.closeDialog();
         view.toggleFullscreen();
@@ -3338,6 +3366,18 @@ final class HubSession {
         view.closeDialog();
         unawaited(_leave(id));
     }
+  }
+
+  /// The Adventurer's Guide; [welcome]: opened on its own for a new
+  /// character (a greeting and the "open for new characters" box).
+  void _showGuide({bool welcome = false}) {
+    view.showGuide(
+      jsonEncode({
+        'topics': guideTopics(_binds, _ladder, assetsBase),
+        if (welcome) 'welcome': true,
+        if (welcome) 'auto': _settings['guideAuto'] != false,
+      }),
+    );
   }
 
   void _showControls() {

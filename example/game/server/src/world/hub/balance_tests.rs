@@ -281,3 +281,28 @@ fn izlude_has_a_food_vendor() {
     }
     assert!(stock.iter().any(|id| matches!(items::find(id).unwrap().kind, Kind::Consumable(Effect::Spirit(_)))), "grapes for SP");
 }
+
+/// A Periapt of Wound Closure (magic.rs `potion: 0.5`) makes a drink
+/// restore half as much again: the same roll range, ×1.5.
+#[test]
+fn a_periapt_makes_potions_restore_half_again() {
+    use crate::world::combat::items::{self, Effect, Kind, Slot};
+    use crate::world::combat::{Bag, Class};
+    use crate::world::horde::catalog::test_def;
+    let catalog = MonsterCatalog::new(vec![test_def("blob", 2.0, 1, 0.0, false)]).unwrap();
+    let Kind::Consumable(Effect::Heal(d)) = items::find("white_potion").unwrap().kind else { unreachable!() };
+    let (lo, hi) = (d.count as i32 + d.bonus, d.count as i32 * d.sides as i32 + d.bonus);
+    let mut stage = field(catalog, SkillBook::default(), 3);
+    let mut bag = Bag::starting(Class::Mage, "");
+    bag.add("white_potion", 1).unwrap();
+    bag.equip[Slot::Accessory1 as usize] = "wound_periapt".into();
+    {
+        let f = stage.players[0].fighter.as_mut().unwrap();
+        f.wear(&bag);
+        (f.max_hp, f.hp) = (10_000, 1);
+    }
+    stage.use_item(1, "white_potion", &mut Vec::new());
+    let total = stage.players[0].fighter.as_ref().unwrap().regen[0].expect("it runs").total;
+    let (lo, hi) = ((lo as f32 * 1.5).round() as i32, (hi as f32 * 1.5).round() as i32);
+    assert!((lo..=hi).contains(&total), "{total} not in {lo}..={hi}");
+}

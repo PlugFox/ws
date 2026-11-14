@@ -651,7 +651,7 @@ mod tests {
                 let mut rng = StdRng::seed_from_u64(seed);
                 let mut out = Vec::new();
                 for _ in 0..(900 * 20) {
-                    d.tick(0.05, 1, c, &mut rng, |_| false, &mut out);
+                    d.tick(0.05, 1, c, &mut rng, |_| false, || 0, &mut out);
                 }
                 for p in &out {
                     let def = c.get(p.kind);
@@ -685,8 +685,10 @@ mod tests {
             let cap = (m.monsters().count as f64).powf(COUNT_LOOT_GROWTH as f64) * 1.08;
             assert!(got.1 <= plain.1 * cap, "{m:?}: item drops {} vs {} (cap ×{cap:.2})", got.1, plain.1);
             assert!(got.2 <= plain.2 * cap, "{m:?}: kill zeny {} vs {} (cap ×{cap:.2})", got.2, plain.2);
-            // (A roster whose drop tables are still empty has no loot to compare.)
-            if m == (Modifiers { tier: 0, flags: ModFlags::SWARM }) && plain.1 > 0.0 {
+            // (A roster whose regular monsters drop nothing yet, only its
+            // elites and boss, has no swarm loot to compare.)
+            let regular_drops = c.defs().iter().any(|d| matches!(d.archetype, Archetype::Swarm | Archetype::Chaser | Archetype::Tank) && !d.drops.is_empty());
+            if m == (Modifiers { tier: 0, flags: ModFlags::SWARM }) && regular_drops {
                 assert!(got.1 > plain.1 * 1.05, "{m:?}: a swarm pays somewhat more ({} vs {})", got.1, plain.1);
                 assert!(got.1 / plain.1 < got.0 / plain.0 * 0.85, "{m:?}: loot grows slower than the count");
             }

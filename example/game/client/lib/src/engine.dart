@@ -276,6 +276,11 @@ extension type GameView._(JSObject _) implements JSObject {
   /// `missions_close`.
   external void showMissions(String json);
 
+  /// The Adventurer's Guide (`{topics: [{id, title, summary, icon?,
+  /// blocks}], selected?, welcome?, auto?}`; '' closes it). Events:
+  /// `guide_close`, `guide_auto {on}`.
+  external void showGuide(String json);
+
   /// The mission modifier table (server `MODIFIER_DEFS`): `{defs: [{id, bit
   /// (255 = the difficulty slider), name, desc, icon, risk, minLevel,
   /// locked, steps: [{label, detail}]}], rewards: [{zenyPct, expPct,

@@ -128,7 +128,8 @@ impl HubInstance {
                     out.push((user_id, HubEvent::Control(hub_error("potion_weaker", format!("A stronger {what} potion is still working.")))));
                     return;
                 }
-                let total = d.roll(&mut self.dice, false).max(1);
+                // A Periapt of Wound Closure makes every drink count for more.
+                let total = ((d.roll(&mut self.dice, false).max(1) as f32) * (1.0 + f.mods.potion.max(0.0))).round() as i32;
                 f.regen[pool] = Some(Regen { item: id, left: total, total, ticks, span: ticks, shown: 0, started: tick });
             }
             Effect::Cure => {

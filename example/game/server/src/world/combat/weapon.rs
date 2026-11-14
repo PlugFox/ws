@@ -221,6 +221,18 @@ pub const WEAPONS: &[Weapon] = &[
     w("jur", "Jur", WeaponKind::Katar, 1, 1, 6, 1500),
     w("katar", "Katar", WeaponKind::Katar, 2, 1, 6, 4500),
     w("jamadhar", "Jamadhar", WeaponKind::Katar, 3, 1, 8, 12000),
+    // Magic weapons (magic.rs): drops only; the level is their +1.
+    w("viper_fang", "Viper Fang", WeaponKind::Dagger, 2, 1, 4, 5000),
+    w("ember_blade", "Ember Blade", WeaponKind::Sword, 1, 1, 8, 5000),
+    w("wyvern_spear", "Wyvern Spear", WeaponKind::Spear, 2, 1, 10, 6000),
+    w("berserker_axe", "Berserker Axe", WeaponKind::TwoHandAxe, 2, 1, 12, 16000),
+    w("wind_bow", "Bow of the Wind", WeaponKind::Bow, 1, 1, 8, 5000),
+    w("sunshot_bow", "Sunshot Bow", WeaponKind::Bow, 2, 1, 8, 16000),
+    w("dawn_mace", "Mace of Dawn", WeaponKind::Mace, 2, 1, 8, 6000),
+    w("war_mage_wand", "Wand of the War Mage", WeaponKind::Staff, 1, 1, 6, 5000),
+    w("ember_staff", "Staff of Embers", WeaponKind::Staff, 2, 1, 8, 16000),
+    w("tome_of_mercy", "Tome of Mercy", WeaponKind::Book, 2, 1, 6, 6000),
+    w("shadowfang", "Shadowfang", WeaponKind::Katar, 2, 1, 6, 16000),
 ];
 
 impl Weapon {

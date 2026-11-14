@@ -12,7 +12,9 @@
 //! it to the session's character and the stage reads the result.
 
 use super::class::{Class, Save};
+use super::buffs::Mods;
 use super::dice::Dice;
+use super::magic::{magic, Rarity};
 use super::weapon::{Weapon, WEAPONS};
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
@@ -268,6 +270,29 @@ pub const ITEMS: &[Item] = &[
     potion("blue_herb", "Blue Herb", Effect::Spirit(Dice::new(2, 6, 4)), 60, "A cool herb that clears a tired mind."),
     potion("honey", "Honey", Effect::Heal(Dice::new(4, 6, 4)), 100, "Thick golden honey hidden in a Shining Plant."),
     potion("yggdrasil_berry", "Yggdrasil Berry", Effect::Heal(Dice::new(20, 4, 40)), 2500, "A berry of the World Tree; one bite mends nearly anything."),
+    // Magic items (magic.rs: rarity and enchantment): drops only, never
+    // in a shop. The rows here are their plain numbers.
+    item("mithril_shirt", "Mithril Shirt", Kind::Armour(Weight::Light, 13), 6000, ALL_CLASSES, Bonus::NONE, "Links of mithril, light as silk and hard as steel."),
+    item("elven_mail", "Elven Mail", Kind::Armour(Weight::Medium, 14), 14000, SW | AR | AC | TH, save(Save::Reflex, 1), "Leaf-thin plates that never slow a step."),
+    item("apprentice_robe", "Apprentice's Robe", Kind::Armour(Weight::Light, 11), 5000, MG | AC, sp(15), "Embroidered with runes that hum in the dark."),
+    item("dwarven_plate", "Dwarven Plate", Kind::Armour(Weight::Heavy, 18), 20000, SW, Bonus::NONE, "Forged deep under the mountains; blows glance off."),
+    item("sentinel_shield", "Sentinel Shield", Kind::Shield, 6000, SW | MG | AC | TH, Bonus { ac: 2, save: Some((Save::Reflex, 1)), ..Bonus::NONE }, "An open eye is painted on it, and it glows."),
+    item("spellward_buckler", "Spellward Buckler", Kind::Shield, 7000, SW | AC, Bonus { ac: 2, save: Some((Save::Mind, 1)), ..Bonus::NONE }, "Spells lose their bite against its silver rim."),
+    item("focus_circlet", "Circlet of Focus", Kind::Headgear(Slot::UpperHead), 6000, MG | AC, sp(12), "A cold band of silver that keeps the mind clear."),
+    item("night_goggles", "Goggles of Night", Kind::Headgear(Slot::MidHead), 5000, ALL_CLASSES, Bonus::NONE, "Dark lenses that make the night look like dusk."),
+    item("bandit_cap", "Bandit's Cap", Kind::Headgear(Slot::UpperHead), 6000, AR | TH, ac(1), "Its owner always found a little more in every pocket."),
+    item("protection_cloak", "Cloak of Protection", Kind::Garment, 8000, ALL_CLASSES, ac(1), "A plain grey cloak with a warding stitched inside."),
+    item("elven_cloak", "Elven Cloak", Kind::Garment, 7000, ALL_CLASSES, save(Save::Reflex, 1), "Green as the forest and quick as the wind."),
+    item("striding_boots", "Boots of Striding", Kind::Shoes, 7000, ALL_CLASSES, hp(8), "Every step goes a little further than it should."),
+    item("pilgrim_boots", "Pilgrim's Boots", Kind::Shoes, 6000, ALL_CLASSES, hp(10), "Blessed for the long road: bruises fade as you walk."),
+    item("protection_ring", "Ring of Protection", Kind::Accessory, 16000, ALL_CLASSES, Bonus::NONE, "A band of white gold that turns harm aside."),
+    item("wound_periapt", "Periapt of Wound Closure", Kind::Accessory, 6000, ALL_CLASSES, hp(6), "A red stone on a chain; wounds close faster around it."),
+    item("power_pearl", "Pearl of Power", Kind::Accessory, 6000, MG | AC, sp(10), "It drinks the last breath of the fallen and gives it to you."),
+    item("archery_bracers", "Bracers of Archery", Kind::Accessory, 6000, AR, Bonus::NONE, "Leather bracers that steady the drawing arm."),
+    item("luckstone", "Luckstone", Kind::Accessory, 7000, ALL_CLASSES, Bonus::NONE, "A smooth agate. Things just go your way."),
+    item("cutpurse_gloves", "Cutpurse Gloves", Kind::Accessory, 6000, TH, Bonus::NONE, "Thin gloves for very quick hands."),
+    item("bear_amulet", "Amulet of the Bear", Kind::Accessory, 6000, SW, save(Save::Body, 1), "A bear's claw on a cord; you feel twice as broad."),
+    item("sun_pendant", "Sun Pendant", Kind::Accessory, 6000, AC, Bonus::NONE, "A golden sun that warms the hands that heal."),
     // Loot (Etc): sold at any merchant for half the price.
     item("jellopy", "Jellopy", Kind::Etc, 6, 0, Bonus::NONE, "A small crystal left behind by Porings."),
     item("flower", "Flower", Kind::Etc, 4, 0, Bonus::NONE, "A small field flower. It smells of spring."),
@@ -343,6 +368,8 @@ pub struct Entry {
     pub bonus: Bonus,
     /// Weapon stats when it is one.
     pub weapon: Option<&'static Weapon>,
+    /// Name colour: common (white), uncommon (green), rare (blue).
+    pub rarity: Rarity,
     /// Tooltip text (`markup()`: `**bold**`, `[ok]…[/]`).
     pub desc: String,
 }
@@ -434,24 +461,35 @@ fn describe_weapon(w: &Weapon) -> String {
     lines.join("\n")
 }
 
+/// A magic item's enchantment lines and rarity before the flavour line
+/// (the last one) of its plain description.
+fn enchant(id: &str, desc: String) -> (Rarity, String) {
+    let Some(g) = magic(id) else { return (Rarity::Common, desc) };
+    let mut lines: Vec<String> = desc.lines().map(String::from).collect();
+    let flavour = if id_is_weapon(id) { None } else { lines.pop() };
+    lines.extend(g.lines());
+    lines.push(format!("[dim]{} magic item · drops only[/]", g.rarity.label()));
+    lines.extend(flavour);
+    (g.rarity, lines.join("\n"))
+}
+
+fn id_is_weapon(id: &str) -> bool {
+    Weapon::find(id).is_some()
+}
+
 /// Every item, weapons included, in shop order.
 pub fn catalogue() -> &'static [Entry] {
     static ALL: LazyLock<Vec<Entry>> = LazyLock::new(|| {
         let mut v: Vec<Entry> = ITEMS
             .iter()
-            .map(|i| Entry {
-                id: i.id,
-                name: i.name,
-                kind: i.kind,
-                price: i.price,
-                classes: i.classes,
-                bonus: i.bonus,
-                weapon: None,
-                desc: describe_item(i),
+            .map(|i| {
+                let (rarity, desc) = enchant(i.id, describe_item(i));
+                Entry { id: i.id, name: i.name, kind: i.kind, price: i.price, classes: i.classes, bonus: i.bonus, weapon: None, rarity, desc }
             })
             .collect();
         for w in WEAPONS {
             let classes = Class::ALL.iter().filter(|c| c.can_hold(w.kind)).fold(0, |m, &c| m | class_bit(c));
+            let (rarity, desc) = enchant(w.id, describe_weapon(w));
             v.push(Entry {
                 id: w.id,
                 name: w.name,
@@ -460,7 +498,8 @@ pub fn catalogue() -> &'static [Entry] {
                 classes,
                 bonus: Bonus::default(),
                 weapon: Some(w),
-                desc: describe_weapon(w),
+                rarity,
+                desc,
             });
         }
         v
@@ -672,7 +711,7 @@ impl ItemError {
 
 /// What the worn items add up to (the level-independent part of the
 /// fighter's numbers).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Gear {
     /// Armour class before the tier bonus.
     pub ac: i32,
@@ -680,6 +719,8 @@ pub struct Gear {
     pub sp: i32,
     /// Bonus per [`Save`] (Body, Reflex, Mind).
     pub saves: [i32; 3],
+    /// Enchantments of the magic items worn (magic.rs), summed.
+    pub mods: Mods,
 }
 
 impl Class {
@@ -892,7 +933,7 @@ impl Bag {
         let d = class.defence();
         // Unarmoured: 10 + defence.
         let mut body = 10 + d;
-        let mut g = Gear { ac: 0, hp: 0, sp: 0, saves: [0; 3] };
+        let mut g = Gear { ac: 0, hp: 0, sp: 0, saves: [0; 3], mods: Mods::NONE };
         for k in &self.equip {
             let Some(e) = find(base_id(k)).filter(|e| e.usable_by(class)) else { continue };
             if let Kind::Armour(w, base) = e.kind {
@@ -908,6 +949,14 @@ impl Bag {
             g.sp += e.bonus.sp as i32;
             if let Some((s, n)) = e.bonus.save {
                 g.saves[s as usize] += n as i32;
+            }
+            if let Some(m) = magic(e.id) {
+                g.hp += m.hp as i32;
+                g.sp += m.sp as i32;
+                for s in &mut g.saves {
+                    *s += m.saves as i32;
+                }
+                g.mods.add(&m.mods);
             }
         }
         g.ac += body;

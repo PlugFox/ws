@@ -1063,7 +1063,11 @@ impl Horde {
         self.packs.clear();
         let store = &self.store;
         let boss_alive = |kind: u8| store.alive().iter().any(|&s| store.kind[s as usize] == kind);
-        self.director.tick(dt, self.targets.len(), &self.catalog, &mut self.rng, boss_alive, &mut self.packs);
+        let catalog = &self.catalog;
+        let elites_alive = || {
+            store.alive().iter().filter(|&&s| catalog.get(store.kind[s as usize]).archetype == Archetype::Elite).count() as u32
+        };
+        self.director.tick(dt, self.targets.len(), catalog, &mut self.rng, boss_alive, elites_alive, &mut self.packs);
         for i in 0..self.packs.len() {
             let pack = self.packs[i];
             let monsters = self.store.len() - self.plants as usize;

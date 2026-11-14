@@ -249,7 +249,9 @@ pub(super) fn aim_skill(field: &Field<'_>, caster: &HubPlayer, def: &SkillDef, s
 /// [`aim_skill`] for a press: auto-cast and manual aiming (COMBAT.md §4.3).
 pub(super) fn aim_press(field: &Field<'_>, caster: &HubPlayer, def: &SkillDef, slv: u8, press: &Press) -> Option<Aimed> {
     let (px, py) = (caster.x, caster.y);
-    let aim = (caster.aim[0] != 0 || caster.aim[1] != 0)
+    // The pointer steers presses by hand only: an auto-cast slot picks its
+    // own target (the best line, the nearest monster) wherever the mouse is.
+    let aim = (!press.auto && (caster.aim[0] != 0 || caster.aim[1] != 0))
         .then(|| (caster.aim[0] as f32 * AIM_UNIT, caster.aim[1] as f32 * AIM_UNIT));
     // Where the pointer is on the ground, when the player aims by hand.
     let pointer = aim.filter(|_| press.manual).map(|(ax, ay)| (px + ax, py + ay));

@@ -661,6 +661,8 @@ pub struct ItemDef {
     pub classes: u8,
     /// Tooltip text (`**bold**`, `[ok]…[/]`).
     pub desc: String,
+    /// `magic::Rarity::code`: 0 common, 1 uncommon (green), 2 rare (blue).
+    pub rarity: u8,
 }
 
 impl ItemDef {
@@ -672,10 +674,20 @@ impl ItemDef {
         b.put_var(self.price.into());
         b.put_u8(self.classes);
         b.put_str(&self.desc);
+        b.put_u8(self.rarity);
     }
 
     fn read(r: &mut Reader<'_>) -> Option<Self> {
-        Some(Self { id: r.str()?, name: r.str()?, kind: r.u8()?, slot: r.u8()?, price: r.var32()?, classes: r.u8()?, desc: r.str()? })
+        Some(Self {
+            id: r.str()?,
+            name: r.str()?,
+            kind: r.u8()?,
+            slot: r.u8()?,
+            price: r.var32()?,
+            classes: r.u8()?,
+            desc: r.str()?,
+            rarity: r.u8()?,
+        })
     }
 
     /// The whole catalogue, as sent on join.
@@ -690,6 +702,7 @@ impl ItemDef {
                 price: e.price,
                 classes: e.classes,
                 desc: e.desc.clone(),
+                rarity: e.rarity.code(),
             })
             .collect()
     }
@@ -2657,7 +2670,7 @@ pub(crate) mod golden {
             (
                 "item_defs",
                 ServerMsg::ItemDefs {
-                    items: vec![ItemDef { id: "cap".into(), name: "Cap".into(), kind: 5, slot: 0, price: 4000, classes: 11, desc: "+1 AC".into() }],
+                    items: vec![ItemDef { id: "cap".into(), name: "Cap".into(), kind: 5, slot: 0, price: 4000, classes: 11, desc: "+1 AC".into(), rarity: 2 }],
                 }
                 .encode(),
             ),
@@ -2803,7 +2816,7 @@ pub(crate) mod golden {
         ("boss", "35858080040442617068d00fe615"),
         ("buffs", "36010568617374659423"),
         ("inventory", "3aac02010a7265645f706f74696f6e050000000c636f74746f6e5f73686972740573776f72640000000000097b226163223a31327d"),
-        ("item_defs", "3b0103636170034361700500a01f0b052b31204143"),
+        ("item_defs", "3b0103636170034361700500a01f0b052b3120414302"),
         ("shop", "3c04646567610444656761010573776f7264"),
         ("item_used", "3d0a7265645f706f74696f6ee807"),
         ("player_gear", "3eac0203626f77"),

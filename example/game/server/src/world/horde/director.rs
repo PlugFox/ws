@@ -5,11 +5,18 @@
 //! `budget × growth^wave × (1 + party_scale × (players − 1))` plus what it
 //! saved from earlier waves (capped). It spends it on packs:
 //!
+//! The opening is boosted: the first `opening_waves` waves get up to
+//! `1 + opening_boost` times their budget (fading linearly), so a run starts
+//! busy instead of trickling in.
+//!
 //! * a boss first, when one is unlocked, affordable and none of its kind is
 //!   alive;
 //! * then weighted picks among unlocked kinds it can afford; a pick buys a
 //!   pack sized by the kind's archetype (swarms come by the dozen, tanks
-//!   alone), trimmed to what is left;
+//!   alone), trimmed to what is left. An elite (mini-boss) pick goes
+//!   through with chance `1 / (1 + elite_crowd × elites)`, counting the
+//!   live ones and those this wave already bought; a refused one closes
+//!   elites for the rest of the wave, so they do not pile up late in a run;
 //! * each pack lands in a formation: scattered (every member on its own,
 //!   random player and direction), a loose cluster from one direction, or
 //!   (swarm-sized packs) an uneven surround of one player.
@@ -55,6 +62,14 @@ pub struct WaveRules {
     /// Weight factor of elite kinds in the picks (mission modifiers ask
     /// for more mini-bosses; 1 = the catalogue's weights).
     pub elite_weight: f32,
+    /// Waves of the boosted opening (0 = none).
+    pub opening_waves: u32,
+    /// Extra budget of the first wave (×`1 + boost`), fading to none over
+    /// the opening.
+    pub opening_boost: f32,
+    /// An elite pick goes through with chance `1 / (1 + elite_crowd ×
+    /// elites)` (live plus bought this wave): one → 40 %, two → 25 % at 1.5.
+    pub elite_crowd: f32,
 }
 
 impl WaveRules {
@@ -73,6 +88,9 @@ impl WaveRules {
         levels: (1, 20),
         level_every_secs: 90.0,
         elite_weight: 1.0,
+        opening_waves: 4,
+        opening_boost: 1.5,
+        elite_crowd: 1.5,
     };
 }
 
@@ -164,15 +182,26 @@ impl Director {
         self.bank
     }
 
+    /// Budget factor of the boosted opening for wave `wave` (0-based).
+    pub fn opening_factor(&self, wave: u32) -> f32 {
+        let n = self.rules.opening_waves;
+        if wave >= n {
+            return 1.0;
+        }
+        1.0 + self.rules.opening_boost.max(0.0) * (n - wave) as f32 / n as f32
+    }
+
     fn wave_budget(&self, wave: u32, players: usize) -> f32 {
         self.rules.budget
+            * self.opening_factor(wave)
             * self.rules.growth.powi(wave as i32)
             * (1.0 + self.rules.party_scale * players.saturating_sub(1) as f32)
     }
 
     /// Advances by `dt` seconds; buys a wave when one is due and appends the
     /// packs due for release to `out`. `boss_alive(kind)` tells whether a
-    /// boss of that kind is on the field.
+    /// boss of that kind is on the field, `elites_alive()` how many elites
+    /// are (asked only when a wave is bought).
     pub fn tick(
         &mut self,
         dt: f32,
@@ -180,6 +209,7 @@ impl Director {
         catalog: &MonsterCatalog,
         rng: &mut impl Rng,
         boss_alive: impl Fn(u8) -> bool,
+        elites_alive: impl Fn() -> u32,
         out: &mut Vec<Pack>,
     ) {
         if players == 0 {
@@ -187,7 +217,8 @@ impl Director {
         }
         self.elapsed += dt;
         if self.elapsed >= self.next_wave {
-            self.buy_wave(players, catalog, rng, &boss_alive);
+            let crowd = 1.0 + self.rules.elite_crowd.max(0.0) * elites_alive() as f32;
+            self.buy_wave(players, catalog, rng, &boss_alive, crowd);
             self.next_wave += self.rules.wave_period_secs;
         }
         while self.pending.front().is_some_and(|p| p.release_at <= self.elapsed) {
@@ -195,7 +226,14 @@ impl Director {
         }
     }
 
-    fn buy_wave(&mut self, players: usize, catalog: &MonsterCatalog, rng: &mut impl Rng, boss_alive: &impl Fn(u8) -> bool) {
+    fn buy_wave(
+        &mut self,
+        players: usize,
+        catalog: &MonsterCatalog,
+        rng: &mut impl Rng,
+        boss_alive: &impl Fn(u8) -> bool,
+        elite_crowd: f32,
+    ) {
         let budget = self.wave_budget(self.wave, players);
         self.wave += 1;
         let mut points = self.bank + budget;
@@ -210,13 +248,22 @@ impl Director {
                 self.pending.push_back(Pack { kind, count: 1, formation: Formation::Scatter, release_at: start });
             }
         }
+        // Elites already bought this wave crowd the next picks too.
+        let mut crowd = elite_crowd;
+        let mut elites_open = true;
         loop {
             self.picks.clear();
             let mut total = 0u32;
             for (kind, def) in catalog.defs().iter().enumerate() {
                 // Plants are planted once at creation, never bought.
-                if !def.boss && !def.is_plant() && self.elapsed >= def.unlock_secs && def.spawn_cost as f32 <= points {
-                    total += if def.archetype == Archetype::Elite {
+                let elite = def.archetype == Archetype::Elite;
+                if !def.boss
+                    && !def.is_plant()
+                    && (elites_open || !elite)
+                    && self.elapsed >= def.unlock_secs
+                    && def.spawn_cost as f32 <= points
+                {
+                    total += if elite {
                         (def.weight as f32 * self.rules.elite_weight).round().max(1.0) as u32
                     } else {
                         def.weight
@@ -230,8 +277,15 @@ impl Director {
             let roll = rng.gen_range(0..total);
             let kind = self.picks.iter().find(|(_, acc)| roll < *acc).unwrap().0;
             let def = catalog.get(kind);
+            if def.archetype == Archetype::Elite && crowd > 1.0 && !rng.gen_bool((1.0 / crowd) as f64) {
+                elites_open = false;
+                continue;
+            }
             let affordable = (points / def.spawn_cost as f32) as u16;
             let count = rng.gen_range(def.pack.0..=def.pack.1).min(affordable).max(1);
+            if def.archetype == Archetype::Elite {
+                crowd += self.rules.elite_crowd.max(0.0) * count as f32;
+            }
             points -= (count as u32 * def.spawn_cost) as f32;
             let formation = if def.pack.1 >= 6 && count >= 6 && rng.gen_bool(self.rules.surround_chance as f64) {
                 Formation::Surround
@@ -281,7 +335,7 @@ mod tests {
         let mut out = Vec::new();
         let dt = 1.0 / 20.0;
         for _ in 0..(secs / dt).round() as usize {
-            d.tick(dt, players, &c, &mut rng, |_| false, &mut out);
+            d.tick(dt, players, &c, &mut rng, |_| false, || 0, &mut out);
         }
         (out, d)
     }
@@ -293,7 +347,7 @@ mod tests {
 
     #[test]
     fn waves_arrive_on_schedule_spread_over_the_window() {
-        let rules = WaveRules { budget: 40.0, ..WaveRules::NORMAL };
+        let rules = WaveRules { budget: 40.0, opening_waves: 0, ..WaveRules::NORMAL };
         let (early, _) = run(rules.first_wave_secs - 0.1, 1, rules.clone());
         assert!(early.is_empty(), "nothing before the first wave");
         let (first, d) = run(rules.first_wave_secs + rules.spawn_window_secs, 1, rules.clone());
@@ -313,7 +367,8 @@ mod tests {
         let span = rules.first_wave_secs + rules.wave_period_secs * 9.0 + rules.spawn_window_secs;
         let (solo, d) = run(span, 1, rules.clone());
         assert_eq!(d.waves(), 10);
-        let expected: f32 = (0..10).map(|w| rules.budget * rules.growth.powi(w)).sum();
+        let opening = Director::new(rules.clone());
+        let expected: f32 = (0..10).map(|w| rules.budget * opening.opening_factor(w as u32) * rules.growth.powi(w)).sum();
         let got = cost(&solo) as f32 + d.bank();
         assert!((got - expected).abs() < 1.0, "spent+bank {got}, budget {expected}");
         let (party, _) = run(span, 4, rules.clone());
@@ -334,7 +389,7 @@ mod tests {
         let mut bosses = 0;
         for _ in 0..20 * 240 {
             out.clear();
-            d.tick(0.05, 1, &c, &mut rng, |_| alive, &mut out);
+            d.tick(0.05, 1, &c, &mut rng, |_| alive, || 0, &mut out);
             for p in &out {
                 if p.kind == 2 {
                     assert!(d.elapsed() >= 120.0, "boss before its unlock");
@@ -356,5 +411,42 @@ mod tests {
         let before = d.bank();
         d.refund(0, 5, &catalog());
         assert_eq!(d.bank(), before + 5.0);
+    }
+
+    #[test]
+    fn the_opening_is_busier_than_a_flat_start() {
+        let flat = WaveRules { opening_waves: 0, ..WaveRules::NORMAL };
+        let span = WaveRules::NORMAL.first_wave_secs + WaveRules::NORMAL.wave_period_secs * 2.0 + 6.0;
+        let (boosted, _) = run(span, 1, WaveRules::NORMAL);
+        let (plain, _) = run(span, 1, flat);
+        assert!(cost(&boosted) as f32 >= 1.8 * cost(&plain) as f32, "{} vs {}", cost(&boosted), cost(&plain));
+        let d = Director::new(WaveRules::NORMAL);
+        assert_eq!(d.opening_factor(WaveRules::NORMAL.opening_waves), 1.0, "the boost ends");
+        assert!(d.opening_factor(0) > d.opening_factor(1), "and fades");
+    }
+
+    #[test]
+    fn live_elites_thin_out_the_next_ones() {
+        let mut swarm = test_def("a_swarm", 2.0, 1, 0.0, false);
+        swarm.pack = (1, 1);
+        let mut elite = test_def("b_elite", 2.0, 10, 0.0, false);
+        elite.archetype = Archetype::Elite;
+        elite.pack = (1, 1);
+        elite.weight = swarm.weight;
+        let c = MonsterCatalog::new(vec![swarm, elite]).unwrap();
+        let elites = |alive: u32| {
+            let rules = WaveRules { budget: 30.0, growth: 1.0, opening_waves: 0, elite_crowd: 1.5, ..WaveRules::NORMAL };
+            let mut d = Director::new(rules);
+            let mut rng = StdRng::seed_from_u64(7);
+            let mut out = Vec::new();
+            for _ in 0..20 * 20 * 50 {
+                d.tick(0.05, 1, &c, &mut rng, |_| false, || alive, &mut out);
+            }
+            out.iter().filter(|p| p.kind == 1).count() as f32
+        };
+        let (none, one, two) = (elites(0), elites(1), elites(2));
+        assert!(two > 0.0, "still bought with two alive");
+        assert!(one < none / 2.0, "one live elite: {one} vs {none}");
+        assert!(two < one, "two thin out more: {two} vs {one}");
     }
 }

@@ -14,6 +14,7 @@ pub mod dice;
 pub mod exp;
 pub mod items;
 pub mod loot;
+pub mod magic;
 pub mod monster;
 pub mod profile;
 pub mod rules;

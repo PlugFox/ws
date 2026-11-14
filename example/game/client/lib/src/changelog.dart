@@ -6,6 +6,26 @@ typedef ChangelogEntry = ({String title, String date, List<String> items});
 
 const changelog = <ChangelogEntry>[
   (
+    title: 'Magic items',
+    date: '2026-11-14',
+    items: [
+      'Thirty-two magic items drop from elites and bosses (a few, rarely, from tougher monsters): green names are uncommon, blue ones rare. Every class has some.',
+      'Each carries an enchantment besides its numbers: Boots of Striding walk faster, the Ember Blade burns, the Wand of the War Mage makes spells harder to resist, the Tome of Mercy heals more, the Periapt of Wound Closure makes potions stronger, Goggles of Night widen your light, and more.',
+      'Magic weapons show in their own colours in your hands; the Circlet of Focus, Goggles of Night and Bandit\'s Cap show on your head.',
+      'The Payon Caves elites and Moonlight Flower now drop loot too.',
+    ],
+  ),
+  (
+    title: 'A livelier horde and a guide',
+    date: '2026-11-14',
+    items: [
+      'Missions start busy: the first waves are up to 2½ times bigger, settling to the usual pace after about a minute.',
+      'Elites hold back while others are alive: with one on the field the next arrives about three times less often, so late waves no longer bury you in mini-bosses.',
+      'Auto-cast slots pick their own targets again even with the mouse elsewhere: only skills you press yourself follow the pointer.',
+      "New: the Adventurer's Guide, every part of the game explained with small pictures. The Kafra and the menu (Esc) open it; a new character gets it on arrival in Izlude (minimise or close it).",
+    ],
+  ),
+  (
     title: 'Three new expeditions',
     date: '2026-11-14',
     items: [
