@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 async fn setup_test_app() -> (axum::Router, game_server::api::AppState) {
-    let config = AppConfig::test_config();
+    let config = AppConfig::test_config().await;
     create_app(config).await.expect("Failed to create test app")
 }
 
@@ -279,6 +279,6 @@ async fn test_character_crud_and_dirty_flag_flushing() {
     assert_eq!(db_char.base_exp, 500);
     assert_eq!(db_char.last_location_id, "stage_field_01");
 
-    let unlocked_skills: Vec<String> = serde_json::from_str(&db_char.unlocked_skills_json).unwrap();
+    let unlocked_skills: Vec<String> = serde_json::from_value(db_char.unlocked_skills.0.clone()).unwrap();
     assert!(unlocked_skills.contains(&"whirlwind".to_string()));
 }

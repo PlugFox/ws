@@ -1,9 +1,12 @@
+pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod feedback;
 pub mod geo;
 pub mod session;
+pub mod version;
 pub mod world;
 
 use api::{build_router, AppState};
@@ -135,7 +138,12 @@ pub async fn create_app_with_skills(
     skills: world::combat::SkillBook,
 ) -> Result<(Router, AppState), Box<dyn std::error::Error + Send + Sync>> {
     let skills = Arc::new(skills);
-    let pool = init_db(&config.database_url).await?;
+    match &config.admin_token {
+        Some(t) if t.len() < 16 => warn!("ADMIN_TOKEN is shorter than 16 characters: use a long random token"),
+        Some(_) => info!("Admin API enabled at /admin/*"),
+        None => info!("Admin API disabled (set ADMIN_TOKEN to enable /admin/*)"),
+    }
+    let pool = init_db(&config.db).await?;
 
     let jwt_manager = JwtManager::new(&config.jwt_secret, config.access_token_ttl);
     let geo_service = GeolocationService::new(config.geoip_db_path.as_deref());
@@ -149,7 +157,9 @@ pub async fn create_app_with_skills(
     );
 
     let hub = world.map(|w| {
-        let dir = HubDirectory::new(Arc::new(w), config.hub.clone());
+        // Player trades settle against the sessions' characters and the database.
+        let vault: Arc<dyn world::trade::TradeVault> = Arc::new(session::trade::SessionVault::new(pool.clone(), session_registry.clone()));
+        let dir = HubDirectory::with_vault(Arc::new(w), config.hub.clone(), Some(vault));
         let _reaper = dir.spawn_reaper(Duration::from_secs(10));
         dir
     });

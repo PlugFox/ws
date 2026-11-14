@@ -107,6 +107,9 @@ final class PadFrame {
 
   /// Edges: A (talk / activate outside a menu), View (skill tree), Menu (settings).
   bool confirm = false;
+
+  /// Y pressed outside a menu: in town, the nearest player's context menu.
+  bool people = false;
   bool tree = false;
   bool settings = false;
 
@@ -115,7 +118,7 @@ final class PadFrame {
   void _clear() {
     moveX = moveY = aimX = aimY = 0;
     slots = autoToggles = 0;
-    hold = confirm = tree = settings = false;
+    hold = confirm = people = tree = settings = false;
     nav.clear();
   }
 }
@@ -192,9 +195,11 @@ final class PadMapper {
         ..moveY = ly
         ..aimX = rx
         ..aimY = ry
-        ..confirm = edge(Pad.a);
+        ..confirm = edge(Pad.a)
+        ..people = edge(Pad.y);
       final lb = down(Pad.lb), rt = down(Pad.rt);
       if (lb && rt) {
+        f.people = false;
         // Auto-cast toggles (first page); nothing casts meanwhile.
         for (var i = 0; i < Pad.slotButtons.length; i++) {
           if (edge(Pad.slotButtons[i])) f.autoToggles |= 1 << i;

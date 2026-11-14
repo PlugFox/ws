@@ -106,6 +106,12 @@ npm run build:engine
 mise run game:demo
 # or: npm run dev:engine
 
-# Run full game cycle (builds Dart client and runs Rust game server at http://127.0.0.1:8080)
+# Dev PostgreSQL of the game server (Docker, 127.0.0.1:55432; `mise run game` starts it too)
+mise run game:db:up      # game:db:down stops it, game:db:psql opens a shell
+
+# Game server tests (each test gets a throwaway database on the dev PostgreSQL)
+mise run game:server:test   # or: cd example/game/server && cargo test
+
+# Run full game cycle (starts the dev database, builds Dart client and runs Rust game server at http://127.0.0.1:8080)
 mise run game
 ```

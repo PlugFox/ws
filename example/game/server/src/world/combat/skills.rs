@@ -373,6 +373,10 @@ impl Effect {
 pub struct SkillDef {
     pub id: String,
     pub name: String,
+    /// Icon id in the skill icon atlas (`skill:<icon>`).
+    pub icon: String,
+    /// Tooltip line.
+    pub text: String,
     /// `None` for the basic row.
     pub class: Option<Class>,
     pub tier: u8,
@@ -556,6 +560,8 @@ impl SkillBook {
             skills.push(SkillDef {
                 id: s.id.clone(),
                 name: s.name.clone(),
+                icon: s.icon.clone(),
+                text: s.text.clone(),
                 class,
                 tier: s.tier,
                 max_level: s.max_level.max(1),
@@ -743,6 +749,10 @@ fn whole() -> f32 {
 struct RawSkill {
     id: String,
     name: String,
+    #[serde(default)]
+    icon: String,
+    #[serde(default)]
+    text: String,
     class: String,
     #[serde(default = "one")]
     tier: u8,

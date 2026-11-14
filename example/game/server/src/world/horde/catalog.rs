@@ -4,6 +4,7 @@
 //! by id so it is stable across restarts; it is what snapshots carry and
 //! what `stage_joined.monsters` names.
 
+use crate::world::combat::loot::Drop;
 use crate::world::combat::{Archetype, Element, Size};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -46,6 +47,9 @@ struct RawStats {
     size: String,
     #[serde(default)]
     race: String,
+    /// Plants: hits it takes to fell, `[min, max]` (rolled per plant).
+    #[serde(default)]
+    hits: Option<[u16; 2]>,
 }
 
 fn one() -> u32 {
@@ -57,6 +61,15 @@ struct RawSkillRef {
     id: String,
 }
 
+/// A drop table row (`drops.toml`): chance in percent, count `[min, max]`.
+#[derive(Deserialize)]
+struct RawDrop {
+    item: String,
+    chance: f64,
+    #[serde(default)]
+    count: Option<[u32; 2]>,
+}
+
 #[derive(Deserialize)]
 struct RawMonster {
     id: String,
@@ -66,6 +79,22 @@ struct RawMonster {
     stats: RawStats,
     #[serde(default)]
     skills: Vec<RawSkillRef>,
+    #[serde(default)]
+    drops: Vec<RawDrop>,
+}
+
+/// Resolves a baked drop table; rows naming items the server does not
+/// know are skipped with a warning (the asset pack may run ahead).
+fn drops_of(id: &str, raw: Vec<RawDrop>) -> Vec<Drop> {
+    raw.into_iter()
+        .filter_map(|d| match Drop::new(&d.item, d.chance, d.count) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!("monster {id}: drop skipped: {e}");
+                None
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,12 +121,26 @@ pub struct MonsterDef {
     /// One of its kind alive at a time; always simulated at full rate.
     pub boss: bool,
     /// Pack size range the game master buys this kind in (by archetype:
-    /// swarms by the dozen, chasers in small groups, tanks alone).
+    /// swarms by the dozen, chasers in small groups, tanks in ones to
+    /// threes, elites and bosses alone).
     pub pack: (u16, u16),
     /// Monster skill ids (`skills.json` `monster_skills`).
     pub skills: Vec<String>,
     /// Undead or demon (Divine Protection, Demon Bane).
     pub evil: bool,
+    /// What a kill may drop (rolled per kill; per party member for elites
+    /// and bosses).
+    pub drops: Vec<Drop>,
+    /// Plants: the hits it takes to fell one, `(min, max)`, rolled per
+    /// plant; (0, 0) for everything else.
+    pub hits: (u16, u16),
+}
+
+impl MonsterDef {
+    /// Planted at stage creation, never bought by the director.
+    pub fn is_plant(&self) -> bool {
+        self.archetype == Archetype::Plant
+    }
 }
 
 /// Pack size range of a director archetype.
@@ -106,7 +149,8 @@ pub fn pack_of(archetype: &str) -> (u16, u16) {
         "swarm" => (6, 12),
         "chaser" => (3, 6),
         "tank" => (1, 3),
-        "boss" => (1, 1),
+        // Elites (mini-bosses) are rare and come alone; plants are planted.
+        "elite" | "boss" | "plant" => (1, 1),
         _ => (1, 3),
     }
 }
@@ -140,7 +184,11 @@ impl MonsterCatalog {
             if d.pack.0 == 0 || d.pack.0 > d.pack.1 {
                 return bad("pack range must be 1 <= min <= max");
             }
-            if !d.boss && (d.spawn_cost == 0 || d.weight == 0) {
+            if d.is_plant() {
+                if d.hits.0 == 0 || d.hits.0 > d.hits.1 {
+                    return bad("plants need stats.hits = [min, max] with 1 <= min <= max");
+                }
+            } else if !d.boss && (d.spawn_cost == 0 || d.weight == 0) {
                 return bad("regular monsters need a positive spawn_cost and weight");
             }
         }
@@ -152,6 +200,7 @@ impl MonsterCatalog {
         let defs = raw
             .into_values()
             .map(|m| MonsterDef {
+                drops: drops_of(&m.id, m.drops),
                 boss: m.director.archetype == "boss",
                 pack: pack_of(&m.director.archetype),
                 archetype: Archetype::from_id(&m.director.archetype),
@@ -168,6 +217,7 @@ impl MonsterCatalog {
                 xp: m.director.xp_reward,
                 skills: m.skills.into_iter().map(|s| s.id).collect(),
                 evil: matches!(m.stats.race.as_str(), "undead" | "demon"),
+                hits: m.stats.hits.map_or((0, 0), |[a, b]| (a, b)),
             })
             .collect();
         Self::new(defs)
@@ -222,6 +272,23 @@ pub(crate) fn test_def(id: &str, speed: f32, cost: u32, unlock: f32, boss: bool)
         pack: if boss { (1, 1) } else { (1, 3) },
         skills: Vec::new(),
         evil: false,
+        drops: Vec::new(),
+        hits: (0, 0),
+    }
+}
+
+/// A plant kind for tests: felled in `hits` blows.
+#[cfg(test)]
+pub(crate) fn test_plant(id: &str, hits: (u16, u16)) -> MonsterDef {
+    MonsterDef {
+        archetype: Archetype::Plant,
+        spawn_cost: 0,
+        weight: 0,
+        xp: 0,
+        pack: (1, 1),
+        radius: 0.3,
+        hits,
+        ..test_def(id, 1.0, 0, 0.0, false)
     }
 }
 
@@ -232,22 +299,57 @@ mod tests {
     #[test]
     fn parses_baked_shape_and_sorts_kinds() {
         let json = br#"{
-          "zombie": {"id":"zombie","name":"Zombie","radius":0.6,
-            "director":{"archetype":"tank","spawn_cost":6,"min_wave_time":90,"tier":2,"weight":30,"xp_reward":25},
-            "stats":{"max_hp":204,"move_speed":1.8,"touch_damage":18,"defense":20,"level":17,"element":"undead","size":"medium"}, "skills": []},
-          "baphomet": {"id":"baphomet","name":"Baphomet","radius":1.2,
-            "director":{"archetype":"boss","spawn_cost":50,"min_wave_time":300,"tier":3,"weight":5,"xp_reward":500},
-            "stats":{"max_hp":8000,"move_speed":5.0,"touch_damage":65}}
+          "willow": {"id":"willow","name":"Willow","radius":0.5,
+            "director":{"archetype":"tank","spawn_cost":6,"min_wave_time":150,"tier":2,"weight":30,"xp_reward":25},
+            "stats":{"max_hp":200,"move_speed":1.8,"touch_damage":12,"defense":20,"level":7,"element":"earth","size":"medium"}, "skills": []},
+          "vocal": {"id":"vocal","name":"Vocal","radius":0.55,
+            "director":{"archetype":"elite","spawn_cost":20,"min_wave_time":420,"weight":6,"xp_reward":80},
+            "stats":{"move_speed":3.4,"level":13}},
+          "angeling": {"id":"angeling","name":"Angeling","radius":0.8,
+            "director":{"archetype":"boss","spawn_cost":50,"min_wave_time":600,"tier":3,"weight":5,"xp_reward":500},
+            "stats":{"max_hp":8000,"move_speed":4.0,"touch_damage":40}}
         }"#;
         let c = MonsterCatalog::parse(json).unwrap();
-        assert_eq!(c.ids(), vec!["baphomet", "zombie"]);
+        assert_eq!(c.ids(), vec!["angeling", "vocal", "willow"]);
         assert!(c.get(0).boss);
-        assert_eq!(c.kind_of("zombie"), Some(1));
-        assert_eq!(c.get(1).unlock_secs, 90.0);
-        assert_eq!(c.get(1).pack, (1, 3), "tanks come alone or in twos and threes");
+        assert_eq!(c.kind_of("willow"), Some(2));
+        assert_eq!(c.get(2).unlock_secs, 150.0);
+        assert_eq!(c.get(2).pack, (1, 3), "tanks come alone or in twos and threes");
         assert_eq!(c.get(0).pack, (1, 1));
-        assert_eq!((c.get(1).level, c.get(1).element, c.get(1).archetype), (17, Element::Undead, Archetype::Tank));
+        assert_eq!((c.get(1).pack, c.get(1).archetype, c.get(1).boss), ((1, 1), Archetype::Elite, false), "elites come alone");
+        assert_eq!((c.get(2).level, c.get(2).element, c.get(2).archetype), (7, Element::Earth, Archetype::Tank));
         assert_eq!((c.get(0).level, c.get(0).element), (1, Element::Neutral), "defaults");
+    }
+
+    #[test]
+    fn drop_tables_resolve_and_skip_unknown_items() {
+        let json = br#"{
+          "poring": {"id":"poring","name":"Poring","radius":0.35,
+            "director":{"archetype":"swarm","spawn_cost":1,"min_wave_time":0,"weight":100},
+            "stats":{"move_speed":2.5},
+            "drops":[{"item":"jellopy","chance":12},{"item":"no_such_thing","chance":5},
+                     {"item":"apple","chance":3,"count":[1,2]},{"item":"zeny","chance":100,"count":[5,9]}]}
+        }"#;
+        let c = MonsterCatalog::parse(json).unwrap();
+        let d = &c.get(0).drops;
+        assert_eq!(d.iter().map(|d| d.item).collect::<Vec<_>>(), vec!["jellopy", "apple", "zeny"]);
+        assert_eq!((d[0].rate, d[1].max, d[2].min), (1200, 2, 5));
+    }
+
+    #[test]
+    fn plants_parse_with_their_hit_range() {
+        let json = br#"{
+          "green_plant": {"id":"green_plant","name":"Green Plant","radius":0.3,
+            "director":{"archetype":"plant","spawn_cost":0,"min_wave_time":0,"weight":0},
+            "stats":{"move_speed":1.0,"hits":[3,6],"race":"plant"}}
+        }"#;
+        let c = MonsterCatalog::parse(json).unwrap();
+        let d = c.get(0);
+        assert!(d.is_plant() && !d.boss);
+        assert_eq!((d.hits, d.pack, d.archetype.id()), ((3, 6), (1, 1), "plant"));
+        assert!(MonsterCatalog::new(vec![test_plant("p", (0, 2))]).is_err(), "a plant needs hits");
+        assert!(MonsterCatalog::new(vec![test_plant("p", (4, 2))]).is_err());
+        assert!(MonsterCatalog::new(vec![test_plant("p", (2, 4))]).is_ok(), "plants cost nothing");
     }
 
     #[test]

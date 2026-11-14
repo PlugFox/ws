@@ -10,6 +10,8 @@
 //!   attacks query ([`Horde::near_box`]).
 //! * [`director`]: the wave game master: buys each wave with the points
 //!   the mission's difficulty grants and releases it around the players.
+//! * [`plants`]: the field's flora, planted once at creation (rooted,
+//!   harmless, outside the wave budget).
 //!
 //!
 //! A player sees monsters only within their *light radius*: a fixed circle
@@ -29,6 +31,7 @@ pub mod catalog;
 pub mod director;
 pub mod field;
 pub mod grid;
+pub mod plants;
 pub mod storage;
 pub mod view;
 
@@ -39,9 +42,10 @@ use field::{FlowField, UNREACHABLE};
 use grid::SpatialGrid;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use crate::world::combat::{Condition, MonsterBlock};
+use crate::world::combat::{Archetype, Condition, MonsterBlock};
+use crate::world::modifiers::{Modifiers, MonsterScale};
 use std::sync::Arc;
-use storage::{HordeStorage, FLAG_BOSS, FLAG_FULL, FLAG_LOS};
+use storage::{HordeStorage, FLAG_BOSS, FLAG_FULL, FLAG_LOS, FLAG_PLANT};
 /// A player as the horde sees it: position and light radius (cells).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlayerView {
@@ -51,6 +55,10 @@ pub struct PlayerView {
     pub light: f32,
     /// Who it is (user id): taunted monsters hunt their taunter.
     pub id: u32,
+    /// Monsters come for it. A downed, dead or hidden player is still seen
+    /// by the horde (simulation tiers, light, its body blocks) but is no
+    /// target: with no target at all, monsters lose interest and roam.
+    pub hunted: bool,
 }
 
 /// A flow field toward one taunting player.
@@ -96,6 +104,13 @@ const MAX_FRESH: usize = 64;
 const INDEX_SHIFT: u32 = 2;
 
 pub use catalog::{CatalogError, MonsterDef};
+
+/// Idle roaming (nobody to hunt): each leg holds one heading this long.
+const ROAM_LEG_SECS: f32 = 2.5;
+/// ... at this share of the monster's speed ...
+const ROAM_PACE: f32 = 0.35;
+/// ... and one leg in this many is spent standing.
+const ROAM_REST: u32 = 3;
 
 /// Longest distance a monster moves per sub-step (cells). Below one cell,
 /// so axis-separated wall checks cannot skip a one-cell wall.
@@ -147,6 +162,9 @@ pub struct HordeConfig {
     pub director_enabled: bool,
     /// Fixed RNG seed (tests); random when `None`.
     pub seed: Option<u64>,
+    /// Mission modifiers of the run (`HordeConfig::with_modifiers`):
+    /// tougher monsters, scaled loot, the curses the stage reads.
+    pub modifiers: Modifiers,
 }
 
 impl Default for HordeConfig {
@@ -172,7 +190,23 @@ impl Default for HordeConfig {
             waves: WaveRules::default(),
             director_enabled: true,
             seed: None,
+            modifiers: Modifiers::NONE,
         }
+    }
+}
+
+impl HordeConfig {
+    /// This configuration under mission modifiers: the wave budget and the
+    /// elites' weight grow with the count factors, the light shrinks under
+    /// Darkness; block toughness, speed and the loot share are read from
+    /// `modifiers` as the horde runs.
+    pub fn with_modifiers(mut self, mods: Modifiers) -> Self {
+        let s = mods.monsters();
+        self.waves.budget *= s.count;
+        self.waves.elite_weight *= s.elite_weight;
+        self.light_radius *= mods.light();
+        self.modifiers = mods;
+        self
     }
 }
 
@@ -221,7 +255,10 @@ pub struct Horde {
     rng: StdRng,
     max_radius: f32,
     // Scratch, sized once.
+    /// Every player on the map (tiers, light, bodies).
     players: Vec<PlayerView>,
+    /// The hunted ones among them (flow field, chase, spawns).
+    targets: Vec<PlayerView>,
     player_cells: Vec<(i32, i32)>,
     requested: Vec<(i32, i32)>,
     push: Vec<(f32, f32)>,
@@ -232,6 +269,12 @@ pub struct Horde {
     stats: HordeStats,
     /// Players in the last tick (boss HP scales with the party).
     party: u32,
+    /// Simulation rate of the last tick (flinch lengths are in seconds).
+    hz: u32,
+    /// What the mission modifiers do to every monster (once, at creation).
+    scale: MonsterScale,
+    /// Live plants (`plants.rs`): not monsters to the alive cap.
+    plants: u16,
 }
 
 impl Horde {
@@ -257,13 +300,15 @@ impl Horde {
             None => StdRng::from_entropy(),
         };
         let max_radius = catalog.defs().iter().map(|d| d.radius).fold(0.0, f32::max);
-        Self {
+        let scale = config.modifiers.monsters();
+        let mut horde = Self {
             store: HordeStorage::new(config.pool),
             push: vec![(0.0, 0.0); config.pool],
             step: vec![(0.0, 0.0, 0.0); config.pool],
             recycle: Vec::with_capacity(config.pool),
             packs: Vec::with_capacity(64),
             players: Vec::with_capacity(8),
+            targets: Vec::with_capacity(8),
             player_cells: Vec::with_capacity(8),
             requested: Vec::with_capacity(8),
             config,
@@ -279,7 +324,12 @@ impl Horde {
             max_radius,
             stats: HordeStats::default(),
             party: 1,
-        }
+            hz: 20,
+            scale,
+            plants: 0,
+        };
+        horde.plant_flora();
+        horde
     }
 
     pub fn catalog(&self) -> &MonsterCatalog {
@@ -328,6 +378,13 @@ impl Horde {
         self.director.elapsed()
     }
 
+    /// Test hook: jumps the run clock (the director must be off, or it
+    /// will buy every wave it missed).
+    #[cfg(test)]
+    pub fn set_director_elapsed(&mut self, secs: f32) {
+        self.director.set_elapsed(secs);
+    }
+
     /// Waves the game master has bought so far.
     pub fn waves(&self) -> u32 {
         self.director.waves()
@@ -348,9 +405,12 @@ impl Horde {
             return None;
         }
         let def = self.catalog.get(kind);
+        if def.is_plant() {
+            return self.spawn_plant(kind, x, y, def.hits.1);
+        }
         let flags = if def.boss { FLAG_BOSS | FLAG_FULL } else { 0 };
         let level = self.spawn_level(kind);
-        let block = MonsterBlock::new(level, def.archetype, self.party);
+        let block = self.scale.apply(MonsterBlock::new(level, def.archetype, self.party));
         let slot = self.store.spawn(kind, x, y, block.hp, flags)?;
         let s = slot as usize;
         self.store.level[s] = level as u8;
@@ -373,23 +433,55 @@ impl Horde {
     /// of the band + 5.
     pub fn spawn_level(&self, kind: u8) -> u32 {
         let def = self.catalog.get(kind);
-        let rules = &self.config.waves;
-        let (lo, hi) = (rules.levels.0.max(1), rules.levels.1.max(rules.levels.0.max(1)));
-        if def.boss {
-            return (hi + 5).min(u8::MAX as u32);
-        }
-        let grow = if rules.level_every_secs > 0.0 { (self.director.elapsed() / rules.level_every_secs) as u32 } else { 0 };
-        (def.level.clamp(lo, hi) + grow).min(hi)
+        self.config.waves.level_at(def.level, def.boss, self.director.elapsed())
     }
 
-    /// Combat numbers of a live monster.
+    /// The mission's wave rules this horde runs under.
+    pub fn rules(&self) -> &WaveRules {
+        &self.config.waves
+    }
+
+    /// Level of the location: the middle of the mission's monster band
+    /// (Poring Island, 1–20: 11). Map-wide rewards scale with it (pickup
+    /// bonuses), so early maps never hand out much.
+    pub fn location_level(&self) -> u32 {
+        let (lo, hi) = self.config.waves.levels;
+        let lo = lo.max(1);
+        (lo + hi.max(lo)).div_ceil(2)
+    }
+
+    /// Combat numbers of a live monster (made tougher by the mission's
+    /// modifiers).
     pub fn block(&self, slot: u16) -> MonsterBlock {
         let s = slot as usize;
         let def = self.catalog.get(self.store.kind[s]);
-        MonsterBlock::new(self.store.level[s] as u32, def.archetype, self.party)
+        if def.is_plant() {
+            // Its hit count, untouched by the modifiers.
+            return MonsterBlock { hp: def.hits.1.max(1) as i32, ..MonsterBlock::new(1, Archetype::Plant, 1) };
+        }
+        self.scale.apply(MonsterBlock::new(self.store.level[s] as u32, def.archetype, self.party))
+    }
+
+    /// The mission modifiers this horde runs under.
+    pub fn modifiers(&self) -> Modifiers {
+        self.config.modifiers
+    }
+
+    /// A kill's share of drop chances, zeny and experience, per mille
+    /// (more monsters, each worth less: `MonsterScale::loot_permille`).
+    pub fn loot_permille(&self, archetype: Archetype) -> u32 {
+        self.scale.loot_permille(archetype)
     }
 
     /// The pool (combat reads positions and HP, and spends cooldowns).
+    /// A hit landed on `slot`: it flinches for 0.3 s, then cannot flinch
+    /// again for 0.35 s (bosses never flinch).
+    pub fn flinch(&mut self, slot: u16) {
+        let t = |secs: f32| (secs * self.hz as f32).round().clamp(1.0, 255.0) as u8;
+        let (ticks, guard) = (t(0.3), t(0.35));
+        self.store.flinch(slot, ticks, guard);
+    }
+
     pub fn store(&self) -> &HordeStorage {
         &self.store
     }
@@ -399,6 +491,9 @@ impl Horde {
     }
 
     pub fn despawn(&mut self, slot: u16) {
+        if self.store.is_alive(slot) && self.store.is_plant(slot) {
+            self.plants -= 1;
+        }
         self.store.despawn(slot);
     }
 
@@ -407,9 +502,13 @@ impl Horde {
         self.max_radius
     }
 
-    /// Moves a monster (knockback, pull); the query index follows.
+    /// Moves a monster (knockback, pull); the query index follows. Plants
+    /// are rooted: nothing moves them.
     pub fn place(&mut self, slot: u16, x: f32, y: f32) {
         let s = slot as usize;
+        if self.store.flags[s] & FLAG_PLANT != 0 {
+            return;
+        }
         (self.store.x[s], self.store.y[s]) = (x, y);
         let idx = &mut self.index;
         if idx.hold || idx.built_gen[s] != self.store.generation[s] {
@@ -510,6 +609,13 @@ impl Horde {
         }
     }
 
+    /// [`Self::nearest_to`] among monsters only: what automatic targeting
+    /// (the basic attack, auto-cast) goes for, so auto-play never spends
+    /// itself on the scenery.
+    pub fn nearest_foe(&self, x: f32, y: f32, range: f32) -> Option<(u16, f32)> {
+        self.nearest_to(x, y, range, |s| self.store.is_plant(s))
+    }
+
     /// Default light radius (cells).
     pub fn light_radius(&self) -> f32 {
         self.config.light_radius
@@ -520,16 +626,20 @@ impl Horde {
         let light = self.config.light_radius;
         let mut views = std::mem::take(&mut self.players);
         views.clear();
-        views.extend(players.iter().map(|&(x, y)| PlayerView { x, y, light, id: 0 }));
+        views.extend(players.iter().map(|&(x, y)| PlayerView { x, y, light, id: 0, hunted: true }));
         self.tick_views(tick, tick_hz, &views);
         self.players = views;
     }
 
     /// One simulation step. `players` are the players on the horde's map;
-    /// with nobody there the horde is frozen.
+    /// with nobody there the horde is frozen. With nobody [`PlayerView::hunted`]
+    /// the horde still moves (monsters roam), but the flow field, recycling
+    /// and the director wait for a target.
     pub fn tick_views(&mut self, tick: u32, tick_hz: u32, players: &[PlayerView]) {
         self.players.clear();
         self.players.extend_from_slice(players);
+        self.targets.clear();
+        self.targets.extend(players.iter().filter(|p| p.hunted));
         if !players.is_empty() {
             self.party = players.len() as u32;
         }
@@ -539,15 +649,24 @@ impl Horde {
             return;
         }
         let dt = 1.0 / tick_hz as f32;
+        self.hz = tick_hz.max(1);
         self.index.hold = true;
         self.store.tick_conditions();
-        self.update_field();
+        let hunting = !self.targets.is_empty();
+        if hunting {
+            // Kept as it is otherwise: a target back on the same cell
+            // finds it ready.
+            self.update_field();
+        }
         self.plan_steps(tick, dt);
         self.compute_push();
         self.integrate();
-        self.recycle_far(tick_hz);
-        if self.config.director_enabled {
-            self.direct(dt);
+        if hunting {
+            // Respawn spots need a target to circle.
+            self.recycle_far(tick_hz);
+            if self.config.director_enabled {
+                self.direct(dt);
+            }
         }
         self.stats.alive = self.store.len();
         self.stats.field_builds = self.field.builds();
@@ -558,7 +677,7 @@ impl Horde {
 
     fn update_field(&mut self) {
         self.player_cells.clear();
-        self.player_cells.extend(self.players.iter().map(|p| (p.x.floor() as i32, p.y.floor() as i32)));
+        self.player_cells.extend(self.targets.iter().map(|p| (p.x.floor() as i32, p.y.floor() as i32)));
         if !self.field.is_ready() {
             self.field.build_now(&self.player_cells);
             self.requested.clone_from(&self.player_cells);
@@ -587,7 +706,7 @@ impl Horde {
             }
         }
         for &id in &ids[..n] {
-            let Some(p) = self.players.iter().find(|p| p.id == id) else { continue };
+            let Some(p) = self.targets.iter().find(|p| p.id == id) else { continue };
             let cell = (p.x.floor() as i32, p.y.floor() as i32);
             let at = match self.taunt_fields.iter().position(|f| f.id == id) {
                 Some(at) => at,
@@ -637,6 +756,8 @@ impl Horde {
     fn plan_steps(&mut self, tick: u32, dt: f32) {
         let c = &self.config;
         let los_r2 = c.los_range * c.los_range;
+        // Mission modifiers: tougher tiers and Frenzy move faster.
+        let pace = self.scale.speed;
         let walk = &self.world.map(self.map).walk;
         let s = &mut self.store;
         for i in 0..s.len() {
@@ -657,6 +778,9 @@ impl Horde {
                 });
             s.flags[k] = (s.flags[k] & !FLAG_FULL) | if full { FLAG_FULL } else { 0 };
             s.far_ticks[k] = if out_of_reach { s.far_ticks[k].saturating_add(1) } else { 0 };
+            if s.flags[k] & FLAG_PLANT != 0 {
+                continue; // rooted: tiered for the snapshots only
+            }
 
             let period = if full { 1 } else { c.far_period };
             if !tick.wrapping_add(slot as u32).is_multiple_of(period) {
@@ -666,13 +790,21 @@ impl Horde {
             self.stats.full += usize::from(full);
 
             let status = s.status_of(slot);
-            if !status.can_move() {
-                continue; // frozen, stunned, petrified or rooted
+            if !status.can_move() || s.stagger[k] > 0 {
+                continue; // frozen, stunned, petrified, rooted or flinching
             }
             let def = self.catalog.get(s.kind[k]);
+            if self.targets.is_empty() {
+                // Nobody to hunt: lose interest and roam.
+                if let Some((ux, uy)) = roam_heading(slot, s.generation[k], tick, self.hz) {
+                    let dist = def.speed * pace * status.speed() * ROAM_PACE * dt * period as f32;
+                    self.step[k] = (ux, uy, dist);
+                }
+                continue;
+            }
             // A taunted monster hunts its taunter while they are here.
             let hunted = if status.has(Condition::Taunted) {
-                self.players.iter().find(|p| p.id != 0 && p.id == s.taunter[k])
+                self.targets.iter().find(|p| p.id != 0 && p.id == s.taunter[k])
             } else {
                 None
             };
@@ -681,7 +813,7 @@ impl Horde {
                     let (dx, dy) = (p.x - x, p.y - y);
                     (dx, dy, dx * dx + dy * dy)
                 }
-                None => Self::nearest(&self.players, x, y),
+                None => Self::nearest(&self.targets, x, y),
             };
             let contact = def.radius + c.player_radius;
             if nd2 <= contact * contact {
@@ -705,7 +837,7 @@ impl Horde {
             };
             let Some((ux, uy)) = dir else { continue };
             // Never step past the contact distance.
-            let dist = (def.speed * status.speed() * dt * period as f32).min(nd - contact);
+            let dist = (def.speed * pace * status.speed() * dt * period as f32).min(nd - contact);
             self.step[k] = (ux, uy, dist.max(0.0));
         }
     }
@@ -717,7 +849,8 @@ impl Horde {
         let entries = s
             .alive()
             .iter()
-            .filter(|&&slot| s.flags[slot as usize] & FLAG_FULL != 0)
+            // Plants are no obstacle: the horde walks over them.
+            .filter(|&&slot| s.flags[slot as usize] & (FLAG_FULL | FLAG_PLANT) == FLAG_FULL)
             .map(|&slot| (slot, s.x[slot as usize], s.y[slot as usize]));
         self.grid.rebuild(entries);
 
@@ -726,7 +859,7 @@ impl Horde {
         for &a in s.alive() {
             let ai = a as usize;
             self.push[ai] = (0.0, 0.0);
-            if s.flags[ai] & FLAG_FULL == 0 {
+            if s.flags[ai] & (FLAG_FULL | FLAG_PLANT) != FLAG_FULL {
                 continue;
             }
             let ra = self.catalog.get(s.kind[ai]).radius;
@@ -796,8 +929,8 @@ impl Horde {
         let s = &mut self.store;
         for i in 0..s.len() {
             let k = s.alive()[i] as usize;
-            if !s.status_of(k as u16).can_move() {
-                // Held in place: not even the crowd pushes it.
+            if !s.status_of(k as u16).can_move() || s.flags[k] & FLAG_PLANT != 0 {
+                // Held in place (or rooted): not even the crowd pushes it.
                 s.vel_x[k] = 0.0;
                 s.vel_y[k] = 0.0;
                 continue;
@@ -861,7 +994,7 @@ impl Horde {
             let k = slot as usize;
             let stuck = self.field.dist(self.store.x[k] as i32, self.store.y[k] as i32) == UNREACHABLE
                 && self.store.flags[k] & FLAG_FULL == 0;
-            if self.store.flags[k] & FLAG_BOSS == 0 && (self.store.far_ticks[k] > limit || stuck) {
+            if self.store.flags[k] & (FLAG_BOSS | FLAG_PLANT) == 0 && (self.store.far_ticks[k] > limit || stuck) {
                 self.recycle.push(slot);
             }
         }
@@ -880,10 +1013,11 @@ impl Horde {
         self.packs.clear();
         let store = &self.store;
         let boss_alive = |kind: u8| store.alive().iter().any(|&s| store.kind[s as usize] == kind);
-        self.director.tick(dt, self.players.len(), &self.catalog, &mut self.rng, boss_alive, &mut self.packs);
+        self.director.tick(dt, self.targets.len(), &self.catalog, &mut self.rng, boss_alive, &mut self.packs);
         for i in 0..self.packs.len() {
             let pack = self.packs[i];
-            let room = self.config.alive_cap.saturating_sub(self.store.len()).min(u16::MAX as usize) as u16;
+            let monsters = self.store.len() - self.plants as usize;
+            let room = self.config.alive_cap.saturating_sub(monsters).min(u16::MAX as usize) as u16;
             let placed = if room == 0 { 0 } else { self.place_pack(pack.kind, pack.count.min(room), pack.formation) };
             if placed < pack.count {
                 self.director.refund(pack.kind, pack.count - placed, &self.catalog);
@@ -904,7 +1038,7 @@ impl Horde {
     /// A spot just past `player`'s light radius in direction `angle`, at a
     /// random spawn margin.
     fn off_screen(&mut self, player: usize, angle: f32) -> (f32, f32) {
-        let p = self.players[player];
+        let p = self.targets[player];
         let (lo, hi) = self.config.waves.spawn_margin;
         let d = p.light + self.rng.gen_range(lo..hi.max(lo + 0.01));
         (p.x + angle.cos() * d, p.y + angle.sin() * d)
@@ -913,11 +1047,11 @@ impl Horde {
     /// A spawnable spot just outside the light of a random player, in a
     /// random direction.
     fn ring_spot(&mut self) -> Option<(f32, f32)> {
-        if self.players.is_empty() || !self.field.is_ready() {
+        if self.targets.is_empty() || !self.field.is_ready() {
             return None;
         }
         for _ in 0..16 {
-            let who = self.rng.gen_range(0..self.players.len());
+            let who = self.rng.gen_range(0..self.targets.len());
             let a = self.rng.gen_range(0.0..std::f32::consts::TAU);
             let (x, y) = self.off_screen(who, a);
             if self.spawnable(x, y) {
@@ -930,7 +1064,7 @@ impl Horde {
     /// Places up to `count` monsters of `kind` just off-screen. Returns how
     /// many landed.
     fn place_pack(&mut self, kind: u8, count: u16, formation: Formation) -> u16 {
-        if self.players.is_empty() || !self.field.is_ready() {
+        if self.targets.is_empty() || !self.field.is_ready() {
             return 0;
         }
         let mut placed = 0;
@@ -967,7 +1101,7 @@ impl Horde {
             // Closing in on one player from all sides, unevenly: jittered
             // angles and distances, so it reads as a crowd, not a circle.
             Formation::Surround => {
-                let who = self.rng.gen_range(0..self.players.len());
+                let who = self.rng.gen_range(0..self.targets.len());
                 let base = self.rng.gen_range(0.0..std::f32::consts::TAU);
                 let step = std::f32::consts::TAU / count as f32;
                 for i in 0..count {
@@ -980,6 +1114,25 @@ impl Horde {
         placed
     }
 
+}
+
+/// The heading of an idle (roaming) monster: one random heading per leg of
+/// [`ROAM_LEG_SECS`], legs staggered by slot, one in [`ROAM_REST`] spent
+/// standing (`None`). Stateless (a hash of slot, generation and leg), so
+/// it costs no storage and stays deterministic.
+fn roam_heading(slot: u16, generation: u8, tick: u32, hz: u32) -> Option<(f32, f32)> {
+    let leg_ticks = ((ROAM_LEG_SECS * hz as f32) as u32).max(1);
+    let leg = tick.wrapping_add((slot as u32).wrapping_mul(97)) / leg_ticks;
+    let mut h = (slot as u64) << 40 | (generation as u64) << 32 | leg as u64;
+    // splitmix64 finaliser.
+    h = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    h ^= h >> 31;
+    if (h as u32).is_multiple_of(ROAM_REST) {
+        return None;
+    }
+    let a = (h >> 40) as f32 / (1u64 << 24) as f32 * std::f32::consts::TAU;
+    Some((a.cos(), a.sin()))
 }
 
 /// Whether the straight segment stays on walkable cells (sampled every half

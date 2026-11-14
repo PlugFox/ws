@@ -1,0 +1,33 @@
+# Development PostgreSQL of the game server (`mise run game:db:up`).
+#
+# Same major version as production (postgres:18-alpine on the shared stack),
+# published on 127.0.0.1:55432 so it never clashes with another local
+# Postgres. The superuser `mobbed` owns the `mobbed` database the server
+# uses by default (`DATABASE_URL` in server/src/config.rs); tests and e2e
+# runs create throwaway databases next to it, so it needs CREATEDB, which a
+# superuser has. Data lives in the named volume: `mise run game:db:down`
+# keeps it, `docker compose -f compose.dev.yaml down -v` wipes it.
+name: mobbed-dev
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: mobbed
+      POSTGRES_PASSWORD: mobbed
+      POSTGRES_DB: mobbed
+    # Parallel `cargo test` opens a small pool per test database.
+    command: ["postgres", "-c", "max_connections=300"]
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      # postgres 18 images keep PGDATA under /var/lib/postgresql/18/docker.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mobbed -d mobbed"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:

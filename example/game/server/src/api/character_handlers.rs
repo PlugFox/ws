@@ -3,7 +3,7 @@ use super::state::AppState;
 use crate::db::character_repo::{CharacterRecord, CharacterRepo};
 use crate::world::protocol::Look;
 use crate::session::CharacterState;
-use crate::world::combat::{self, Class, Loadout, Weapon};
+use crate::world::combat::{self, Bag, Class, Loadout, Weapon};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -58,21 +58,32 @@ pub struct CharacterDto {
     pub inventory: serde_json::Value,
     pub last_location_id: String,
     pub look: LookDto,
-    pub created_at: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A stored character's belongings (the starting kit for rows from
+/// before items).
+fn bag_of(r: &CharacterRecord) -> Bag {
+    r.bag(Class::from_id(&r.archetype).unwrap_or(Class::Swordsman))
 }
 
 impl CharacterDto {
     fn of(r: CharacterRecord) -> Self {
         let look = r.look().into();
+        let bag = bag_of(&r);
         Self {
             id: r.id,
             user_id: r.user_id,
-            stats: class_stats(&r.archetype, r.level, &r.weapon),
-            unlocked_skills: serde_json::from_str(&r.unlocked_skills_json).unwrap_or(json!([])),
-            inventory: serde_json::from_str(&r.inventory_json).unwrap_or(json!([])),
+            stats: class_stats(&r.archetype, i64::from(r.level), &bag),
+            unlocked_skills: r.unlocked_skills.0,
+            inventory: json!({
+                "zeny": bag.zeny,
+                "items": bag.items.iter().map(|s| json!({ "id": s.key(), "count": s.count })).collect::<Vec<_>>(),
+                "equip": bag.equip,
+            }),
             name: r.name,
             archetype: r.archetype,
-            level: r.level,
+            level: i64::from(r.level),
             base_exp: r.base_exp,
             last_location_id: r.last_location_id,
             look,
@@ -84,20 +95,23 @@ impl CharacterDto {
 /// Derived combat numbers of a class at a level (COMBAT.md §1.3, §2.2).
 /// Computed on read: a character is class + level + learned skills, so
 /// nothing here is stored or can drift from the rules.
-fn class_stats(archetype: &str, level: i64, weapon: &str) -> serde_json::Value {
+pub(crate) fn class_stats(archetype: &str, level: i64, bag: &Bag) -> serde_json::Value {
     let Some(class) = Class::from_id(archetype) else {
         return json!({});
     };
     let level = level.clamp(1, combat::MAX_LEVEL as i64) as u32;
-    let held = Weapon::held(class, weapon);
+    let held = Weapon::held(class, bag.weapon());
     let (dice, kind) = held.damage(class, level);
+    let gear = bag.gear(class);
     json!({
         "title": class.title(level),
         "tier": combat::tier(level),
-        "max_hp": class.max_hp(level),
-        "max_sp": class.max_sp(level),
-        "ac": class.base_ac(level),
+        "max_hp": class.max_hp(level) + gear.hp,
+        "max_sp": class.max_sp(level) + gear.sp,
+        "ac": gear.ac_at(level),
+        "zeny": bag.zeny,
         "proficiency": combat::proficiency(level),
+        "attacks": class.attacks_per_action(level),
         "skill_points": Class::skill_points(level),
         "exp_to_next": combat::exp_to_next(level),
         "weapon": {
@@ -159,8 +173,8 @@ pub async fn create_character(
     // for characters created before the class rework.
     let Some(class) = Class::ALL.into_iter().find(|c| c.id() == archetype) else {
         let available: Vec<&str> = Class::ALL.iter().map(|c| c.id()).collect();
-        let error = if combat::class::LOCKED_CLASSES.contains(&archetype.as_str()) {
-            format!("The {archetype} class is not available yet")
+        let error = if let Some(p) = combat::profile::find(&archetype).filter(|p| p.class.is_none()) {
+            format!("The {} class is not available yet", p.name)
         } else {
             format!("Invalid class. Available: {available:?}")
         };
@@ -191,23 +205,12 @@ pub async fn create_character(
         ));
     }
 
-    // Nothing is learned at level 1; combat numbers derive from class + level.
-    let initial_stats = json!({});
-    let initial_skills = json!([]);
-    let initial_inventory = json!([]);
-    let initial_location = "hub_central";
-
-    let record = CharacterRepo::create(
-        &state.pool,
-        auth.user_id,
-        name,
-        class.id(),
-        &initial_stats.to_string(),
-        &initial_skills.to_string(),
-        &initial_inventory.to_string(),
-        initial_location,
-        look,
-    )
+    // Nothing is learned yet; combat numbers derive from class + level.
+    // The starting kit: class weapon, armour, five Red Potions. Test runs
+    // (`GAME_DEV_LEVEL`) start higher.
+    let bag = Bag::starting(class, "");
+    let level = state.config.dev_level.map_or(1, |l| l.clamp(1, combat::MAX_LEVEL));
+    let record = CharacterRepo::create(&state.pool, auth.user_id, name, class.id(), "hub_central", look, &bag, level)
     .await
     .map_err(|err| match err {
         sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => (
@@ -219,14 +222,6 @@ pub async fn create_character(
             Json(json!({ "error": err.to_string() })),
         ),
     })?;
-    let mut record = record;
-    if let Some(level) = state.config.dev_level {
-        let level = level.clamp(1, combat::MAX_LEVEL);
-        CharacterRepo::set_level(&state.pool, record.id as u32, level).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": err.to_string() }))))?;
-        record.level = level as i64;
-        record.base_exp = 0;
-    }
-
     Ok((StatusCode::CREATED, Json(CharacterDto::of(record))).into_response())
 }
 
@@ -261,6 +256,14 @@ pub async fn select_character(
     Path(id): Path<u32>,
     State(state): State<AppState>,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    // The character lock is held across the read: a player trade settling
+    // now (`session::trade`) stores and applies its bags under the same
+    // lock, so the row read here is never older than the memory it replaces.
+    let active_session = state.session_registry.get(auth.user_id);
+    let mut char_lock = match &active_session {
+        Some(s) => Some(s.character.write().await),
+        None => None,
+    };
     let record = CharacterRepo::find_by_user_and_id(&state.pool, auth.user_id, id)
         .await
         .map_err(|err| {
@@ -276,9 +279,9 @@ pub async fn select_character(
             )
         })?;
 
-    let stats = serde_json::from_str(&record.stats_json).unwrap_or(json!({}));
-    let skills = serde_json::from_str(&record.unlocked_skills_json).unwrap_or(json!([]));
-    let inventory = serde_json::from_str(&record.inventory_json).unwrap_or(json!([]));
+    let stats = record.stats.0.clone();
+    let skills = record.unlocked_skills.0.clone();
+    let bag = bag_of(&record);
 
     let mut char_state = CharacterState::new(
         record.id as u32,
@@ -289,22 +292,27 @@ pub async fn select_character(
         record.base_exp as u64,
         stats.clone(),
         skills.clone(),
-        inventory.clone(),
+        bag,
         record.last_location_id.clone(),
         record.look(),
     );
-    char_state.weapon = record.weapon.clone();
-    let mut loadout: Loadout = serde_json::from_str(&record.loadout_json).unwrap_or_default();
+    let mut loadout: Loadout = record.loadout.0.clone();
     // Without a skill table (no assets) the stored loadout is kept as is.
     if let (Some(class), false) = (Class::from_id(&record.archetype), state.skills.is_empty()) {
         state.skills.sanitize(class, &mut loadout);
     }
     char_state.loadout = loadout;
+    // The leaderboard counters (a read failure starts them from zero only
+    // in memory; the stored ones are overwritten on the next save, so
+    // refuse instead).
+    char_state.record = crate::db::LeaderboardRepo::record(&state.pool, record.id as u32).await.map_err(|err| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": err.to_string() })))
+    })?;
 
-    if let Some(active_session) = state.session_registry.get(auth.user_id) {
-        let mut char_lock = active_session.character.write().await;
-        *char_lock = Some(char_state);
+    if let Some(char_lock) = char_lock.as_mut() {
+        **char_lock = Some(char_state);
     }
+    drop(char_lock);
 
     Ok((
         StatusCode::OK,

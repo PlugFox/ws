@@ -24,3 +24,14 @@ String bodyJob(String archetype, [int tier = 1]) {
   if (line == null) return 'novice';
   return line[(tier < 1 ? 1 : (tier > 3 ? 3 : tier)) - 1];
 }
+
+/// Bodies of the class lines not playable yet (shown locked at creation),
+/// by the all-bodies pack's id (`client/bodies/sprites/<id>_<m|f>.json`).
+const lockedBodies = <String, String>{
+  'thief': 'thief',
+  'merchant': 'merchant',
+  'super_novice': 'super_novice',
+  'ninja': 'ninja',
+  'gunslinger': 'gunslinger',
+  'taekwon': 'taekwon_boy',
+};

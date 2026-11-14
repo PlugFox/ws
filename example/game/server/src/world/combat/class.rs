@@ -21,8 +21,8 @@ pub enum Save {
     Mind,
 }
 
-/// Class lines shown on the creation screen but not selectable yet.
-pub const LOCKED_CLASSES: [&str; 2] = ["thief", "merchant"];
+// Class lines shown on the creation screen but not selectable yet are the
+// locked entries of `profile::PROFILES`.
 
 impl Class {
     pub const ALL: [Class; 4] = [Class::Swordsman, Class::Archer, Class::Mage, Class::Acolyte];
@@ -78,6 +78,11 @@ impl Class {
         dice[(tier - 1) as usize]
     }
 
+    /// Hit die sides of the tier `level` is in.
+    pub const fn hit_die_at(self, level: u32) -> u32 {
+        self.hit_die(tier(level))
+    }
+
     /// Flat HP per level (the CON modifier nobody rolls for).
     const fn con(self, tier: u32) -> i32 {
         match (self, tier) {
@@ -117,15 +122,12 @@ impl Class {
         10 + (1..=level).map(|l| self.sp_per_level(tier(l))).sum::<i32>()
     }
 
-    /// Armour class without buffs: class base + 1 per tier above the first.
-    pub const fn base_ac(self, level: u32) -> i32 {
-        let base = match self {
-            Class::Mage => 11,
-            Class::Acolyte => 13,
-            Class::Archer => 14,
-            Class::Swordsman => 16,
-        };
-        base + tier(level) as i32 - 1
+    /// Armour class in the starting kit, without buffs. Armour class is
+    /// worn armour + class defence + 1 per tier above the first
+    /// ([`super::items::Gear`]); the kit keeps the numbers the classes had
+    /// before items: 16 / 14 / 13 / 11 at tier 1.
+    pub fn base_ac(self, level: u32) -> i32 {
+        super::items::Bag::starting(self, "").gear(self).ac_at(level)
     }
 
     pub const fn proficient_save(self) -> Save {

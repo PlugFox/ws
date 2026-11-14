@@ -34,6 +34,8 @@ fn synthetic_world() -> HubWorld {
             npcs: Vec::new(),
             light_radius: 0.0,
             residents: Default::default(),
+            spawn: None,
+            return_point: None,
         };
         MapData::new(manifest, walk, Heightmap::flat(w, h)).unwrap()
     };
@@ -57,6 +59,7 @@ fn synthetic_world() -> HubWorld {
         sprite: "mission_npc".into(),
         name: "Board Keeper".into(),
         kind: "mission_board".into(),
+        shop: String::new(),
         x: 5,
         y: 5,
         facing: 4,
@@ -82,6 +85,8 @@ fn synthetic_stage() -> HubWorld {
         npcs: Vec::new(),
         light_radius: 0.0,
         residents: Default::default(),
+        spawn: None,
+        return_point: None,
     };
     HubWorld::new(vec![MapData::new(manifest, walk, Heightmap::flat(w, h)).unwrap()], "prt_fild08").unwrap()
 }
@@ -108,10 +113,12 @@ async fn start_with(stages: Vec<HubWorld>) -> (SocketAddr, AppState) {
         pack: (6, 12),
         skills: Vec::new(),
         evil: false,
+        drops: Vec::new(),
+        hits: (0, 0),
     };
     let monsters = MonsterCatalog::new(vec![poring]).unwrap();
     let (app, state) =
-        create_app_with_monsters(AppConfig::test_config(), Some(synthetic_world()), stages, Some(monsters))
+        create_app_with_monsters(AppConfig::test_config().await, Some(synthetic_world()), stages, Some(monsters))
             .await
             .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -475,7 +482,11 @@ async fn lobby_ready_check_stage_launch_and_return() {
     assert_eq!(channel, 1, "back to the channel they came from");
     let (map, x, y) = next_of!(&mut b, MapEnter { map, x, y });
     assert_eq!(map.id, "town");
-    assert_eq!((x, y), (3.5, 3.5));
+    // Back from a mission: scattered around the town's return point (no
+    // `returnPoint` here: the map's spawn), not the exit portal's arrival.
+    let world = synthetic_world();
+    let spawn = world.map(world.entry()).spawn;
+    assert!((x - spawn.0).abs() <= 3.5 && (y - spawn.1).abs() <= 3.5, "({x}, {y}) near {spawn:?}");
     assert_eq!(next_of!(&mut a, PlayerVanished { entity_id }).0 as u64, b_id);
 
     // erin abandons the stage from the panel: the stage ends.
@@ -541,4 +552,126 @@ async fn stale_socket_with_same_token_does_not_evict_successor() {
     assert_eq!(state.lobbies.as_ref().unwrap().open_lobbies(), 1, "successor's lobby survives");
     // And the new socket still gets snapshots.
     next_snapshot(&mut new, |_| true).await;
+}
+
+/// Starts a private mission alone; returns the stage id.
+async fn solo_stage(ws: &mut Ws) -> u32 {
+    send(ws, ClientMsg::HubJoin { channel: None }).await;
+    next_of!(ws, MapEnter);
+    send(ws, mission_select(false)).await;
+    next_of!(ws, LobbyState);
+    send(ws, ClientMsg::LobbyStart).await;
+    let (stage_id,) = next_of!(ws, StageJoined { stage_id });
+    next_of!(ws, MapEnter);
+    stage_id
+}
+
+async fn until(what: &str, mut ok: impl FnMut() -> bool) {
+    for _ in 0..100 {
+        if ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("{what}");
+}
+
+/// A stage socket drops: the fighter waits link-dead; the next socket is
+/// offered the stage on `hub_join` and re-attaches to it; a stale socket
+/// still holding the slot is closed with 4009 when a newer one takes over.
+#[tokio::test]
+async fn a_dropped_stage_socket_comes_back_to_its_fighter() {
+    let (addr, state) = start_with(vec![synthetic_stage()]).await;
+    let (token, char_id) = player(addr, "jade", true).await;
+    let mut ws = connect(addr, &token).await;
+    let stage_id = solo_stage(&mut ws).await;
+    let stages = state.lobbies.as_ref().unwrap().stages();
+
+    ws.close(None).await.unwrap();
+    drop(ws);
+    until("link-dead", || stages.summary().first().is_some_and(|s| s.link_dead == 1)).await;
+    assert_eq!(stages.active(), 1, "the stage waits for them");
+
+    // A fresh start asks first.
+    let mut ws = connect(addr, &token).await;
+    send(&mut ws, ClientMsg::HubJoin { channel: None }).await;
+    let (sid, left_ms) = next_of!(&mut ws, Resumable { stage_id, left_ms });
+    assert_eq!(sid, stage_id);
+    assert!(left_ms > 50_000 && left_ms <= 60_000, "{left_ms}");
+    send(&mut ws, ClientMsg::StageResume { accept: true }).await;
+    let (sid, entity_id) = next_of!(&mut ws, StageJoined { stage_id, entity_id });
+    assert_eq!((sid, entity_id as u64), (stage_id, char_id));
+    assert_eq!(next_of!(&mut ws, MapEnter { map }).0.id, "prt_fild08");
+    next_of!(&mut ws, Inventory);
+    assert_eq!(stages.summary()[0].link_dead, 0);
+
+    // A second socket (a reconnect while the first looks alive) takes over;
+    // the first is told to stop.
+    let mut ws2 = connect(addr, &token).await;
+    send(&mut ws2, ClientMsg::StageResume { accept: true }).await;
+    assert_eq!(next_of!(&mut ws2, StageJoined { stage_id }).0, stage_id);
+    let code = loop {
+        match tokio::time::timeout(Duration::from_secs(3), ws.next()).await.expect("closed in time") {
+            Some(Ok(Message::Close(Some(f)))) => break u16::from(f.code),
+            Some(Ok(_)) => continue,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(code, 4009);
+    drop(ws);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(stages.summary()[0].link_dead, 0, "the stale socket's cleanup left the successor alone");
+    next_snapshot(&mut ws2, |s| s.entities.len() == 1).await;
+}
+
+/// Declining "Return to battle" forfeits the stage and lands in town.
+#[tokio::test]
+async fn declining_the_return_forfeits_the_stage() {
+    let (addr, state) = start_with(vec![synthetic_stage()]).await;
+    let (token, _) = player(addr, "kent", true).await;
+    let mut ws = connect(addr, &token).await;
+    solo_stage(&mut ws).await;
+    let stages = state.lobbies.as_ref().unwrap().stages();
+    ws.close(None).await.unwrap();
+    drop(ws);
+    until("link-dead", || stages.summary().first().is_some_and(|s| s.link_dead == 1)).await;
+
+    let mut ws = connect(addr, &token).await;
+    send(&mut ws, ClientMsg::HubJoin { channel: None }).await;
+    next_of!(&mut ws, Resumable);
+    send(&mut ws, ClientMsg::StageResume { accept: false }).await;
+    next_of!(&mut ws, HubJoined);
+    assert_eq!(next_of!(&mut ws, MapEnter { map }).0.id, "town");
+    assert_eq!(stages.active(), 0, "forfeited: the stage ended at once");
+    // Nothing to resume any more: a late accept lands in town too.
+    let mut again = connect(addr, &token).await;
+    send(&mut again, ClientMsg::StageResume { accept: true }).await;
+    assert_eq!(next_of!(&mut again, LobbyError { code }).0, "stage_gone");
+}
+
+/// A short drop in town: back on the same spot and channel.
+#[tokio::test]
+async fn a_town_reconnect_lands_on_the_same_spot() {
+    let (addr, _state) = start().await;
+    let (token, _) = player(addr, "lena", true).await;
+    let mut ws = connect(addr, &token).await;
+    send(&mut ws, ClientMsg::HubJoin { channel: None }).await;
+    let (channel,) = next_of!(&mut ws, HubJoined { channel });
+    let (x0, y0) = next_of!(&mut ws, MapEnter { x, y });
+    for seq in 1..=6u32 {
+        send(&mut ws, input(seq, 0.0, 1.0)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let snap = next_snapshot(&mut ws, |s| s.ack_seq == 6).await;
+    let (_, x1, y1, _) = snap.entities[0];
+    assert!(y1 > y0 + 0.5, "moved: {y0} -> {y1}");
+    ws.close(None).await.unwrap();
+    drop(ws);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut ws = connect(addr, &token).await;
+    send(&mut ws, ClientMsg::HubJoin { channel: None }).await;
+    assert_eq!(next_of!(&mut ws, HubJoined { channel }).0, channel);
+    let (x, y) = next_of!(&mut ws, MapEnter { x, y });
+    assert!((x - x1).abs() < 0.6 && (y - y1).abs() < 0.6, "({x}, {y}) is not where they stood ({x1}, {y1}); spawn ({x0}, {y0})");
 }

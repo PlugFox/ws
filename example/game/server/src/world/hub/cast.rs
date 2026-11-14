@@ -228,7 +228,7 @@ fn keeps_id(act: &Act, slv: u8) -> bool {
 }
 
 /// The telegraphs of a cast (sent at the press), ids from `zone` up.
-fn telegraphs(def: &SkillDef, slv: u8, caster: &HubPlayer, aimed: &Aimed, zone: u32, players: &[HubPlayer]) -> Vec<Telegraph> {
+pub(super) fn telegraphs(def: &SkillDef, slv: u8, caster: &HubPlayer, aimed: &Aimed, zone: u32, players: &[HubPlayer]) -> Vec<Telegraph> {
     let mut out = Vec::new();
     let mut id = zone;
     let entity_of = |uid: u32| players.iter().find(|p| p.profile.user_id == uid).map_or(0, |p| p.profile.character_id);
@@ -267,24 +267,27 @@ fn telegraphs(def: &SkillDef, slv: u8, caster: &HubPlayer, aimed: &Aimed, zone: 
 }
 
 /// Ids the lasting areas of a cast take.
-fn zone_ids(def: &SkillDef, slv: u8) -> u32 {
+pub(super) fn zone_ids(def: &SkillDef, slv: u8) -> u32 {
     def.effects.iter().filter_map(Effect::act).filter(|a| keeps_id(a, slv)).count() as u32
 }
 
 /// The context of one landing.
-struct Landing<'a> {
-    def: &'a SkillDef,
-    skill: u16,
-    slv: u8,
-    now: u32,
-    hz: f32,
-    zone: u32,
+pub(super) struct Landing<'a> {
+    pub def: &'a SkillDef,
+    pub skill: u16,
+    pub slv: u8,
+    pub now: u32,
+    pub hz: f32,
+    pub zone: u32,
+    /// Character level the dice scale with instead of the caster's (a
+    /// pickup bonus casts at the location's level).
+    pub power: Option<u32>,
 }
 
 /// Turns one cast into live areas and moves the caster.
-fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, horde: &Horde, walk: &WalkGrid, rng: &mut Rng, lives: &mut Vec<Live>) {
+pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, horde: &Horde, walk: &WalkGrid, rng: &mut Rng, lives: &mut Vec<Live>) {
     let Some(f) = caster.fighter.as_ref() else { return };
-    let (cl, class, weapon, mods) = (f.level, f.class, f.weapon, f.mods);
+    let (cl, class, weapon, mods) = (cx.power.unwrap_or(f.level), f.class, f.weapon, f.mods);
     let dc = save_dc(cl);
     let (slv, hz, now, def) = (cx.slv, cx.hz, cx.now, cx.def);
     let uid = caster.profile.user_id;
@@ -466,8 +469,8 @@ fn spread_targets(horde: &Horde, aimed: &Aimed, range: f32, n: u32) -> Vec<(u16,
 impl HubInstance {
     /// Slot presses, wind-ups and live areas on the horde map. Runs inside
     /// [`HubInstance::fight`], before the basic attacks; kills land in
-    /// `kills` like the basic attack's.
-    pub(super) fn cast_step(&mut self, out: &mut Outgoing, hits: &mut Vec<HitEvent>, kills: &mut Vec<u16>) {
+    /// `kills` like the basic attack's (slot, the caster's user id).
+    pub(super) fn cast_step(&mut self, out: &mut Outgoing, hits: &mut Vec<HitEvent>, kills: &mut Vec<Kill>) {
         let Some(horde) = self.horde.as_mut() else { return };
         let map = horde.map();
         let hz = self.config.tick_hz as f32;
@@ -528,7 +531,7 @@ impl HubInstance {
                         f.recovery = (RECOVERY_SECS * hz).round() as u32;
                         f.quiet = 0;
                         let walk = &self.world.map(map).walk;
-                        let cx = Landing { def, skill: c.skill, slv: c.level, now, hz, zone: c.zone };
+                        let cx = Landing { def, skill: c.skill, slv: c.level, now, hz, zone: c.zone, power: None };
                         land(&cx, &mut self.players[idx], c.aimed, horde, walk, &mut self.dice, &mut self.lives);
                         if def.channel
                             && let Some(f) = self.players[idx].fighter.as_mut()
@@ -548,7 +551,8 @@ impl HubInstance {
                 continue;
             }
             for slot in (0..16).filter(|s| pressed & (1 << s) != 0) {
-                let Some(skill) = f.hotbar.get(slot).copied().flatten() else { continue };
+                let pick = if slot == TRAVEL_SLOT { f.travel } else { f.hotbar.get(slot).copied().flatten() };
+                let Some(skill) = pick else { continue };
                 let def = book.get(skill);
                 let level = f.skills.get(skill as usize).copied().unwrap_or(0);
                 let busy = f.casting.is_some() && !def.mobile;
@@ -598,7 +602,7 @@ impl HubInstance {
                     }
                     f.quiet = 0;
                     let walk = &self.world.map(map).walk;
-                    let cx = Landing { def, skill, slv: level, now, hz, zone };
+                    let cx = Landing { def, skill, slv: level, now, hz, zone, power: None };
                     land(&cx, &mut self.players[idx], aimed, horde, walk, &mut self.dice, &mut self.lives);
                     if def.channel
                         && let Some(f) = self.players[idx].fighter.as_mut()
@@ -626,6 +630,7 @@ impl HubInstance {
         let mut lives = std::mem::take(&mut self.lives);
         let mut dispels: Vec<Area> = Vec::new();
         let walk = &self.world.map(map).walk;
+        let secs = horde.director_elapsed();
         lives.retain_mut(|l| {
             if l.map != map {
                 return now <= l.until;
@@ -670,15 +675,21 @@ impl HubInstance {
                 let (x, y) = l.area.centre();
                 let mut near = Vec::new();
                 Area::Circle { x, y, r: trap.radius }.monsters(horde, &mut near);
+                // A plant does not spring a trap.
+                near.retain(|&s| !horde.is_plant(s));
                 if near.is_empty() && trap.fuse_at.is_none_or(|t| now < t) {
                     l.next = now + TRAP_CHECK;
                     return now + TRAP_CHECK <= l.until;
                 }
+                let h0 = hits.len();
                 act(l, horde, &mut self.players, &mut self.dice, walk, now, hits, kills);
+                credit(&mut self.run, l, &hits[h0..], now, secs, horde);
                 ended.push(l.id);
                 return false;
             }
+            let h0 = hits.len();
             act(l, horde, &mut self.players, &mut self.dice, walk, now, hits, kills);
+            credit(&mut self.run, l, &hits[h0..], now, secs, horde);
             if l.pulse > 0 && now + l.pulse <= l.until {
                 l.next = now + l.pulse;
                 true
@@ -703,6 +714,15 @@ impl HubInstance {
     }
 }
 
+/// The result screen's share of one action of a live area: its damage and
+/// healing to the caster's skill (`stats.rs`), a revive to its caster.
+fn credit(run: &mut super::stats::RunLog, l: &Live, hits: &[HitEvent], now: u32, secs: f32, horde: &Horde) {
+    if matches!(l.load, Load::Revive(_)) {
+        run.revive_cast(l.caster, now);
+    }
+    run.credit(l.caster, l.skill, hits, now, secs, horde.store());
+}
+
 pub(super) fn cancel(entity: u32) -> ServerMsg {
     ServerMsg::Cast { caster: entity, skill: String::new(), x: 0.0, y: 0.0, cast_ms: 0, cooldown_ms: 0, areas: Vec::new(), level: 0 }
 }
@@ -720,15 +740,17 @@ fn foes(l: &Live, horde: &Horde) -> Vec<u16> {
             }
             _ => {
                 let (x, y) = l.area.centre();
-                out.extend(horde.nearest_to(x, y, 1.0, |_| false).map(|(s, _)| s));
+                // A monster under the point before a plant.
+                out.extend(horde.nearest_foe(x, y, 1.0).or_else(|| horde.nearest_to(x, y, 1.0, |_| false)).map(|(s, _)| s));
             }
         }
     } else {
         l.area.monsters(horde, &mut out);
         let store = horde.store();
         if l.limit > 0 || l.chain.0 > 0 {
+            // Monsters first: plants never take a limited target's place.
             let key = |s: u16| l.area.order(store.x[s as usize], store.y[s as usize]);
-            out.sort_by(|&a, &b| key(a).total_cmp(&key(b)).then(a.cmp(&b)));
+            out.sort_by(|&a, &b| store.is_plant(a).cmp(&store.is_plant(b)).then(key(a).total_cmp(&key(b))).then(a.cmp(&b)));
         }
         if l.limit > 0 {
             out.truncate(l.limit as usize);
@@ -743,7 +765,7 @@ fn foes(l: &Live, horde: &Horde) -> Vec<u16> {
         let mut at = first;
         for _ in 0..l.chain.0 {
             let (x, y) = (store.x[at as usize], store.y[at as usize]);
-            let Some((next, _)) = horde.nearest_to(x, y, l.chain.1, |s| out.contains(&s)) else { break };
+            let Some((next, _)) = horde.nearest_to(x, y, l.chain.1, |s| out.contains(&s) || store.is_plant(s)) else { break };
             out.push(next);
             at = next;
         }
@@ -778,7 +800,7 @@ fn act(
     walk: &WalkGrid,
     now: u32,
     hits: &mut Vec<HitEvent>,
-    kills: &mut Vec<u16>,
+    kills: &mut Vec<Kill>,
 ) {
     match l.load.clone() {
         Load::Damage { blow, knock } => {
@@ -877,7 +899,7 @@ fn inflict(horde: &mut Horde, s: u16, c: Condition, ticks: u16, k: u32) {
 
 /// Pushes a monster `distance` cells away from the area (negative pulls it
 /// in, never past the centre) over open ground. Bosses stand firm.
-fn push(horde: &mut Horde, walk: &WalkGrid, area: Area, s: u16, distance: f32) {
+pub(super) fn push(horde: &mut Horde, walk: &WalkGrid, area: Area, s: u16, distance: f32) {
     let i = s as usize;
     if horde.store().flags[i] & FLAG_BOSS != 0 || horde.store().hp[i] <= 0 || !horde.store().is_alive(s) {
         return;
@@ -899,7 +921,7 @@ fn push(horde: &mut Horde, walk: &WalkGrid, area: Area, s: u16, distance: f32) {
 
 /// Burning (1d4 fire per k) and poison (1d4) bite once a second, staggered
 /// by slot so a burning crowd does not land in one tick.
-fn ailments(horde: &mut Horde, rng: &mut Rng, now: u32, hz: f32, hits: &mut Vec<HitEvent>, kills: &mut Vec<u16>) {
+fn ailments(horde: &mut Horde, rng: &mut Rng, now: u32, hz: f32, hits: &mut Vec<HitEvent>, kills: &mut Vec<Kill>) {
     let second = (hz.round() as u32).max(1);
     for k in 0..horde.store().alive().len() {
         let s = horde.store().alive()[k];
@@ -920,7 +942,8 @@ fn ailments(horde: &mut Horde, rng: &mut Rng, now: u32, hz: f32, hits: &mut Vec<
             let mut flags = (kind as u8) << 4;
             if horde.store().hp[i] <= 0 {
                 flags |= hit::KILL;
-                kills.push(s);
+                // Nobody to credit: the nearest party member gets the loot.
+                kills.push((s, 0));
             }
             hits.push(HitEvent { target: MONSTER_ENTITY_BASE + s as u32, amount: amount as u32, flags });
         }
@@ -945,7 +968,9 @@ fn resist(horde: &mut Horde, rng: &mut Rng, s: u16, dc: i32, condition: bool) ->
 
 /// Damage to one monster with its conditions applied (COMBAT.md §2.5): ice
 /// makes it water and a physical hit shatters it for +1d6 per `k`; stone
-/// halves everything. Returns the amount taken off its HP.
+/// halves everything. A plant takes exactly one HP from any hit, whatever
+/// the dice, element or crit (COMBAT.md §4.8). Returns the amount taken
+/// off its HP.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn wound(
     horde: &mut Horde,
@@ -957,6 +982,10 @@ pub(super) fn wound(
     saved: bool,
     k: u32,
 ) -> i32 {
+    if horde.is_plant(s) {
+        horde.store_mut().hp[s as usize] -= 1;
+        return 1;
+    }
     let status = horde.store().status_of(s);
     let element = status.element(horde.catalog().get(horde.store().kind[s as usize]).element);
     let mut amount = damage.resolve(rng, crit, saved, element, 0);
@@ -971,8 +1000,15 @@ pub(super) fn wound(
         amount /= 2;
     }
     horde.store_mut().hp[s as usize] -= amount;
+    if amount > 0 {
+        horde.flinch(s);
+    }
     amount
 }
+
+/// A monster slot that died this tick and the user id of the player who
+/// landed the blow (0 = nobody: burning, poison).
+pub(super) type Kill = (u16, u32);
 
 /// What one skill hit carries.
 #[derive(Clone, Copy, Debug)]
@@ -993,7 +1029,7 @@ pub(super) struct Blow {
 }
 
 /// One hit on each of `targets`.
-fn strike(horde: &mut Horde, rng: &mut Rng, targets: &[u16], blow: Blow, hits: &mut Vec<HitEvent>, kills: &mut Vec<u16>) {
+fn strike(horde: &mut Horde, rng: &mut Rng, targets: &[u16], blow: Blow, hits: &mut Vec<HitEvent>, kills: &mut Vec<Kill>) {
     for &s in targets {
         if horde.store().hp[s as usize] <= 0 {
             continue;
@@ -1007,7 +1043,7 @@ fn strike(horde: &mut Horde, rng: &mut Rng, targets: &[u16], blow: Blow, hits: &
                         hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS });
                         continue;
                     }
-                    o => (o == AttackOutcome::Critical, false),
+                    o => (o == AttackOutcome::Critical && !horde.is_plant(s), false),
                 }
             }
             None => (false, resist(horde, rng, s, blow.dc, blow.save.is_some())),
@@ -1023,7 +1059,7 @@ fn strike(horde: &mut Horde, rng: &mut Rng, targets: &[u16], blow: Blow, hits: &
         }
         if horde.store().hp[s as usize] <= 0 {
             flags |= hit::KILL;
-            kills.push(s);
+            kills.push((s, blow.caster));
         } else if let Some((condition, ticks)) = blow.save {
             // A weapon swing that hit still allows a save against its rider.
             let failed = if blow.to_hit.is_some() { !resist(horde, rng, s, blow.dc, true) } else { !saved };
@@ -1059,4 +1095,14 @@ pub(super) fn equip(f: &mut Fighter, book: &SkillBook, loadout: &crate::world::c
     for (slot, h) in f.hotbar.iter_mut().enumerate() {
         *h = book.find(loadout.slot(slot)).map(|(i, _)| i).filter(|&i| f.skills[i as usize] > 0);
     }
+    // The travel key: the learned movement skill, the higher tier first
+    // (later in the book), then the higher level.
+    f.travel = book
+        .iter()
+        .filter(|(i, def)| f.skills[*i as usize] > 0 && !def.passive && def.effects.iter().any(|e| matches!(e, Effect::Move { .. })))
+        .max_by_key(|(i, _)| (*i, f.skills[*i as usize]))
+        .map(|(i, _)| i);
 }
+
+/// Bit of `Input::slots` for the travel key (past the hotbar's slots).
+pub const TRAVEL_SLOT: usize = 15;

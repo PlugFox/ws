@@ -128,7 +128,7 @@ fn walk_through_every_house_door_and_back() {
     let mut hub = HubInstance::new(1, Arc::clone(&world), HubSimConfig::default());
     let mut out = Vec::new();
     hub.join(
-        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default() },
+        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default() },
         Uuid::nil(),
         None,
         0,
@@ -222,7 +222,7 @@ fn stage_on_prt_fild08_exits_to_izlude_arrival() {
 
     let mut stage = HubInstance::stage(1, "poring_island_survival", Arc::clone(&stage_world), HubSimConfig::default());
     let mut out = Vec::new();
-    let walker = PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default() };
+    let walker = PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default() };
     stage.join(walker, Uuid::nil(), None, 0, &mut out);
     let path = bfs(field, field.spawn, |cx, cy| exit.contains(cx as f32 + 0.5, cy as f32 + 0.5))
         .expect("the exit is reachable from the stage spawn");
@@ -243,7 +243,7 @@ fn horde_on_prt_fild08_spawns_chases_and_stays_on_walkable_ground() {
     let Some(dir) = dist() else { return };
     let world = Arc::new(HubWorld::load(&dir, &["prt_fild08".into()], "prt_fild08").unwrap());
     let catalog = Arc::new(MonsterCatalog::load(&dir).expect("monsters.json loads"));
-    assert!(catalog.kind_of("poring").is_some() && catalog.kind_of("baphomet").is_some());
+    assert!(catalog.kind_of("poring").is_some() && catalog.kind_of("angeling").is_some());
     let cfg = HordeConfig { seed: Some(5), ..HordeConfig::default() };
     let mut horde = Horde::new(Arc::clone(&world), Arc::clone(&catalog), cfg);
     let map = world.map(world.entry());
@@ -265,13 +265,13 @@ fn horde_on_prt_fild08_spawns_chases_and_stays_on_walkable_ground() {
     for (_, _, kind, x, y) in horde.monsters() {
         let d = players.iter().map(|&(px, py)| (x - px).hypot(y - py)).fold(f32::INFINITY, f32::min);
         nearest_seen = nearest_seen.min(d);
-        assert!(!catalog.get(kind).boss, "baphomet unlocks at 300 s");
+        assert!(!catalog.get(kind).boss, "angeling unlocks at 600 s");
     }
     // The first waves have reached the party (spawned outside the view, so
     // anything close walked there).
     assert!(nearest_seen < 3.0, "closest monster is {nearest_seen} cells away");
     let mut buf = bytes::BytesMut::new();
-    let viewer = game_server::world::horde::PlayerView { x: sx, y: sy, light: horde.light_radius(), id: 0 };
+    let viewer = game_server::world::horde::PlayerView { x: sx, y: sy, light: horde.light_radius(), id: 0, hunted: true };
     let mut view = game_server::world::horde::view::MonsterView::new(horde.capacity());
     let stats = horde.write_delta(&mut view, &viewer, 75 * hz, &mut buf);
     assert!(stats.spawns > 0 && stats.spawns as usize <= horde.len(), "{stats:?}");

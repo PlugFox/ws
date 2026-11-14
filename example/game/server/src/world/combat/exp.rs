@@ -31,6 +31,8 @@ pub fn kill_value(ml: u32, archetype: Archetype) -> u64 {
         Archetype::Tank => 30,
         Archetype::Elite => 80,
         Archetype::Boss => 1500,
+        // Plants feed nobody (RO's give 0-1 exp): their herbs are the reward.
+        Archetype::Plant => 0,
     };
     (swarm_exp(ml) * tenths + 5) / 10
 }

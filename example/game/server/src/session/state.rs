@@ -1,5 +1,6 @@
-use crate::world::combat::Loadout;
+use crate::world::combat::{Bag, Loadout};
 use crate::world::protocol::Look;
+use crate::world::record::Record;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -14,13 +15,17 @@ pub struct CharacterState {
     pub base_exp: u64,
     pub stats: serde_json::Value,
     pub unlocked_skills: serde_json::Value,
-    pub inventory: serde_json::Value,
+    /// Belongings: bag stacks, equipment, zeny (`inventory`,
+    /// `equipment`, `zeny`; the worn weapon also goes to `weapon`).
+    pub bag: Bag,
     pub last_location_id: String,
     pub look: Look,
     /// Held weapon id; empty = the class's starting weapon.
     pub weapon: String,
     /// Learned skills and the hotbar.
     pub loadout: Loadout,
+    /// Lifetime counters (the leaderboard; `world::record`).
+    pub record: Record,
 
     pub is_dirty: bool,
     pub last_modified: Instant,
@@ -36,7 +41,7 @@ impl CharacterState {
         base_exp: u64,
         stats: serde_json::Value,
         unlocked_skills: serde_json::Value,
-        inventory: serde_json::Value,
+        bag: Bag,
         last_location_id: String,
         look: Look,
     ) -> Self {
@@ -49,11 +54,12 @@ impl CharacterState {
             base_exp,
             stats,
             unlocked_skills,
-            inventory,
+            weapon: bag.weapon().to_string(),
+            bag,
             last_location_id,
             look,
-            weapon: String::new(),
             loadout: Loadout::default(),
+            record: Record::default(),
             is_dirty: false,
             last_modified: Instant::now(),
         }
@@ -104,6 +110,27 @@ impl CharacterState {
         }
     }
 
+    /// Belongings changed (trade, equipment, potions, zeny), marking state
+    /// dirty.
+    pub fn set_bag(&mut self, bag: Bag) {
+        if self.bag != bag {
+            self.weapon = bag.weapon().to_string();
+            self.bag = bag;
+            self.is_dirty = true;
+            self.last_modified = Instant::now();
+        }
+    }
+
+    /// Counters gained in an instance (kills, MVPs, ...), marking state
+    /// dirty.
+    pub fn add_record(&mut self, delta: &Record) {
+        if !delta.is_empty() {
+            self.record.add(delta);
+            self.is_dirty = true;
+            self.last_modified = Instant::now();
+        }
+    }
+
     /// Updates location ID, marking state dirty.
     pub fn set_location(&mut self, location_id: String) {
         self.last_location_id = location_id;
@@ -134,4 +161,7 @@ pub enum SessionSignal {
     ForceDisconnect { reason: String },
     /// Generic notification message for client.
     Notification { message: String },
+    /// Server announcement (admin broadcast, restart countdown): a banner
+    /// and a chat log line.
+    Announce { text: String },
 }

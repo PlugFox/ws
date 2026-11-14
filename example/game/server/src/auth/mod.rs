@@ -1,3 +1,4 @@
+pub mod contacts;
 pub mod jwt;
 pub mod password;
 pub mod refresh;

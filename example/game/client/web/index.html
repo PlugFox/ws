@@ -2,27 +2,83 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ws game</title>
+<!-- No page zoom: pinch and double-tap belong to the game (lib/src/page_guard.dart). -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Mobbed! — co-op horde survival</title>
+<meta name="description" content="Team up and survive the horde. A free co-op survivors-like in your browser: hundreds of cute monsters, bosses with real mechanics, loot you keep. No install.">
+<meta name="application-name" content="Mobbed!">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#1b1426">
+<meta name="format-detection" content="telephone=no">
+<link rel="canonical" href="https://mob.plugfox.dev/">
+
+<!-- Icons and install (PWA): baked by assets/pipeline/brand_baker.py. -->
+<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Mobbed!">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+<!-- Link previews (Open Graph, X / Twitter). -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Mobbed!">
+<meta property="og:title" content="Mobbed! — co-op horde survival">
+<meta property="og:description" content="Team up and survive the horde: hundreds of cute monsters, bosses with real mechanics, loot you keep. Free, in your browser.">
+<meta property="og:url" content="https://mob.plugfox.dev/">
+<meta property="og:image" content="https://mob.plugfox.dev/og.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The Mobbed! logo over a hero surrounded by a sea of slimes">
+<meta property="og:locale" content="en_US">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Mobbed! — co-op horde survival">
+<meta name="twitter:description" content="Team up and survive the horde. Free, in your browser.">
+<meta name="twitter:image" content="https://mob.plugfox.dev/og.jpg">
+<meta name="twitter:image:alt" content="The Mobbed! logo over a hero surrounded by a sea of slimes">
+
+<script type="application/ld+json">
+{"@context":"https://schema.org","@graph":[
+ {"@type":"WebSite","@id":"https://mob.plugfox.dev/#website","name":"Mobbed!","url":"https://mob.plugfox.dev/","inLanguage":"en"},
+ {"@type":"VideoGame","@id":"https://mob.plugfox.dev/#game","name":"Mobbed!","url":"https://mob.plugfox.dev/","image":"https://mob.plugfox.dev/og.jpg",
+  "description":"A free co-op survivors-like in the browser: survive waves of monsters with your party, fight bosses, keep the loot.",
+  "genre":["Action","Roguelite","Survivors-like"],"playMode":["SinglePlayer","CoOp","MultiPlayer"],"gamePlatform":["Web browser","PWA"],
+  "applicationCategory":"Game","operatingSystem":"Any","isAccessibleForFree":true,
+  "offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"author":{"@type":"Person","name":"PlugFox"}}
+]}
+</script>
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Alegreya+Sans:wght@400;500;700&family=Philosopher:wght@400;700&display=swap">
 <style>
   html, body { margin: 0; height: 100%; color: #eee; font: 16px 'Alegreya Sans', system-ui, sans-serif;
-               background: radial-gradient(120% 90% at 30% 20%, #2a3550 0%, #141a28 55%, #0b0e16 100%); }
+               background: #9fc3e6; }
+  /* The page is an app, not a document: no pull-to-refresh or rubber band,
+     no pinch / double-tap zoom, no selection, callout or image drag outside
+     text fields (lib/src/page_guard.dart does what CSS cannot). Scrolling
+     lists in windows set their own touch-action / overflow. */
+  html, body { overflow: hidden; overscroll-behavior: none; touch-action: none;
+               -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+               -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; }
+  img, canvas { -webkit-user-drag: none; }
+  input, textarea, select, [contenteditable]:not([contenteditable="false"]) {
+    -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; touch-action: manipulation; }
   #stage { position: fixed; inset: 0; }
   canvas { width: 100%; height: 100%; display: block; }
-  .login { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 300px;
-           background: #1b2130; border: 1px solid #3d4a66; border-radius: 8px; padding: 20px; z-index: 5; }
-  .login h1 { margin: 0; font: 700 30px 'Philosopher', serif; color: #ffe9b8; }
-  .login .sub { margin: 2px 0 14px; color: #9aa5bd; }
-  .login input, .login select, .login button { display: block; box-sizing: border-box; width: 100%; margin: 6px 0;
-           padding: 8px; border-radius: 6px; border: 1px solid #3d4a66; background: #10141f; color: inherit; font: inherit; }
-  .login button { background: linear-gradient(#3e8a57, #2c6a42); border-color: #58a872; cursor: pointer; font-weight: 700; }
-  .login button.secondary { background: #28324a; border-color: #3d4a66; }
-  .login .error { color: #ff8a8a; min-height: 1em; margin-top: 6px; }
 </style>
 <script src="/assets/engine.bundle.js"></script>
 <script defer src="main.dart.js"></script>
+<script>
+  // Installable app (PWA): the service worker (sw.js) only keeps the shell
+  // for a flaky network; the game itself is online.
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  }
+</script>
 </head>
 <body>
 <div id="stage"><canvas id="c"></canvas></div>

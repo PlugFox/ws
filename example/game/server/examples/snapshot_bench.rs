@@ -111,7 +111,7 @@ fn main() {
                         player = next;
                     }
                 }
-                let p = PlayerView { x: player.0, y: player.1, light, id: 0 };
+                let p = PlayerView { x: player.0, y: player.1, light, id: 0, hunted: true };
                 horde.tick_views(t, HZ, &[p]);
                 let visible = horde
                     .monsters()

@@ -1,0 +1,51 @@
+# Build context of deploy/Dockerfile (context = repository root): only what
+# the stages copy. Everything else, then the few paths back in.
+*
+
+# package:ws (the client's path dependency)
+!pubspec.yaml
+!lib/
+
+# Dart web client
+!example/game/client/
+example/game/client/build/
+example/game/client/.dart_tool/
+example/game/client/test/
+
+# Rust game server
+!example/game/server/Cargo.toml
+!example/game/server/Cargo.lock
+!example/game/server/build.rs
+!example/game/server/src/
+!example/game/server/migrations/
+
+# Engine sources (the bundle is built in the image)
+!example/assets/package.json
+!example/assets/engine/package.json
+!example/assets/engine/package-lock.json
+!example/assets/engine/tsconfig.json
+!example/assets/engine/vite.config.ts
+!example/assets/engine/src/
+
+# Image tools
+!example/assets/pipeline/webp_pass.py
+!example/game/deploy/precompress.sh
+
+# The baked pack, without what the game never requests:
+!example/assets/dist/
+# engine build output (rebuilt above) and its type declarations
+example/assets/dist/engine.bundle.*
+example/assets/dist/*.d.ts
+example/assets/dist/kit/
+# bake intermediates: every class body and mount (the customization pack is
+# what the game draws), raw skill VFX sources (the game plays
+# skills/effects/*), the skills source table (the server reads server/skills.json),
+# the colour customization atlas (the engine draws the index atlas)
+example/assets/dist/client/bodies/
+example/assets/dist/client/skills/vfx/
+example/assets/dist/client/skills/skills.json
+example/assets/dist/client/customization/sprites.png
+# variants left by a local precompress run
+example/assets/dist/**/*.br
+example/assets/dist/**/*.gz
+**/.DS_Store

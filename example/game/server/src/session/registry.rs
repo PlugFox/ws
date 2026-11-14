@@ -15,6 +15,18 @@ pub struct ActiveSession {
     pub ip_address: Option<String>,
     pub country: Option<String>,
     pub connected_at: Instant,
+    /// Where the character stood in town when its last socket closed: a
+    /// reconnect of this session lands there again (`ws_handlers`).
+    pub town_spot: std::sync::Mutex<Option<TownSpot>>,
+}
+
+/// A remembered spot in town (in memory: short drops, not relogs).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TownSpot {
+    pub character_id: u32,
+    pub channel: u16,
+    pub arrival: crate::world::Arrival,
+    pub at: Instant,
 }
 
 impl ActiveSession {
@@ -33,6 +45,7 @@ impl ActiveSession {
             ip_address,
             country,
             connected_at: Instant::now(),
+            town_spot: std::sync::Mutex::new(None),
         });
         (session, signal_rx)
     }

@@ -69,20 +69,21 @@ test('gamepad: menus, the lobby panel, moving, auto-cast and casting', async ({ 
 
   // View opens the skill tree, B closes it.
   await pad.press([VIEW]);
-  await expect(page.locator('.ge-tree')).toBeVisible();
+  await expect(page.locator('.u-skills')).toBeVisible();
   await pad.press([DOWN]);
-  await expect(page.locator('.ge-tree .ge-nav')).toHaveCount(1);
+  await expect(page.locator('.u-skills .ge-nav')).toHaveCount(1);
   await pad.press([B]);
-  await expect(page.locator('.ge-tree')).toBeHidden();
+  await expect(page.locator('.u-skills')).toBeHidden();
 
-  // Menu opens the settings; the D-pad walks them; B closes.
+  // Menu opens the game menu; the D-pad walks it; B closes.
+  const menu = page.locator('[data-win="dialog"]');
   await pad.press([MENU]);
-  await expect(page.locator('.ge-settings')).toBeVisible();
+  await expect(menu).toContainText('Character select');
   await pad.press([DOWN]);
   await pad.press([DOWN]);
-  await expect(page.locator('.ge-settings .ge-nav')).toHaveCount(1);
+  await expect(menu.locator('.ge-nav')).toHaveCount(1);
   await pad.press([B]);
-  await expect(page.locator('.ge-settings')).toHaveCount(0);
+  await expect(menu).toHaveCount(0);
 
   // Left stick: the character walks.
   const before = await position(page);
@@ -92,26 +93,26 @@ test('gamepad: menus, the lobby panel, moving, auto-cast and casting', async ({ 
 
   // A skill for slot 1 (set up with the keyboard and mouse).
   await page.keyboard.press('KeyK');
-  await page.locator('.ge-tree header button', { hasText: 'Basic' }).click();
-  await learn(page, 'Back Slide', 1);
-  await slot(page, 'Back Slide', 0);
+  await learn(page, 'Napalm Beat', 1);
+  await learn(page, 'Blink', 1);
+  await slot(page, 'Blink', 0);
   await page.keyboard.press('Escape');
-  await expect(page.locator('.ge-tree')).toBeHidden();
+  await expect(page.locator('.u-skills')).toBeHidden();
 
   // The D-pad takes the lobby panel; A presses Start.
   await pad.press([DOWN]);
-  await expect(page.locator('.ge-panel .ge-nav')).toHaveText('Start');
+  await expect(page.locator('.u-panel .ge-nav')).toHaveText('Start');
   await pad.press([A]);
   await expect(page.locator('body')).toContainText(/· Stage-\d+ ·/);
 
   // LB + RT + X: auto-cast for slot 1, shown on the hotbar.
   await pad.press([LB, RT]);
   await pad.press([LB, RT, X]);
-  await expect(page.locator('.ge-hk.auto')).toHaveCount(1);
+  await expect(page.locator('.u-hk.auto')).toHaveCount(1);
   await pad.press([LB, RT, X]);
-  await expect(page.locator('.ge-hk.auto')).toHaveCount(0);
+  await expect(page.locator('.u-hk.auto')).toHaveCount(0);
 
-  // X casts slot 1: Back Slide slides the character.
+  // X casts slot 1: Blink moves the character.
   const from = await position(page);
   await expect
     .poll(

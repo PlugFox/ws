@@ -9,6 +9,7 @@
 use super::combat::Loadout;
 use super::hub::{Arrival, HubEvent, HubInstance, HubSimConfig, HubWorld, Outgoing, PlayerProfile};
 use super::protocol::{ChannelInfo, Look};
+use super::trade::{Settlement, TradeError, TradeVault};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -57,11 +58,21 @@ pub enum HubCommand {
         epoch: u16,
     },
     Leave { user_id: u32, session_id: Uuid },
+    /// The socket owning the slot dropped (stages: the player turns
+    /// link-dead, `stage.rs`). `events` is that socket's end of the outbox,
+    /// dropped here: until this command arrives the outbox still has a
+    /// reader, so nothing sent meanwhile is mistaken for an overflow.
+    Detach { user_id: u32, session_id: Uuid, events: mpsc::Receiver<HubEvent> },
+    /// Where the player stands now (`None`: not here), e.g. to bring them
+    /// back to the same spot after a short drop.
+    Whereabouts { user_id: u32, reply: tokio::sync::oneshot::Sender<Option<Arrival>> },
     Input { user_id: u32, seq: u32, dx: f32, dy: f32, aim: [i8; 2], slots: u16 },
     /// Learned skills or hotbar changed (already validated).
     Loadout { user_id: u32, loadout: Loadout },
     Interact { user_id: u32, npc: String },
     SelectMission { user_id: u32, mission: String, public: bool },
+    /// Quick start at a mission giver (`MISSION_START`, in no party).
+    QuickStart { user_id: u32, mission: String, tier: u8, mask: u32 },
     /// The client could not apply a monster delta.
     Resync { user_id: u32 },
     /// Restyle at a stylist NPC.
@@ -71,6 +82,23 @@ pub enum HubCommand {
     Emote { user_id: u32, emote: u8 },
     Pose { user_id: u32, pose: u8 },
     Flag { user_id: u32, flag: u8, x: f32, y: f32 },
+    /// A local chat line (cleaned and rate limited by the socket).
+    Chat { user_id: u32, text: String },
+    /// Buy or sell at a merchant NPC (checked here, applied by the socket).
+    Trade { user_id: u32, npc: String, item: String, count: u32, sell: bool },
+    /// Drink a potion (stages).
+    UseItem { user_id: u32, item: String },
+    /// Another player's worn gear (the player context menu).
+    Inspect { user_id: u32, target: u32 },
+    /// Deliver a party invitation the lobby directory accepted.
+    PartyInvite { user_id: u32, target: u32, mission: String, ttl_ms: u32 },
+    /// The character's belongings changed (equipment): weapon broadcast.
+    Bag { user_id: u32, bag: crate::world::combat::Bag },
+    /// A player-to-player trade step (`hub::trade`).
+    TradeOp { user_id: u32, op: super::trade::TradeOp },
+    /// A checked feedback form: the hub wants a Scribe or Kafra in reach
+    /// and adds where the player is (`hub::feedback`).
+    Feedback { user_id: u32, draft: Box<crate::feedback::Draft> },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -125,15 +153,23 @@ pub struct HubDirectory {
     world: Arc<HubWorld>,
     config: HubConfig,
     state: Arc<Mutex<DirState>>,
+    /// Settles player trades (`None`: trades fail with `trade_unavailable`).
+    vault: Option<Arc<dyn TradeVault>>,
 }
 
 impl HubDirectory {
     /// Creates the directory and spawns the base channels. Must be called
     /// inside a Tokio runtime.
     pub fn new(world: Arc<HubWorld>, config: HubConfig) -> Self {
+        Self::with_vault(world, config, None)
+    }
+
+    /// As [`HubDirectory::new`], with the vault that settles player trades
+    /// (`session::trade::SessionVault`).
+    pub fn with_vault(world: Arc<HubWorld>, config: HubConfig, vault: Option<Arc<dyn TradeVault>>) -> Self {
         assert!(config.base_channels >= 1 && config.base_channels <= config.max_channels);
         assert!(config.capacity >= 1);
-        let dir = Self { world, config, state: Arc::new(Mutex::new(DirState::default())) };
+        let dir = Self { world, config, state: Arc::new(Mutex::new(DirState::default())), vault };
         {
             let mut st = dir.state.lock().unwrap();
             for id in 1..=dir.config.base_channels {
@@ -155,7 +191,7 @@ impl HubDirectory {
     fn spawn_channel(&self, id: u16) -> Channel {
         let (tx, rx) = mpsc::channel(COMMAND_CAPACITY);
         let hub = HubInstance::new(id, Arc::clone(&self.world), self.config.sim.clone());
-        tokio::spawn(run_instance(hub, rx));
+        tokio::spawn(run_instance_with(hub, rx, self.vault.clone()));
         info!("Hub channel Hub-{id} started");
         Channel { commands: tx, population: 0, empty_since: None }
     }
@@ -291,6 +327,20 @@ impl HubDirectory {
         self.state.lock().unwrap().members.get(&user_id).map(|m| m.channel)
     }
 
+    /// The channel `user_id` is in and where they stand there, asked of the
+    /// channel's actor (`None` when not in the hub or it does not answer).
+    pub async fn whereabouts(&self, user_id: u32) -> Option<(u16, Arrival)> {
+        let (channel, commands) = {
+            let st = self.state.lock().unwrap();
+            let channel = st.members.get(&user_id)?.channel;
+            (channel, st.channels.get(&channel)?.commands.clone())
+        };
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        commands.try_send(HubCommand::Whereabouts { user_id, reply }).ok()?;
+        let spot = tokio::time::timeout(Duration::from_millis(500), answer).await.ok()?.ok()??;
+        Some((channel, spot))
+    }
+
     /// Spawns the periodic reaper. The task stops once the directory has been
     /// dropped everywhere else.
     pub fn spawn_reaper(&self, every: Duration) -> tokio::task::JoinHandle<()> {
@@ -328,14 +378,41 @@ fn reap(state: &Mutex<DirState>, base: u16, grace: Duration, now: Instant) -> Ve
     doomed
 }
 
-/// Instance actor (hub channel or stage): applies commands as they arrive and
-/// ticks at a fixed rate. Ends when every command sender is dropped.
-pub(crate) async fn run_instance(mut hub: HubInstance, mut commands: mpsc::Receiver<HubCommand>) {
+/// Told the user id of a link-dead player the instance let go on its own
+/// (a stage sends everyone home when the mission ends).
+pub(crate) type Released = Box<dyn Fn(u32) + Send>;
+
+/// The actor of a stage: as [`run_instance_with`] without a vault (no
+/// player trades on missions); link-dead players' slots are released
+/// through `released`.
+pub(crate) async fn run_stage(hub: HubInstance, commands: mpsc::Receiver<HubCommand>, released: Released) {
+    run_loop(hub, commands, None, Some(released)).await
+}
+
+/// Instance actor of a hub channel: applies commands as they arrive and
+/// ticks at a fixed rate; ends when every command sender is dropped. With
+/// a vault, deals the instance's players confirmed
+/// ([`HubInstance::take_deals`]) are settled by it off the actor, and the
+/// answers come back as [`HubInstance::trade_settled`].
+pub(crate) async fn run_instance_with(hub: HubInstance, commands: mpsc::Receiver<HubCommand>, vault: Option<Arc<dyn TradeVault>>) {
+    run_loop(hub, commands, vault, None).await
+}
+
+async fn run_loop(
+    mut hub: HubInstance,
+    mut commands: mpsc::Receiver<HubCommand>,
+    vault: Option<Arc<dyn TradeVault>>,
+    released: Option<Released>,
+) {
+    let (settled_tx, mut settled_rx) = mpsc::unbounded_channel::<(u32, Settlement)>();
     let period = Duration::from_secs_f64(1.0 / hub.tick_hz() as f64);
     let mut interval = tokio::time::interval(period);
     // Under load, skip missed ticks instead of bursting to catch up.
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut outboxes: HashMap<u32, mpsc::Sender<HubEvent>> = HashMap::new();
+    // Link-dead players: no outbox, but what the socket task would apply to
+    // the character (loot, zeny, experience, records) waits here for them.
+    let mut parked: HashMap<u32, Vec<HubEvent>> = HashMap::new();
     let mut out: Outgoing = Vec::with_capacity(256);
 
     loop {
@@ -346,13 +423,30 @@ pub(crate) async fn run_instance(mut hub: HubInstance, mut commands: mpsc::Recei
                 let Some(cmd) = cmd else { break };
                 match cmd {
                     HubCommand::Join { profile, session_id, outbox, arrival, epoch } => {
-                        outboxes.insert(profile.user_id, outbox);
+                        let user_id = profile.user_id;
+                        outboxes.insert(user_id, outbox);
                         hub.join(profile, session_id, arrival, epoch, &mut out);
+                        // Back from link-dead: what happened meanwhile.
+                        out.extend(parked.remove(&user_id).into_iter().flatten().map(|e| (user_id, e)));
                     }
                     HubCommand::Leave { user_id, session_id } => {
                         if hub.leave(user_id, session_id, &mut out) {
                             outboxes.remove(&user_id);
+                            parked.remove(&user_id);
                         }
+                    }
+                    HubCommand::Detach { user_id, session_id, events } => {
+                        if let Some(kept) = hub.detach(user_id, session_id, &mut out) {
+                            outboxes.remove(&user_id);
+                            if kept {
+                                parked.insert(user_id, Vec::new());
+                            }
+                        }
+                        drop(events);
+                    }
+                    HubCommand::Whereabouts { user_id, reply } => {
+                        let spot = hub.position_of(user_id).map(|(map, x, y)| Arrival { map: map.into(), x, y });
+                        let _ = reply.send(spot);
                     }
                     HubCommand::Input { user_id, seq, dx, dy, aim, slots } => {
                         if hub.input(user_id, seq, dx, dy) {
@@ -361,8 +455,12 @@ pub(crate) async fn run_instance(mut hub: HubInstance, mut commands: mpsc::Recei
                     }
                     HubCommand::Loadout { user_id, loadout } => hub.set_loadout(user_id, loadout, &mut out),
                     HubCommand::Interact { user_id, npc } => hub.interact(user_id, &npc, &mut out),
+                    HubCommand::Feedback { user_id, draft } => hub.feedback(user_id, draft, &mut out),
                     HubCommand::SelectMission { user_id, mission, public } => {
                         hub.select_mission(user_id, &mission, public, &mut out)
+                    }
+                    HubCommand::QuickStart { user_id, mission, tier, mask } => {
+                        hub.quick_start(user_id, &mission, tier, mask, &mut out)
                     }
                     HubCommand::Resync { user_id } => hub.resync(user_id),
                     HubCommand::Restyle { user_id, look } => hub.restyle(user_id, look, &mut out),
@@ -370,21 +468,66 @@ pub(crate) async fn run_instance(mut hub: HubInstance, mut commands: mpsc::Recei
                     HubCommand::Emote { user_id, emote } => hub.emote(user_id, emote, &mut out),
                     HubCommand::Pose { user_id, pose } => hub.set_pose(user_id, pose, &mut out),
                     HubCommand::Flag { user_id, flag, x, y } => hub.flag(user_id, flag, x, y, &mut out),
+                    HubCommand::Chat { user_id, text } => hub.chat(user_id, text, &mut out),
+                    HubCommand::Trade { user_id, npc, item, count, sell } => hub.trade(user_id, &npc, &item, count, sell, &mut out),
+                    HubCommand::UseItem { user_id, item } => hub.use_item(user_id, &item, &mut out),
+                    HubCommand::Bag { user_id, bag } => hub.set_bag(user_id, bag, &mut out),
+                    HubCommand::Inspect { user_id, target } => hub.inspect(user_id, target, &mut out),
+                    HubCommand::PartyInvite { user_id, target, mission, ttl_ms } => {
+                        hub.party_invite(user_id, target, mission, ttl_ms, &mut out)
+                    }
+                    HubCommand::TradeOp { user_id, op } => hub.trade_op(user_id, op, &mut out),
                 }
             }
             _ = interval.tick() => hub.tick(&mut out),
+            Some((id, result)) = settled_rx.recv() => hub.trade_settled(id, result, &mut out),
         }
-        dispatch(&mut hub, &mut outboxes, &mut out);
+        for deal in hub.take_deals() {
+            match &vault {
+                Some(vault) => {
+                    let (vault, tx, id) = (Arc::clone(vault), settled_tx.clone(), deal.id);
+                    // Off the actor: the vault waits on locks and storage.
+                    tokio::spawn(async move {
+                        let _ = tx.send((id, vault.settle(deal).await));
+                    });
+                }
+                None => hub.trade_settled(deal.id, Err(TradeError::Unavailable), &mut out),
+            }
+        }
+        dispatch(&mut hub, &mut outboxes, &mut parked, released.as_deref(), &mut out);
     }
     info!("Hub channel {} stopped", hub.name());
 }
 
-fn dispatch(hub: &mut HubInstance, outboxes: &mut HashMap<u32, mpsc::Sender<HubEvent>>, out: &mut Outgoing) {
+fn dispatch(
+    hub: &mut HubInstance,
+    outboxes: &mut HashMap<u32, mpsc::Sender<HubEvent>>,
+    parked: &mut HashMap<u32, Vec<HubEvent>>,
+    released: Option<&(dyn Fn(u32) + Send)>,
+    out: &mut Outgoing,
+) {
     // Evictions emit `player_vanished` to others, hence the loop.
     while !out.is_empty() {
         let mut evict = Vec::new();
         for (user_id, event) in out.drain(..) {
-            let Some(tx) = outboxes.get(&user_id) else { continue };
+            let Some(tx) = outboxes.get(&user_id) else {
+                if let Some(held) = parked.get_mut(&user_id) {
+                    match event {
+                        // Frames are for a client that is not there.
+                        HubEvent::Control(_) | HubEvent::Snapshot(_) => {}
+                        // Sent home while link-dead: nobody to take them
+                        // there; the slot goes.
+                        HubEvent::Transfer { .. } => {
+                            parked.remove(&user_id);
+                            if let Some(released) = released {
+                                released(user_id);
+                            }
+                        }
+                        other => held.push(other),
+                    }
+                }
+                continue;
+            };
             // A transfer is the player's last event here: the instance has
             // already removed them.
             let last = matches!(event, HubEvent::Transfer { .. });
@@ -423,7 +566,7 @@ mod tests {
     }
 
     fn profile(user_id: u32) -> PlayerProfile {
-        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: crate::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default() }
+        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: crate::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default() }
     }
 
     fn cfg(capacity: usize) -> HubConfig {

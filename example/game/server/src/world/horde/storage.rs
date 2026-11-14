@@ -17,6 +17,8 @@ pub const FLAG_FULL: u8 = 1;
 pub const FLAG_BOSS: u8 = 2;
 /// Last line-of-sight probe to the nearest player succeeded.
 pub const FLAG_LOS: u8 = 4;
+/// A plant (`plants.rs`): rooted, harmless, immune to every condition.
+pub const FLAG_PLANT: u8 = 8;
 
 pub struct HordeStorage {
     pub x: Vec<f32>,
@@ -45,6 +47,10 @@ pub struct HordeStorage {
     pub legendary: Vec<u8>,
     /// User id of whoever taunted it (meaningful while Taunted).
     pub taunter: Vec<u32>,
+    /// Ticks left of a flinch (hit stun): no steps, no attacks.
+    pub stagger: Vec<u8>,
+    /// Ticks before it can flinch again (no endless stun-lock).
+    pub stagger_guard: Vec<u8>,
     /// Dense list of live slots (iteration order).
     alive: Vec<u16>,
     /// Position of a slot in `alive` (`u16::MAX` when free).
@@ -73,6 +79,8 @@ impl HordeStorage {
             burn_k: vec![0; capacity],
             legendary: vec![0; capacity],
             taunter: vec![0; capacity],
+            stagger: vec![0; capacity],
+            stagger_guard: vec![0; capacity],
             alive: Vec::with_capacity(capacity),
             alive_pos: vec![u16::MAX; capacity],
             free: (0..capacity as u16).collect(),
@@ -118,6 +126,8 @@ impl HordeStorage {
         self.burn_k[s] = 0;
         self.legendary[s] = 0;
         self.taunter[s] = 0;
+        self.stagger[s] = 0;
+        self.stagger_guard[s] = 0;
         self.alive_pos[s] = self.alive.len() as u16;
         self.alive.push(slot);
         Some(slot)
@@ -128,13 +138,37 @@ impl HordeStorage {
     }
 
     /// Puts `c` on a monster for `ticks` (a longer one already running wins).
+    /// Plants shrug every condition off.
     pub fn afflict(&mut self, slot: u16, c: Condition, ticks: u16) {
         let s = slot as usize;
+        if self.flags[s] & FLAG_PLANT != 0 {
+            return;
+        }
         let t = &mut self.cond[s][c as usize];
         *t = (*t).max(ticks);
         if *t > 0 {
             self.status[s] |= c.bit();
         }
+    }
+
+    /// A hit makes a non-boss monster flinch for `ticks` (RO's damage
+    /// motion: it stops and cannot strike), unless it flinched within the
+    /// last `guard` ticks after the previous one ended. Plants never do.
+    pub fn flinch(&mut self, slot: u16, ticks: u8, guard: u8) {
+        let s = slot as usize;
+        if self.flags[s] & (FLAG_BOSS | FLAG_PLANT) != 0 || self.stagger[s] > 0 || self.stagger_guard[s] > 0 {
+            return;
+        }
+        self.stagger[s] = ticks;
+        self.stagger_guard[s] = guard;
+    }
+
+    pub fn is_plant(&self, slot: u16) -> bool {
+        self.flags[slot as usize] & FLAG_PLANT != 0
+    }
+
+    pub fn staggered(&self, slot: u16) -> bool {
+        self.stagger[slot as usize] > 0
     }
 
     /// Ends `c` early (a physical hit shatters the ice).
@@ -148,6 +182,11 @@ impl HordeStorage {
     pub fn tick_conditions(&mut self) {
         for &slot in &self.alive {
             let s = slot as usize;
+            if self.stagger[s] > 0 {
+                self.stagger[s] -= 1;
+            } else if self.stagger_guard[s] > 0 {
+                self.stagger_guard[s] -= 1;
+            }
             if self.status[s] == 0 {
                 continue;
             }
@@ -185,6 +224,40 @@ impl HordeStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flinch_holds_then_guards_and_skips_bosses() {
+        let mut s = HordeStorage::new(4);
+        let m = s.spawn(0, 1.0, 1.0, 10, 0).unwrap();
+        let boss = s.spawn(0, 2.0, 2.0, 10, FLAG_BOSS).unwrap();
+        s.flinch(m, 2, 3);
+        s.flinch(boss, 2, 3);
+        assert!(s.staggered(m));
+        assert!(!s.staggered(boss), "bosses endure");
+        s.tick_conditions();
+        s.tick_conditions();
+        assert!(!s.staggered(m));
+        // Guarded right after: a new hit does not flinch it again.
+        s.flinch(m, 2, 3);
+        assert!(!s.staggered(m));
+        for _ in 0..3 {
+            s.tick_conditions();
+        }
+        s.flinch(m, 2, 3);
+        assert!(s.staggered(m));
+    }
+
+    #[test]
+    fn plants_take_no_condition_and_never_flinch() {
+        let mut s = HordeStorage::new(2);
+        let p = s.spawn(0, 1.0, 1.0, 5, FLAG_PLANT).unwrap();
+        for c in Condition::ALL {
+            s.afflict(p, c, 40);
+        }
+        s.flinch(p, 2, 3);
+        assert_eq!((s.status_of(p), s.staggered(p), s.cond[p as usize]), (Status(0), false, [0; CONDITIONS]));
+        assert!(s.is_plant(p));
+    }
 
     #[test]
     fn spawn_despawn_keeps_dense_list_and_rests_slots() {

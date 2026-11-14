@@ -18,6 +18,11 @@ extension type GameEngineModule._(JSObject _) implements JSObject {
 extension type GameView._(JSObject _) implements JSObject {
   external JSPromise<JSAny?> init(web.HTMLCanvasElement canvas);
   external JSPromise<JSAny?> loadLocation(String manifestUrl);
+
+  /// The loading screen: `{title, subtitle?, map?, kind?, tips?, now?}`
+  /// when a location starts loading, [endLoading] once it is playable.
+  external void beginLoading(String specJson);
+  external void endLoading();
   external void setCamera(String constraintJson);
   external double cameraYaw();
 
@@ -41,7 +46,8 @@ extension type GameView._(JSObject _) implements JSObject {
   external void showDialog(String specJson);
   external void showSettings(String specJson);
 
-  /// Non-modal side panel (`PanelSpec` JSON); an empty string hides it.
+  /// The party panel (`PanelSpec` JSON): the Social window's Party tab
+  /// (a new `id` opens it unless `quiet`); an empty string clears it.
   external void showPanel(String specJson);
 
   /// Applies a partial settings JSON; returns the effective settings JSON.
@@ -53,6 +59,8 @@ extension type GameView._(JSObject _) implements JSObject {
   external void toast(String text);
   external void updateHud(String text);
   external void playBgm(String? url);
+  external bool toggleMute();
+  external bool isMuted();
   external String stats();
 
   /// Loads the character customization pack (dyeable bodies and hair).
@@ -72,8 +80,48 @@ extension type GameView._(JSObject _) implements JSObject {
   /// Health bar under a player's name on combat maps (0..1; NaN hides it).
   external void setHealth(double entityId, double fraction);
 
+  /// Revive ring over a downed player, filling while an ally stands by
+  /// (0..1; NaN removes it).
+  external void setRevive(double entityId, double fraction);
+
   /// Floating combat number (`flags` as in [Hit]); [hurt] = the target is a player.
   external void showDamage(double entityId, int amount, int flags, bool hurt);
+
+  /// A drop floating up from the monster [entityId] (cell [x], [y] once it
+  /// is gone): [itemId]'s icon and name, or the amount for `zeny`, with a
+  /// soft pickup sound; [rare] drops glow.
+  external void showLoot(double entityId, double x, double y, String itemId, int count, bool rare);
+
+  /// A pickup bonus [bonus] (`storm_gust`, `zeny`, ...) bobbing in its
+  /// bubble over cell ([x], [y]), marked on the minimap; it blinks before
+  /// bursting in [lifeMs].
+  external void showBonus(double id, String bonus, double x, double y, int lifeMs);
+
+  /// Pickup bonus [id] is gone: taken by [entityId] (a burst, its sound and
+  /// name over them), or burst untouched when [entityId] is 0.
+  external void takeBonus(double id, double entityId);
+
+  /// The overtime poison fog (`PoisonFog.toJson` plus `warn`): the engine
+  /// shrinks its safe circle from the run clock, draws the wall, the haze
+  /// and the minimap ring, and cues the player inside it; `warn` sounds
+  /// the alarm. An empty string clears it.
+  external void setPoisonFog(String json);
+
+  /// The local player's net seconds inside the fog (0 hides the meter).
+  external void setFogExposure(int secs, int deathSecs);
+
+  /// Weapon family a character holds (`sword`, `bow`, ...): its attack sound.
+  external void setWeapon(double entityId, String kind);
+
+  /// A unit's own sound: `attack`, `hit`, `die`, `move`.
+  external void unitSound(double entityId, String event);
+
+  /// Level-up burst (the angel and the chime) over a character.
+  external void levelUp(double entityId);
+
+  /// A ranged basic attack flies from one unit to another ([kind]: `arrow`);
+  /// a monster's blow from next to its target shows nothing.
+  external void projectile(double fromId, double toId, String kind);
 
   /// The local player's bars as JSON (see the engine); '' hides them.
   external void setStatus(String json);
@@ -82,11 +130,66 @@ extension type GameView._(JSObject _) implements JSObject {
   /// Events: `char_select`, `char_create`.
   external void showCharacterSelect(String specJson);
 
+  /// The feedback form (`FeedbackSpec` JSON: `{kind, priority, kinds,
+  /// priorities, titleMin, titleMax, bodyMin, bodyMax, version?, busy?,
+  /// error?}`); '' closes it. Events: `feedback_submit {kind, priority,
+  /// title, body}`, `feedback_close`.
+  external void showFeedback(String specJson);
+
+  /// The mission result screen (`ResultsSpec` JSON: the party's run
+  /// statistics, the player's rewards and loot); '' closes it. Event:
+  /// `results_close`.
+  external void showResults(String specJson);
+
+  /// Settings → Account: the account's optional contacts (`AccountSpec`
+  /// JSON: `{username, email?, emailVerified?, emailGoogle?, telegram?,
+  /// telegramVerified?, busy?, error?, field?, note?}`); '' closes it.
+  /// Events: `account_save {email, telegram}`, `account_close`.
+  external void showAccount(String specJson);
+
+  /// The version line (client and server) in the title screen corner.
+  external void setVersion(String text);
+
   /// Stylist window (`StylistSpec` JSON). Events: `style_apply`, `style_cancel`.
   external void showStylist(String specJson);
 
-  /// Closes the character select or stylist screen.
+  /// Closes the sign-in, character select or stylist screen.
   external void closeScreen();
+
+  /// Loads the interface atlas (`client/ui/`: one texture for every window,
+  /// button and gauge, plus the title backdrop).
+  external JSPromise<JSAny?> loadUi(String baseUrl);
+
+  /// The sign-in window and its "Create account" form over the title
+  /// backdrop (`{user?, error?, field?, busy?, remember?, mode?}` JSON).
+  /// Events: `login {user, password, create, remember, email?, telegram?}`.
+  external void showLogin(String specJson);
+
+  /// Opens / closes an interface window (`equip`, `skills`, `map`,
+  /// `basic`, `social` and its tabs `party`, `friends`, …); returns
+  /// whether it is open now.
+  external bool toggleWindow(String id);
+
+  /// Debug overlay data (`{map, channel, transport, players, monsters,
+  /// rttMs, jitterMs, interpMs, snapshotsPerSec, kbInPerSec, kbOutPerSec,
+  /// pendingInputs, x, y}` JSON; any subset).
+  external void setNetStats(String json);
+
+  /// Debug overlay mode (0 off … 6 all); [cycleDebugMode] steps it (F1)
+  /// and returns the new one.
+  external void setDebugMode(int mode);
+  external int cycleDebugMode();
+
+  /// Leaves the world: clears entities, labels, windows and the HUD (the
+  /// location stays drawn under the title screen).
+  external void resetSession();
+
+  /// Full screen on / off; returns whether it was asked to go full screen.
+  external bool toggleFullscreen();
+
+  /// Minimap marks (`[{id, kind: 'party' | 'boss'}]` JSON); they follow the
+  /// entities while drawn. '' clears them.
+  external void setMinimapMarks(String json);
 
   /// Skill table and icons for the hotbar and the tree (`<baseUrl>/tree.json`).
   external JSPromise<JSAny?> loadSkills(String baseUrl);
@@ -106,8 +209,105 @@ extension type GameView._(JSObject _) implements JSObject {
   /// The boss's bar at the top (`{id, name, hp, maxHp}` JSON; '' hides it).
   external void setBoss(String json);
 
+  /// Scripted elite / boss encounters (`BOSS_*`): a cast starts
+  /// (`{caster, ability, name, castMs, channel, shielded, interrupted}`;
+  /// an empty `ability` ends it early): the cast bar under its encounter
+  /// bar and the ability's cast effects.
+  external void bossCast(String json);
+
+  /// The ability's danger (and safe) zones: `{caster, ability, zones: [{id,
+  /// shape (3 = ring: a outer, b inner), look, x, y, dir, a, b, spanMs,
+  /// follow, delayMs, safe}]}`; each fills over its own delay.
+  external void bossZones(String json);
+
+  /// A boss yell: a styled bubble over [entityId] and a log line
+  /// ([style] 0 elite, 1 boss).
+  external void bossShout(double entityId, String name, String text, int style);
+
+  /// An encounter bar at the top (`{id, name, rank, hp, maxHp, shield,
+  /// phase, pips, enraged}`; rank 0 drops that bar; '' drops them all).
+  external void setBossBar(String json);
+
   /// Own buff icons (`[{skill, ms}]` JSON; ms 0 = until toggled off).
   external void setBuffs(String json);
+
+  /// The own kill combo: [count] kills at style [rank] (0 none, 1 D …
+  /// 7 SSS); the bar drains [leftMs] of [windowMs]. A higher rank pops in
+  /// with the announcer's line; [count] 0 fades the meter out.
+  external void setCombo(int count, int rank, int windowMs, int leftMs);
+
+  /// A mission brief (`MissionBrief.toJson()`): the mission window and the
+  /// run's timeline draw only from it.
+  external void setMissionBrief(String json);
+
+  /// The mission window (`{name, missions: [{id, name, description,
+  /// maxPlayers}], inLobby?, selected?}`; '' closes it). Events:
+  /// `mission_select {mission, public}`, `party_code {code}`,
+  /// `missions_close`.
+  external void showMissions(String json);
+
+  /// The mission modifier table (server `MODIFIER_DEFS`): `{defs: [{id, bit
+  /// (255 = the difficulty slider), name, desc, icon, risk, minLevel,
+  /// locked, steps: [{label, detail}]}], rewards: [{zenyPct, expPct,
+  /// chest}]}` (the clear bonus by risk). The mission window draws its
+  /// Modifiers section only from it.
+  external void setModifierDefs(String json);
+
+  /// A modifier choice: `{scope: 'lobby', mission?, leader?, state?}` (the
+  /// party's, editable by the leader in the mission window) or `{scope:
+  /// 'stage', state?}` (the run's: icons by the HUD timeline); `state` =
+  /// `{tier, mask, risk, zenyPct, expPct, chest, lootPct}`, absent clears.
+  /// Events: `mission_modifiers {tier, mask}` (the leader's change);
+  /// `mission_select` carries `{tier, mask}` chosen before a party exists.
+  external void setMissionModifiers(String json);
+
+  /// The run's timeline on the HUD for [mission] ('' hides it), [elapsedMs]
+  /// into the run, counting on while [running].
+  external void setMissionClock(String mission, int elapsedMs, bool running);
+
+  /// The item catalogue: `{icons, items: [{id, name, kind, slot, price,
+  /// classes, desc}]}`.
+  external void setItems(String json);
+
+  /// The own belongings: `{zeny, items: [{id, count}], equip: [10 ids], cls,
+  /// combat}`; ids are instance keys (`sword+7[card]`, one per stack).
+  /// Events: `item_use {item}`, `item_equip {item}`,
+  /// `item_unequip {slot}`, `quick_potion {kind, item}` (orb click).
+  external void setInventory(String json);
+
+  /// A merchant's window `{npc, name, items}`; '' closes it. Events:
+  /// `shop_buy` / `shop_sell {npc, item, count}`, `shop_close`.
+  external void showShop(String json);
+
+  /// A line in the open shop's footer.
+  external void shopNote(String text);
+
+  /// Player trade: `{request: {name, level}}`, `{pending: {name}}`, the
+  /// table `{partner, mine, theirs, myLock, theirLock, myOk, theirOk}`,
+  /// `{result: 'done'}` or '' (closes). Events: `trade_respond {accept}`,
+  /// `trade_cancel`, `trade_item {item, count}`, `trade_zeny {zeny}`,
+  /// `trade_lock`, `trade_confirm`.
+  external void showTrade(String json);
+
+  /// The context menu on another player: `{target, name, title?, x?, y?,
+  /// items: [{id, label, detail?, disabled?}]}` (x / y in client px, else
+  /// next to the player); '' closes it. Event: `player_action {action,
+  /// target}`.
+  external void showPlayerMenu(String json);
+
+  /// The player the open context menu is for (0 = closed).
+  external double playerMenuTarget();
+
+  /// Another player's gear, read-only: `{id, name, title?, level?, look?,
+  /// equip: [10 ids]}`; '' closes it.
+  external void showInspect(String json);
+
+  /// The entity under the pointer (NaN = none): its name lights up, and
+  /// the cursor is a hand while [clickable].
+  external void setHover(double entityId, bool clickable);
+
+  /// The potion the `hp` / `sp` orb would drink now ('' = none).
+  external String quickPotion(String kind);
 
   /// Opens (1), closes (0) or toggles (-1) the skill tree; returns whether it is open.
   external bool toggleSkillTree(int mode);
@@ -151,6 +351,56 @@ extension type GameView._(JSObject _) implements JSObject {
   /// [label] under it; a newer flag of the same owner replaces it.
   external void showFlag(double ownerId, int flag, double x, double y, String label);
 
+  /// Local chat on (in game: the chat log window, Enter opens its input) or
+  /// off. Sent lines come back as the `chat_send` UI event `{text}`.
+  external void setChat(bool on);
+
+  /// A player's chat line: a bubble over [entityId] (`Name : text`, fades
+  /// after a few seconds) and a log line; [self] = the local player.
+  external void chatLine(double entityId, String name, String text, bool self);
+
+  /// A server announcement: a banner at the top and a chat log line.
+  external void announce(String text);
+
+  /// A grey chat log line.
+  external void chatNotice(String text);
+
+  /// Opens the chat log with its input focused (gamepad menu, touch).
+  external void openChat();
+
+  /// The friends list (`{friends: [{account, link: 'friend' | 'incoming' |
+  /// 'outgoing', name, online, cls, level, map, channel, chars}]}` JSON):
+  /// the Friends window (`toggleWindow('friends')`, Alt+H), the badge on
+  /// its Basic Info button (requests waiting) and [isFriend]. Events:
+  /// `friend_action {op: accept | decline | remove | add_name, account?,
+  /// name?}`.
+  external void setFriends(String json);
+
+  /// The player [entityId] (a character id) is a friend or asked / was
+  /// asked: the player menu leaves out "Add friend".
+  external bool isFriend(double entityId);
+
+  /// A leaderboard page (`{sort, page, pages, total, entries: [{rank, id,
+  /// name, class, title, level, kills, mvps, zeny, deaths, missions,
+  /// best_combo}], me?, online?, loading?, error?}` JSON, the server's
+  /// `/api/leaderboard` answer plus `online`): the Social window's Ranking
+  /// tab (`toggleWindow('leaderboard')`). Events: `leaderboard_query {sort,
+  /// page, limit}` when the tab is shown, a sort is picked or a page turns.
+  external void setLeaderboard(String json);
+
+  /// Players online and the poll's round trip on the title screens
+  /// (`{online, pingMs?, down?}` JSON); '' removes it (so does
+  /// [closeScreen]).
+  external void setServerStatus(String json);
+
+  /// The connection to the game server is lost and being retried
+  /// (`{attempt, text?}` JSON): a small plate with a spinner over the
+  /// world; '' removes it (so does [resetSession]).
+  external void setConnection(String json);
+
+  /// Players online, beside the minimap (town); 0 hides it.
+  external void setOnline(int count);
+
   /// Passes the rows as a view on the same buffer: under dart2js and
   /// dart2wasm (with a JS-backed list) this crosses without a copy.
   void upsertEntities(Float32List rows, int count) {
@@ -172,6 +422,13 @@ abstract final class Act {
   static const attack = 3;
   static const hit = 4;
   static const die = 5;
+
+  /// Combat stance (weapon drawn).
+  static const ready = 6;
+
+  /// Swing with a weapon (most families) / with a dagger.
+  static const attack2 = 7;
+  static const attack3 = 8;
 }
 
 /// Entity row layout for `upsertEntities` (engine `units.ts`):

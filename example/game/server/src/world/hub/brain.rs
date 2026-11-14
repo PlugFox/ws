@@ -84,6 +84,10 @@ pub(super) fn kind_skills(horde: &Horde, book: &SkillBook) -> Vec<Vec<u16>> {
         .defs()
         .iter()
         .map(|d| {
+            // Scripted elites and bosses fight by their script (boss.rs).
+            if super::boss::scripted(&d.id) {
+                return Vec::new();
+            }
             let mut v: Vec<u16> = d.skills.iter().filter_map(|id| book.find_monster(id)).collect();
             if v.len() < d.skills.len() {
                 tracing::warn!(monster = %d.id, "unknown monster skill ids skipped");
@@ -138,13 +142,14 @@ fn telegraphs(planned: &[(Area, &Act)], zone: u32) -> Vec<Telegraph> {
         .collect()
 }
 
-/// Turns a finished wind-up into hazards (and moves the monster).
+/// Turns a finished wind-up into hazards (and moves the monster); false
+/// when it was called off (the monster died, or is stunned or frozen).
 #[allow(clippy::too_many_arguments)]
-fn land(c: &MobCast, sk: &MonsterSkill, horde: &mut Horde, walk: &WalkGrid, rng: &mut Rng, now: u32, hz: f32, out: &mut Vec<Hazard>) {
+fn land(c: &MobCast, sk: &MonsterSkill, horde: &mut Horde, walk: &WalkGrid, rng: &mut Rng, now: u32, hz: f32, out: &mut Vec<Hazard>) -> bool {
     let store = horde.store();
     let s = c.slot as usize;
     if !store.is_alive(c.slot) || store.generation[s] != c.generation || store.status_of(c.slot).held() {
-        return;
+        return false;
     }
     let (mut mx, mut my) = (store.x[s], store.y[s]);
     let block = horde.block(c.slot);
@@ -212,6 +217,7 @@ fn land(c: &MobCast, sk: &MonsterSkill, horde: &mut Horde, walk: &WalkGrid, rng:
             });
         }
     }
+    true
 }
 
 /// One action of a hazard on every standing player inside.
@@ -271,15 +277,22 @@ impl HubInstance {
         }
         let walk = &self.world.map(map).walk;
 
-        // 1. Wind-ups that end now land.
+        // 1. Wind-ups that end now land. One called off tells the clients,
+        // or they would still play its landing (unless the slot already
+        // winds up a newer cast: a cancel names the entity, not the cast).
         let mut i = 0;
+        let mut casts: Vec<ServerMsg> = Vec::new();
         while i < self.mob_casts.len() {
             if self.mob_casts[i].land > now {
                 i += 1;
                 continue;
             }
             let c = self.mob_casts.swap_remove(i);
-            land(&c, book.monster(c.skill), horde, walk, &mut self.dice, now, hz, &mut self.hazards);
+            if !land(&c, book.monster(c.skill), horde, walk, &mut self.dice, now, hz, &mut self.hazards)
+                && !self.mob_casts.iter().any(|o| o.slot == c.slot)
+            {
+                casts.push(super::cast::cancel(MONSTER_ENTITY_BASE + c.slot as u32));
+            }
         }
 
         // 2. Hazards act.
@@ -306,12 +319,9 @@ impl HubInstance {
             .filter(|p| p.map == map && p.fighter.as_ref().is_some_and(|f| f.hunted()))
             .map(|p| (p.x, p.y))
             .collect();
-        if ups.is_empty() {
-            return;
-        }
-        let mut casts: Vec<ServerMsg> = Vec::new();
         let check = ticks_of(CHECK_SECS, hz).max(1);
-        let alive = horde.store().alive().len();
+        // Nobody to hunt: no new wind-ups (the cancels above still go out).
+        let alive = if ups.is_empty() { 0 } else { horde.store().alive().len() };
         for a in 0..alive {
             let slot = horde.store().alive()[a];
             let s = slot as usize;

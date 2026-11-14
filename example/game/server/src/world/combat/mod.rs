@@ -7,18 +7,24 @@
 
 pub mod buffs;
 pub mod class;
+pub mod combo;
 pub mod conditions;
 pub mod dice;
 pub mod exp;
+pub mod items;
+pub mod loot;
 pub mod monster;
+pub mod profile;
 pub mod rules;
 pub mod skills;
 pub mod weapon;
 
 pub use buffs::Mods;
 pub use class::{Class, Save};
+pub use combo::{Combo, Rank};
 pub use conditions::{Condition, Status, CONDITIONS};
 pub use dice::{Dice, Rng};
+pub use items::{Bag, Gear};
 pub use exp::{exp_to_next, kill_value, level_diff_percent, share_kill};
 pub use monster::{Archetype, MonsterBlock, Size};
 pub use rules::{AttackOutcome, Damage, DamageType, Element, Affinity};

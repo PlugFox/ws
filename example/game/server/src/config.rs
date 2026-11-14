@@ -1,3 +1,4 @@
+use crate::db::DbConfig;
 use crate::world::{HubConfig, StageConfig};
 use std::env;
 use std::path::PathBuf;
@@ -7,7 +8,8 @@ use std::time::Duration;
 pub struct AppConfig {
     pub host: String,
     pub port: u16,
-    pub database_url: String,
+    /// PostgreSQL (`DATABASE_*`).
+    pub db: DbConfig,
     pub jwt_secret: Vec<u8>,
     pub geoip_db_path: Option<String>,
     pub access_token_ttl: Duration,
@@ -25,9 +27,16 @@ pub struct AppConfig {
     pub stages: StageConfig,
     /// Built web client (`dart compile` output) served at `/`. Optional.
     pub client_dir: Option<PathBuf>,
+    /// Build id of the image (`GAME_ASSETS_VERSION`): `/assets/v/<id>/` and
+    /// `?v=<id>` are cached for a week (`api::static_files`). `None` in
+    /// development.
+    pub assets_version: Option<String>,
     /// Test hooks (`GAME_DEV=1`, for e2e runs only): new characters start at
     /// `GAME_DEV_LEVEL`, and missions can be picked away from a board.
     pub dev_level: Option<u32>,
+    /// Bearer token of the admin API (`ADMIN_TOKEN`); `None` (unset or
+    /// empty) disables it.
+    pub admin_token: Option<String>,
 }
 
 impl AppConfig {
@@ -38,8 +47,16 @@ impl AppConfig {
             .and_then(|p| p.parse().ok())
             .unwrap_or(8080);
 
-        let database_url = env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "sqlite://game_server.db?mode=rwc".to_string());
+        let secs = |name: &str, default: u64| env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+        let db = DbConfig {
+            // The dev container (`mise run game:db:up`) by default.
+            url: env::var("DATABASE_URL").unwrap_or_else(|_| crate::db::testing::DEV_DATABASE_URL.to_string()),
+            max_connections: env::var("DATABASE_MAX_CONNECTIONS").ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(10),
+            acquire_timeout: Duration::from_secs(secs("DATABASE_ACQUIRE_TIMEOUT_SECS", 5)),
+            statement_timeout: Duration::from_millis(secs("DATABASE_STATEMENT_TIMEOUT_MS", 15_000)),
+            connect_retry: Duration::from_secs(secs("DATABASE_CONNECT_RETRY_SECS", 60)),
+            create_if_missing: env::var("DATABASE_CREATE").is_ok_and(|v| v == "1"),
+        };
 
         let jwt_secret = match env::var("JWT_SECRET") {
             Ok(s) => s.into_bytes(),
@@ -93,17 +110,23 @@ impl AppConfig {
         }
         let dev_level = env::var("GAME_DEV_LEVEL").ok().and_then(|v| v.parse().ok()).filter(|_| dev);
         let mut stages = StageConfig::default();
+        // The stages' test hook: `/end win|lose` in chat ends the mission.
+        stages.sim.missions_anywhere = dev;
         if let Some(max) = env::var("MAX_STAGES").ok().and_then(|v| v.parse().ok()) {
             stages.max_stages = max;
         }
         if let Some(cap) = env::var("STAGE_MONSTER_CAP").ok().and_then(|v| v.parse::<usize>().ok()) {
             stages.horde.alive_cap = cap.min(stages.horde.pool);
         }
+        // How long a stage keeps a player whose connection dropped.
+        if let Some(secs) = env::var("STAGE_LINK_GRACE_SECS").ok().and_then(|v| v.parse().ok()) {
+            stages.link_grace = Duration::from_secs(secs);
+        }
 
         Self {
             host,
             port,
-            database_url,
+            db,
             jwt_secret,
             geoip_db_path,
             access_token_ttl: Duration::from_secs(access_token_ttl_secs),
@@ -115,16 +138,19 @@ impl AppConfig {
             hub,
             stages,
             client_dir,
+            assets_version: env::var("GAME_ASSETS_VERSION").ok().filter(|v| !v.is_empty()),
             dev_level,
+            admin_token: env::var("ADMIN_TOKEN").ok().filter(|t| !t.is_empty()),
         }
     }
 
-    /// Configuration tailored for in-memory integration testing.
-    pub fn test_config() -> Self {
+    /// Configuration for integration tests, on a fresh throwaway database
+    /// (`db::testing`; panics with how to start PostgreSQL when it is down).
+    pub async fn test_config() -> Self {
         Self {
             host: "127.0.0.1".to_string(),
             port: 0,
-            database_url: "sqlite::memory:".to_string(),
+            db: crate::db::testing::fresh_config().await,
             jwt_secret: b"test_secret_key_for_testing_32b!".to_vec(),
             geoip_db_path: None,
             access_token_ttl: Duration::from_secs(3600),
@@ -137,7 +163,9 @@ impl AppConfig {
             hub: HubConfig { sim: crate::world::HubSimConfig { residents: 0, ..Default::default() }, ..HubConfig::default() },
             stages: StageConfig::default(),
             client_dir: None,
+            assets_version: None,
             dev_level: None,
+            admin_token: None,
         }
     }
 }

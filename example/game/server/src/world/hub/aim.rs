@@ -22,6 +22,8 @@ const AIM_UNIT: f32 = 0.25;
 const THREAT_RADIUS: f32 = 4.0;
 /// Player body radius (cells).
 pub(super) const BODY: f32 = 0.4;
+/// A plant counts as pointed at within this of the aim point (cells).
+const PLANT_PICK: f32 = 1.0;
 
 /// Where a skill lands, decided when it is pressed (the telegraph is honest).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -75,13 +77,32 @@ pub(super) struct Field<'a> {
     pub map: MapIdx,
 }
 
+/// The plant a player means to cut (COMBAT.md §4.10), for a basic attack
+/// with no monster in reach: the one under the cursor (`aim`, 1/8 m from
+/// the player), or with no cursor (touch, a resting gamepad) the nearest.
+/// Automatic targeting never picks plants otherwise.
+pub(super) fn aimed_plant(horde: &Horde, px: f32, py: f32, aim: [i8; 2], range: f32) -> Option<u16> {
+    let not_plant = |s: u16| !horde.is_plant(s);
+    if aim == [0, 0] {
+        return horde.nearest_to(px, py, range, not_plant).map(|(s, _)| s);
+    }
+    let (ax, ay) = (px + aim[0] as f32 * AIM_UNIT, py + aim[1] as f32 * AIM_UNIT);
+    let (s, _) = horde.nearest_to(ax, ay, PLANT_PICK, not_plant)?;
+    let i = s as usize;
+    let body = horde.catalog().get(horde.store().kind[i]).radius;
+    let gap = (horde.store().x[i] - px).hypot(horde.store().y[i] - py) - body;
+    (gap <= range).then_some(s)
+}
+
 impl Field<'_> {
     /// Live monsters whose body is within `range` of a point: `(slot, x, y)`.
+    /// Plants are left out: skills aim at monsters (an area still cuts the
+    /// plants it covers).
     pub fn monsters_near(&self, x: f32, y: f32, range: f32) -> Vec<(u16, f32, f32)> {
         let mut slots = Vec::new();
         Area::Circle { x, y, r: range }.monsters(self.horde, &mut slots);
         let store = self.horde.store();
-        slots.into_iter().map(|s| (s, store.x[s as usize], store.y[s as usize])).collect()
+        slots.into_iter().filter(|&s| !store.is_plant(s)).map(|s| (s, store.x[s as usize], store.y[s as usize])).collect()
     }
 
     fn tag(&self, slot: u16) -> (u16, u8) {
@@ -89,7 +110,7 @@ impl Field<'_> {
     }
 
     pub fn nearest(&self, x: f32, y: f32, range: f32) -> Option<(u16, f32, f32)> {
-        let (s, _) = self.horde.nearest_to(x, y, range, |_| false)?;
+        let (s, _) = self.horde.nearest_foe(x, y, range)?;
         let store = self.horde.store();
         Some((s, store.x[s as usize], store.y[s as usize]))
     }
@@ -108,14 +129,16 @@ impl Field<'_> {
         for &(_, cx, cy) in near.iter().step_by(stride) {
             buf.clear();
             Area::Circle { x: cx, y: cy, r: radius }.monsters(self.horde, &mut buf);
-            if buf.len() > best.2 {
-                best = (cx, cy, buf.len());
+            let n = buf.iter().filter(|&&s| !self.horde.is_plant(s)).count();
+            if n > best.2 {
+                best = (cx, cy, n);
             }
         }
         // Centre on what the best candidate covers, kept inside the range.
         buf.clear();
         Area::Circle { x: best.0, y: best.1, r: radius }.monsters(self.horde, &mut buf);
         let store = self.horde.store();
+        buf.retain(|&s| !store.is_plant(s));
         let (mut cx, mut cy) = (best.0, best.1);
         if !buf.is_empty() {
             let n = buf.len() as f32;
@@ -172,7 +195,7 @@ impl Field<'_> {
     fn threat(&self, p: &HubPlayer) -> usize {
         let mut buf = Vec::new();
         Area::Circle { x: p.x, y: p.y, r: THREAT_RADIUS }.monsters(self.horde, &mut buf);
-        buf.len()
+        buf.iter().filter(|&&s| !self.horde.is_plant(s)).count()
     }
 }
 

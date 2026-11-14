@@ -159,6 +159,9 @@ pub struct NpcDef {
     /// `"changelog"`, `"talk"`.
     #[serde(default = "NpcDef::default_kind")]
     pub kind: String,
+    /// What a `"shop"` NPC sells (`combat::items::SHOPS` id).
+    #[serde(default)]
+    pub shop: String,
     /// Cell coordinates; the NPC stands on the cell centre.
     pub x: u32,
     pub y: u32,
@@ -218,6 +221,14 @@ pub struct LocationManifest {
     /// Authored spots and pets for the town residents (hubs).
     #[serde(default)]
     pub residents: ResidentsDef,
+    /// Authored arrival cell for players entering without a saved position;
+    /// absent (or blocked) = the walkable cell nearest the map centre.
+    #[serde(default)]
+    pub spawn: Option<[u32; 2]>,
+    /// Where players come back to from a mission (scattered a few cells
+    /// around it); absent = `spawn`.
+    #[serde(default, rename = "returnPoint")]
+    pub return_point: Option<[u32; 2]>,
 }
 
 /// `residents` of a manifest: where townsfolk go and which pets roam.
@@ -462,6 +473,9 @@ pub struct MapData {
     /// Default spawn: walkable cell closest to the map centre inside the
     /// largest connected walkable region.
     pub spawn: (f32, f32),
+    /// What grows on the field (`server/locations/<id>/plants.json`):
+    /// planted by every stage on it (`horde/plants.rs`).
+    pub plants: Option<crate::world::horde::plants::PlantRules>,
     component_of: Vec<u32>,
     main_component: u32,
 }
@@ -530,20 +544,27 @@ impl MapData {
                 }
             }
         }
-        let (_, sx, sy) = best.expect("main component is non-empty");
+        let (_, mut sx, mut sy) = best.expect("main component is non-empty");
+        if let Some([ax, ay]) = manifest.spawn {
+            if ax < walk.width() && ay < walk.height() && component_of[(ay * walk.width() + ax) as usize] == main_component {
+                (sx, sy) = (ax, ay);
+            }
+        }
 
         Ok(Self {
             manifest,
             walk,
             heights,
             spawn: (sx as f32 + 0.5, sy as f32 + 0.5),
+            plants: None,
             component_of,
             main_component,
         })
     }
 
-    /// Loads `<dist>/client/locations/<id>/{manifest.json,heightmap.png}` and
-    /// `<dist>/server/locations/<id>/walkability.bin`.
+    /// Loads `<dist>/client/locations/<id>/{manifest.json,heightmap.png}`,
+    /// `<dist>/server/locations/<id>/walkability.bin` and, where the field
+    /// grows plants, `plants.json` (+ its ground mask) beside it.
     pub fn load(dist_root: &Path, id: &str) -> Result<Self, MapError> {
         let client = dist_root.join("client/locations").join(id);
         let server = dist_root.join("server/locations").join(id);
@@ -561,7 +582,15 @@ impl MapData {
         }
         let walk = WalkGrid::parse(&read(server.join("walkability.bin"))?)?;
         let heights = Heightmap::decode_png(&read(client.join("heightmap.png"))?, manifest.height_bounds)?;
-        Self::new(manifest, walk, heights)
+        let plants = crate::world::horde::plants::PlantRules::load(&server)?;
+        if let Some(g) = plants.as_ref().and_then(|p| p.ground.as_ref())
+            && (g.width(), g.height()) != (walk.width(), walk.height())
+        {
+            return Err(MapError::Inconsistent { map: id.to_string(), message: "plants.bin does not match the walk grid".into() });
+        }
+        let mut data = Self::new(manifest, walk, heights)?;
+        data.plants = plants;
+        Ok(data)
     }
 
     pub fn id(&self) -> &str {
@@ -594,6 +623,8 @@ mod tests {
             npcs: Vec::new(),
             light_radius: 0.0,
             residents: Default::default(),
+            spawn: None,
+            return_point: None,
         }
     }
 

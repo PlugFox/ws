@@ -231,10 +231,31 @@ run = "tool/autobahn.sh"
 
 [tasks.game]
 alias = "game:run"
-description = "Run the full game: builds web client and starts Rust game server at http://127.0.0.1:8080"
-depends = ["game:client:build"]
+description = "Run the full game: starts the dev database, builds web client and starts Rust game server at http://127.0.0.1:8080"
+depends = ["game:db:up", "game:client:build"]
 dir = "example/game/server"
 run = "cargo run"
+
+[tasks."game:db:up"]
+description = "Start the game's dev PostgreSQL (Docker, 127.0.0.1:55432, database/user/password mobbed) and wait until it is ready"
+dir = "example/game"
+run = "docker compose -f compose.dev.yaml up -d --wait"
+
+[tasks."game:db:down"]
+description = "Stop the game's dev PostgreSQL (data kept in its volume; add -v to the compose command to wipe it)"
+dir = "example/game"
+run = "docker compose -f compose.dev.yaml down"
+
+[tasks."game:db:psql"]
+description = "psql shell on the game's dev database"
+dir = "example/game"
+run = "docker compose -f compose.dev.yaml exec postgres psql -U mobbed -d mobbed"
+
+[tasks."game:server:test"]
+description = "Rust game server tests (starts the dev PostgreSQL first; each test gets a throwaway database)"
+depends = ["game:db:up"]
+dir = "example/game/server"
+run = "cargo test"
 
 [tasks."game:client:build"]
 description = "Build Dart web client (example/game/client/build/web)"
@@ -261,13 +282,13 @@ run = ["npm ci --no-audit --no-fund", "npx playwright install chromium"]
 
 [tasks."game:e2e"]
 description = "Browser tests of the game (Playwright): builds the client, starts its own server on port 18091 with a fresh database"
-depends = ["game:client:build"]
+depends = ["game:db:up", "game:client:build"]
 dir = "example/game/e2e"
 run = "npx playwright test"
 
 [tasks."game:e2e:headed"]
 description = "Browser tests in a visible browser window, one step at a time with the Playwright inspector"
-depends = ["game:client:build"]
+depends = ["game:db:up", "game:client:build"]
 dir = "example/game/e2e"
 run = "npx playwright test --headed --debug"
 
@@ -275,3 +296,18 @@ run = "npx playwright test --headed --debug"
 description = "Open the last browser test report (traces, screenshots and videos of failures)"
 dir = "example/game/e2e"
 run = "npx playwright show-report"
+
+# --- game deployment (example/game/DEPLOY.md) --------------------------------
+
+[tasks."deploy:build"]
+description = "Build the game image plugfox/mobbed (<version>-<sha> + latest; PLATFORM=linux/amd64 to override arm64) from the local baked pack"
+run = "example/game/deploy/image.sh build"
+
+[tasks."deploy:run"]
+description = "Run the built game image on http://127.0.0.1:8088 against the dev Postgres (game:db:up)"
+depends = ["game:db:up"]
+run = "example/game/deploy/image.sh run"
+
+[tasks."deploy:push"]
+description = "Push plugfox/mobbed:<version>-<sha> and :latest to Docker Hub (needs docker login; refuses a dirty tree unless FORCE=1)"
+run = "example/game/deploy/image.sh push"

@@ -32,6 +32,9 @@ final class GameInput {
   /// Gamepad A outside a stage and a menu (talk to the nearest NPC).
   void Function()? onInteract;
 
+  /// Gamepad Y in town (outside a menu): the nearest player's context menu.
+  void Function()? onPlayerMenu;
+
   /// LB + RT + slot button: toggle auto-cast of a slot.
   void Function(int slot)? onAutoToggle;
 
@@ -97,6 +100,11 @@ final class GameInput {
         onInteract?.call();
         pad.consume(Pad.a);
       }
+    }
+    // Y in town (skills are not cast there): the player menu.
+    if (f.people && !inStage && onPlayerMenu != null) {
+      onPlayerMenu!();
+      pad.consume(Pad.y);
     }
     for (var i = 0; i < 5; i++) {
       if (f.autoToggles & (1 << i) != 0) onAutoToggle?.call(i);

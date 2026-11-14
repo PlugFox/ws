@@ -65,7 +65,18 @@ final class Bindings {
       emoteIds[i] = (settings['emote.$i'] as num?)?.toInt() ?? defaultEmotes[i];
     }
     interact = KeyBinding.parse(get('bind.interact'));
+    interact2 = KeyBinding.parse(get('bind.interact2'));
+    travel = KeyBinding.parse(get('bind.travel'));
+    items = KeyBinding.parse(get('bind.items'));
+    potion = KeyBinding.parse(get('bind.potion'));
+    potion2 = KeyBinding.parse(get('bind.potion2'));
     sit = KeyBinding.parse(get('bind.sit'));
+    equip = KeyBinding.parse(get('bind.equip'));
+    info = KeyBinding.parse(get('bind.info'));
+    party = KeyBinding.parse(get('bind.party'));
+    friends = KeyBinding.parse(get('bind.friends'));
+    leaderboard = KeyBinding.parse(get('bind.leaderboard'));
+    debug = KeyBinding.parse(get('bind.debug'));
   }
 
   /// Ten of each: hotbar slots, emote keys and flag kinds.
@@ -84,7 +95,22 @@ final class Bindings {
       'bind.flag.$i': 'Ctrl+${_digit(i)}',
     },
     'bind.interact': 'KeyF',
+    'bind.interact2': 'Space',
+    'bind.travel': 'Space',
+    'bind.items': 'Alt+KeyE',
+    // Q / E turn the camera; R and T drink (missions).
+    'bind.potion': 'KeyR',
+    'bind.potion2': 'KeyT',
     'bind.sit': 'KeyC',
+    'bind.equip': 'Alt+KeyQ',
+    'bind.info': 'Alt+KeyV',
+    // RO's party window key.
+    'bind.party': 'Alt+KeyZ',
+    // RO's friends window key.
+    'bind.friends': 'Alt+KeyH',
+    // L for ladder: the Social window's Ranking tab.
+    'bind.leaderboard': 'Alt+KeyL',
+    'bind.debug': 'F1',
   };
 
   final slots = List<KeyBinding?>.filled(count, null);
@@ -92,7 +118,28 @@ final class Bindings {
   final flags = List<KeyBinding?>.filled(count, null);
   final emoteIds = List<int>.filled(count, 0);
   KeyBinding? interact;
+  KeyBinding? interact2;
+
+  /// On missions: the learned travel skill (Back Slide, Blink, Charge, ...).
+  KeyBinding? travel;
+  KeyBinding? items;
+
+  /// Drink the best healing / SP potion (missions).
+  KeyBinding? potion;
+  KeyBinding? potion2;
   KeyBinding? sit;
+  KeyBinding? equip;
+  KeyBinding? info;
+
+  /// The party window (lobby, stage members, or how to find a party).
+  KeyBinding? party;
+
+  /// The Friends window.
+  KeyBinding? friends;
+
+  /// The leaderboard (Social window, Ranking tab).
+  KeyBinding? leaderboard;
+  KeyBinding? debug;
 
   List<String> get slotCaptions => [for (final b in slots) b?.caption ?? ''];
 

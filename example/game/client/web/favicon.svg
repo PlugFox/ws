@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- "Mobbed!" favicon: the cheeky slime as flat shapes that hold at 16 px
+       (a dome melting into a wide puddle; no crowd, rays or fine detail). -->
+  <path d="M32 6C19 6 11 18 11 32c0 6 1 11 3 15-6 1-10 4-10 7 0 3 4 4 9 4h38c5 0 9-1 9-4 0-3-4-6-10-7 2-4 3-9 3-15C53 18 45 6 32 6z"
+        fill="#ff3d8b" stroke="#2a0f1c" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M19 19c2-4 6-6 10-7" fill="none" stroke="#ffb3d1" stroke-width="4" stroke-linecap="round"/>
+  <path d="M17 25l9 3.5M47 25l-9 3.5" stroke="#2a0f1c" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="24" cy="35" r="6.5" fill="#2a0f1c"/>
+  <circle cx="40" cy="35" r="6.5" fill="#2a0f1c"/>
+  <circle cx="26.2" cy="32.8" r="2.4" fill="#fff"/>
+  <circle cx="42.2" cy="32.8" r="2.4" fill="#fff"/>
+  <path d="M25 45c4 4.5 10 4.5 14 0" fill="none" stroke="#2a0f1c" stroke-width="3.5" stroke-linecap="round"/>
+</svg>

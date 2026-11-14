@@ -8,10 +8,11 @@
 
 use super::map::{MapData, MapError};
 use super::missions;
+use super::modifiers::{self, ModFlags};
 use super::protocol::{pose, Look, MapInfo, PlayerInfo, ServerMsg, SnapshotBody, MAX_EMOTE, MAX_FLAG};
 use super::horde::view::MonsterView;
 use super::horde::{Horde, PlayerView};
-use super::combat::{self, Class, Loadout, SkillBook};
+use super::combat::{self, Loadout, SkillBook};
 use bytes::{Bytes, BytesMut};
 use std::path::Path;
 use std::sync::Arc;
@@ -22,11 +23,21 @@ pub type MapIdx = u8;
 
 mod aim;
 mod area;
+mod bonus;
+mod boss;
 mod brain;
 mod cast;
+mod feedback;
 mod fight;
+mod fog;
 mod mission;
+#[cfg(test)]
+mod plant_tests;
 mod residents;
+mod shop;
+mod trade;
+mod social;
+mod stats;
 pub use fight::{Fighter, Vital};
 
 /// Where a portal leads.
@@ -126,6 +137,35 @@ impl HubWorld {
         self.entry
     }
 
+    /// Arrival back from a mission: a random walkable cell within 3 cells of
+    /// the entry map's return point (so a returning party does not stack).
+    pub fn mission_return(&self, seed: u64) -> Arrival {
+        let map = self.map(self.entry);
+        let m = &map.manifest;
+        let (cx, cy) = match m.return_point.or(m.spawn) {
+            Some([x, y]) => (x as f32 + 0.5, y as f32 + 0.5),
+            None => map.spawn,
+        };
+        let mut s = seed | 1;
+        let mut next = || {
+            // xorshift: plenty for a scatter.
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f32 / (1u64 << 53) as f32
+        };
+        let (mut x, mut y) = (cx, cy);
+        for _ in 0..24 {
+            let (a, r) = (next() * std::f32::consts::TAU, 3.0 * next().sqrt());
+            let (tx, ty) = ((cx + a.cos() * r).floor() + 0.5, (cy + a.sin() * r).floor() + 0.5);
+            if map.walk.is_walkable(tx, ty) {
+                (x, y) = (tx, ty);
+                break;
+            }
+        }
+        Arrival { map: m.id.clone(), x, y }
+    }
+
     pub fn link(&self, map: MapIdx, portal: usize) -> &PortalLink {
         &self.links[map as usize][portal]
     }
@@ -143,7 +183,8 @@ pub struct HubSimConfig {
     /// A held direction is dropped after this many ticks without input, so a
     /// frozen client does not walk forever.
     pub input_timeout_ticks: u32,
-    /// Test hook (`GAME_DEV=1`): a mission can be picked anywhere in town.
+    /// Test hooks (`GAME_DEV=1`): a mission can be picked anywhere in
+    /// town, and `/end win|lose` in chat ends a running mission at once.
     pub missions_anywhere: bool,
     /// Simulated townsfolk walking the entry map of every hub channel
     /// (none on stages).
@@ -170,6 +211,9 @@ pub struct PlayerProfile {
     pub weapon: String,
     /// Learned skills and the hotbar.
     pub loadout: Loadout,
+    /// Belongings (equipment, potions, zeny); an empty one (no weapon
+    /// worn: tests) means the class's starting kit holding `weapon`.
+    pub bag: combat::Bag,
 }
 
 #[derive(Debug)]
@@ -203,6 +247,10 @@ struct HubPlayer {
     /// Earliest ticks of the next emote and flag (rate limits).
     emote_ready: u32,
     flag_ready: u32,
+    /// The socket dropped (stages): the fighter stays on the map, hunted
+    /// and hit, but neither moves nor attacks until a new socket
+    /// re-attaches (`stage.rs` has the grace).
+    link_dead: bool,
 }
 
 impl HubPlayer {
@@ -216,6 +264,7 @@ impl HubPlayer {
             facing: self.facing,
             look: self.profile.look,
             level: self.fighter.as_ref().map_or(self.profile.level, |f| f.level),
+            weapon: self.weapon_id().into(),
         }
     }
 }
@@ -228,6 +277,9 @@ pub enum HubEvent {
     /// Internal (not sent to the client): the player picked a mission at a
     /// board; the socket task hands it to the lobby directory.
     MissionChosen { mission: String, public: bool },
+    /// Internal: the player pressed Start on a mission at a giver (quick
+    /// start, `LobbyDirectory::quick_start`); the socket task launches it.
+    QuickStart { mission: String, tier: u8, mask: u32 },
     /// Internal: the player left this instance through a portal into a map
     /// owned by someone else (stage → hub). The instance has already removed
     /// the player; the socket task joins the target.
@@ -241,6 +293,30 @@ pub enum HubEvent {
     /// Internal: the player stands at a skill master; the socket task
     /// resets the loadout.
     SkillResetApproved,
+    /// Internal: the player stands at a merchant that may make this trade;
+    /// the socket task applies it to the character's bag.
+    Trade { item: String, count: u32, sell: bool },
+    /// Internal: the player drank `item` on a mission (one fewer).
+    ItemUsed { item: String },
+    /// Internal: zeny earned on a mission (kills, the clear bonus).
+    Zeny { amount: u64 },
+    /// Internal: items monsters dropped for the player (merged stacks);
+    /// the socket task puts them in the bag.
+    Loot { items: Vec<(&'static str, u32)> },
+    /// Internal: a player trade changed the bag (already stored); the
+    /// socket task sends the new `inventory`.
+    BagChanged,
+    /// Internal: a feedback form from a player at a Scribe or Kafra, with
+    /// where they stand; the socket task rate limits and stores it.
+    FeedbackPlaced { draft: Box<crate::feedback::Draft>, place: crate::feedback::Place },
+    /// Internal: lifetime counters gained since the last report (kills,
+    /// MVPs, falls, missions, best combo; `world::record`); the socket task
+    /// adds them to the session's character (persisted by the flusher).
+    Record(crate::world::record::Record),
+    /// The result screen of a finished mission: `RUN_STATS` and the
+    /// recipient's `RUN_REWARDS` (`stats.rs`). Not a plain control frame
+    /// so that a link-dead player still gets it on re-attaching.
+    Results(Box<[ServerMsg; 2]>),
 }
 
 /// What an instance simulates.
@@ -287,6 +363,9 @@ pub struct HubInstance {
     dice: combat::Rng,
     /// Wave count at the last combat step (the dead return on a new wave).
     last_wave: u32,
+    /// Fighters of players who left this stage (user id): coming back
+    /// resumes what they had spent, without their timed effects.
+    departed: Vec<(u32, Fighter)>,
     /// The skill table (empty without assets).
     skills: Arc<SkillBook>,
     /// Skill areas in flight and on the ground.
@@ -299,6 +378,8 @@ pub struct HubInstance {
     mob_casts: Vec<brain::MobCast>,
     hazards: Vec<brain::Hazard>,
     kind_skills: Vec<Vec<u16>>,
+    /// Scripted elite and boss fights (`boss.rs`).
+    bosses: boss::Bosses,
     /// Monsters the party killed this stage, the boss bar, the outcome.
     kills: u32,
     boss: Option<mission::BossBar>,
@@ -307,6 +388,15 @@ pub struct HubInstance {
     residents: residents::Residents,
     /// Scratch: the player block of the snapshot being built.
     snapshot_body: SnapshotBody,
+    /// Pickup bonuses on the stage (`bonus.rs`).
+    bonuses: bonus::Bonuses,
+    /// The overtime poison fog of the stage's mission (`fog.rs`).
+    fog: fog::Fog,
+    /// Player-to-player trades (`trade.rs`, hub channels only).
+    trades: trade::Trades,
+    /// What each party member did this run, for the result screen
+    /// (`stats.rs`; stages only).
+    run: stats::RunLog,
 }
 
 pub const MISSION_BOARD: &str = "mission_board";
@@ -318,6 +408,8 @@ pub const CHANGELOG: &str = "changelog";
 pub const STYLIST: &str = "stylist";
 /// NPC kind that resets learned skills (`skill_reset`).
 pub const SKILL_MASTER: &str = "skill_master";
+/// NPC kind of a merchant (`shop` names its goods, `combat::items::SHOPS`).
+pub const SHOP: &str = "shop";
 
 /// Whether talking to an NPC of this kind lists the missions.
 pub fn gives_missions(kind: &str) -> bool {
@@ -382,6 +474,16 @@ impl HubInstance {
         Self {
             residents,
             snapshot_body: SnapshotBody::default(),
+            bonuses: bonus::Bonuses::default(),
+            trades: trade::Trades::default(),
+            run: stats::RunLog::new(match &kind {
+                InstanceKind::Stage { mission, .. } => missions::find(mission).map_or(0.0, |m| m.time_limit_secs),
+                InstanceKind::Hub { .. } => 0.0,
+            }),
+            fog: fog::Fog::new(match &kind {
+                InstanceKind::Stage { mission, .. } => missions::find(mission).and_then(|m| m.fog),
+                InstanceKind::Hub { .. } => None,
+            }),
             kind,
             name,
             world,
@@ -391,6 +493,7 @@ impl HubInstance {
             horde: None,
             dice: combat::Rng::new(rand::random()),
             last_wave: 0,
+            departed: Vec::new(),
             skills: Arc::new(SkillBook::default()),
             lives: Vec::new(),
             next_zone: 1,
@@ -398,6 +501,7 @@ impl HubInstance {
             mob_casts: Vec::new(),
             hazards: Vec::new(),
             kind_skills: Vec::new(),
+            bosses: boss::Bosses::default(),
             kills: 0,
             boss: None,
             outcome: mission::Outcome::Running,
@@ -472,6 +576,12 @@ impl HubInstance {
         out: &mut Outgoing,
     ) -> JoinOutcome {
         let user_id = profile.user_id;
+        // A stage keeps a dropped player's fighter: the new socket takes it
+        // over where it stands.
+        if let (InstanceKind::Stage { .. }, Some(i)) = (&self.kind, self.find(user_id)) {
+            self.reattach(i, session_id, epoch, out);
+            return JoinOutcome::Replaced;
+        }
         let outcome = if self.find(user_id).is_some() {
             self.remove(user_id, out);
             JoinOutcome::Replaced
@@ -507,6 +617,7 @@ impl HubInstance {
             sitting: false,
             emote_ready: 0,
             flag_ready: 0,
+            link_dead: false,
         };
         let joined = match &self.kind {
             InstanceKind::Hub { channel } => ServerMsg::HubJoined {
@@ -525,19 +636,98 @@ impl HubInstance {
             },
         };
         out.push((user_id, HubEvent::Control(joined)));
+        self.mission_hello(user_id, out);
         let mut player = player;
-        if self.horde.is_some() {
-            let class = Class::from_id(&player.profile.archetype).unwrap_or(Class::Swordsman);
-            let mut f = Fighter::new(class, player.profile.level, player.profile.exp, &player.profile.weapon);
-            cast::equip(&mut f, &self.skills, &player.profile.loadout);
-            player.fighter = Some(f);
+        // Entering the game, reaching a location, coming back to town after
+        // a mission: every arrival settles the character's statuses here.
+        player.fighter = self.settle_on_arrival(user_id, &player.profile);
+        if player.fighter.is_some() {
+            let pr = &player.profile;
+            self.run.sit(user_id, pr.character_id, &pr.name, &pr.archetype);
         }
         self.players.push(player);
         let idx = self.players.len() - 1;
         self.announce_arrival(idx, None, out);
-        self.announce_fighter(idx, out);
-        out.push((user_id, HubEvent::Control(self.skills_msg(idx))));
+        self.announce_stage(idx, out);
         outcome
+    }
+
+    /// Everything about the stage a (re)arriving player's client needs after
+    /// `map_enter`: vitals, bonuses, the fog, skills, who is link-dead.
+    fn announce_stage(&self, idx: usize, out: &mut Outgoing) {
+        let p = &self.players[idx];
+        let user_id = p.profile.user_id;
+        self.announce_fighter(idx, out);
+        self.announce_bonuses(idx, out);
+        self.announce_fog(idx, out);
+        out.push((user_id, HubEvent::Control(self.skills_msg(idx))));
+        for o in self.players.iter().filter(|o| o.link_dead && o.map == p.map && o.profile.user_id != user_id) {
+            out.push((user_id, HubEvent::Control(ServerMsg::PlayerLink { entity_id: o.profile.character_id, online: false })));
+        }
+    }
+
+    /// The socket owning the slot dropped. On a stage the player stays as a
+    /// link-dead fighter (`Some(true)`: their events are parked); elsewhere
+    /// they leave (`Some(false)`). `None`: `session_id` does not own it.
+    pub fn detach(&mut self, user_id: u32, session_id: Uuid, out: &mut Outgoing) -> Option<bool> {
+        let i = self.find(user_id).filter(|&i| self.players[i].session_id == session_id)?;
+        if !matches!(self.kind, InstanceKind::Stage { .. }) {
+            self.remove(user_id, out);
+            return Some(false);
+        }
+        let p = &mut self.players[i];
+        p.link_dead = true;
+        p.dir = (0.0, 0.0);
+        p.pressed = 0;
+        p.monsters = None;
+        let msg = ServerMsg::PlayerLink { entity_id: p.profile.character_id, online: false };
+        let map = p.map;
+        self.broadcast(map, &msg, out);
+        Some(true)
+    }
+
+    /// A new socket (`session_id`) takes over the stage player at `i`: same
+    /// fighter (HP, SP, cooldowns, potions, run experience, conditions) and
+    /// spot; the client gets the stage again as on a first join.
+    fn reattach(&mut self, i: usize, session_id: Uuid, epoch: u16, out: &mut Outgoing) {
+        let tick = self.tick;
+        let p = &mut self.players[i];
+        let user_id = p.profile.user_id;
+        p.session_id = session_id;
+        p.link_dead = false;
+        p.map_epoch = epoch;
+        p.monsters = None;
+        (p.has_seq, p.last_seq, p.last_input_tick) = (false, 0, tick);
+        p.dir = (0.0, 0.0);
+        p.pressed = 0;
+        p.portal_guard = true;
+        if let Some(f) = p.fighter.as_mut() {
+            // Resend the buff icons.
+            f.buffs_sent = f.buffs_sent.wrapping_add(1);
+        }
+        let entity_id = p.profile.character_id;
+        let map = p.map;
+        if let InstanceKind::Stage { stage_id, mission } = &self.kind {
+            let joined = ServerMsg::StageJoined {
+                stage_id: *stage_id,
+                mission: mission.clone(),
+                tick_rate: self.config.tick_hz,
+                entity_id,
+                monsters: self.horde.as_ref().map(|h| h.catalog().ids()).unwrap_or_default(),
+                light_radius: self.horde.as_ref().map_or(0.0, |h| h.light_radius()),
+            };
+            out.push((user_id, HubEvent::Control(joined)));
+        }
+        self.mission_hello(user_id, out);
+        self.announce_map(i, None, out);
+        self.announce_stage(i, out);
+        // The boss bar goes out again with its next change check.
+        if let Some(b) = self.boss.as_mut() {
+            b.resend();
+        }
+        for o in self.players.iter().filter(|o| o.map == map && o.profile.user_id != user_id) {
+            out.push((o.profile.user_id, HubEvent::Control(ServerMsg::PlayerLink { entity_id, online: true })));
+        }
     }
 
     /// The player's skills, points and hotbar.
@@ -592,8 +782,21 @@ impl HubInstance {
 
     fn remove(&mut self, user_id: u32, out: &mut Outgoing) -> bool {
         let Some(i) = self.find(user_id) else { return false };
-        let p = self.players.swap_remove(i);
+        self.trade_end_for(user_id, trade::reason::LEFT, out);
+        let mut p = self.players.swap_remove(i);
         let id = p.profile.character_id;
+        if let Some(mut f) = p.fighter.take() {
+            // Counters not yet reported go with the player (a relog does
+            // not bring them back).
+            if let Some(record) = f.take_record() {
+                out.push((user_id, record));
+            }
+            self.departed.retain(|(u, _)| *u != user_id);
+            self.departed.push((user_id, f));
+            if self.outcome == mission::Outcome::Running {
+                self.run.leave(user_id);
+            }
+        }
         for other in self.players.iter().filter(|o| o.map == p.map) {
             out.push((other.profile.user_id, HubEvent::Control(ServerMsg::PlayerVanished { entity_id: id })));
         }
@@ -635,6 +838,11 @@ impl HubInstance {
         let reply = match map.manifest.npcs.iter().find(|n| n.id == npc_id) {
             None => hub_error("no_such_npc", format!("no NPC {npc_id} on {}", map.id())),
             Some(n) if !n.in_reach(p.x, p.y) => hub_error("npc_too_far", format!("walk closer to {}", n.name)),
+            Some(n) if n.kind == SHOP => ServerMsg::Shop {
+                npc: n.id.clone(),
+                name: n.name.clone(),
+                items: combat::items::shop(&n.shop).unwrap_or_default().iter().map(|s| s.to_string()).collect(),
+            },
             Some(n) => ServerMsg::NpcDialog {
                 npc: n.id.clone(),
                 name: n.name.clone(),
@@ -687,19 +895,37 @@ impl HubInstance {
     /// a valid choice goes to the socket task as [`HubEvent::MissionChosen`],
     /// which forms or joins a lobby.
     pub fn select_mission(&mut self, user_id: u32, mission: &str, public: bool, out: &mut Outgoing) {
-        let Some(i) = self.find(user_id) else { return };
+        if let Some(m) = self.mission_here(user_id, mission, out) {
+            out.push((user_id, HubEvent::MissionChosen { mission: m.id.into(), public }));
+        }
+    }
+
+    /// Quick start at a mission giver: the same checks as
+    /// [`Self::select_mission`]; a valid one goes to the socket task as
+    /// [`HubEvent::QuickStart`] (the lobby directory checks the rest).
+    pub fn quick_start(&mut self, user_id: u32, mission: &str, tier: u8, mask: u32, out: &mut Outgoing) {
+        if let Some(m) = self.mission_here(user_id, mission, out) {
+            out.push((user_id, HubEvent::QuickStart { mission: m.id.into(), tier, mask }));
+        }
+    }
+
+    /// The mission a player standing at a board or a Kafra picks (a trade
+    /// in progress ends); else tells them why not.
+    fn mission_here(&mut self, user_id: u32, mission: &str, out: &mut Outgoing) -> Option<&'static missions::MissionInfo> {
+        let i = self.find(user_id)?;
         let p = &self.players[i];
         let at_board = self.config.missions_anywhere
             || self.world.map(p.map).manifest.npcs.iter().any(|n| gives_missions(&n.kind) && n.in_reach(p.x, p.y));
-        let event = if !at_board {
-            HubEvent::Control(hub_error("npc_too_far", "talk to a Kafra employee to pick a mission"))
-        } else {
-            match missions::find(mission) {
-                None => HubEvent::Control(hub_error("unknown_mission", format!("no mission {mission}"))),
-                Some(m) => HubEvent::MissionChosen { mission: m.id.into(), public },
-            }
+        if !at_board {
+            out.push((user_id, HubEvent::Control(hub_error("npc_too_far", "talk to a Kafra employee to pick a mission"))));
+            return None;
+        }
+        let Some(m) = missions::find(mission) else {
+            out.push((user_id, HubEvent::Control(hub_error("unknown_mission", format!("no mission {mission}")))));
+            return None;
         };
-        out.push((user_id, event));
+        self.trade_end_for(user_id, trade::reason::MISSION, out);
+        Some(m)
     }
 
     /// Sends `msg` to every player on `map`.
@@ -762,6 +988,36 @@ impl HubInstance {
         self.broadcast(map, &ServerMsg::Flag { entity_id, flag, x, y }, out);
     }
 
+    /// A chat line (already cleaned and rate limited by the socket) to the
+    /// players around the speaker, the speaker too: within
+    /// `chat::CHAT_RANGE` cells on a hub map, the whole map on a stage
+    /// (the party).
+    pub fn chat(&mut self, user_id: u32, text: String, out: &mut Outgoing) {
+        let Some(i) = self.find(user_id) else { return };
+        // Test hook (`GAME_DEV=1`): `/end win` or `/end lose` ends the
+        // running mission at once (the e2e result screen).
+        if self.config.missions_anywhere
+            && self.horde.is_some()
+            && let Some(how) = text.strip_prefix("/end ")
+            && matches!(how, "win" | "lose")
+        {
+            let map = self.players[i].map;
+            self.end_stage(map, how == "win", out);
+            return;
+        }
+        let p = &self.players[i];
+        let range = match self.kind {
+            InstanceKind::Hub { .. } => Some(super::chat::CHAT_RANGE),
+            InstanceKind::Stage { .. } => None,
+        };
+        let msg = ServerMsg::Chat { entity_id: p.profile.character_id, name: p.profile.name.clone(), text };
+        for o in self.players.iter().filter(|o| o.map == p.map) {
+            if range.is_none_or(|r| in_sight(o.x - p.x, o.y - p.y, r)) {
+                out.push((o.profile.user_id, HubEvent::Control(msg.clone())));
+            }
+        }
+    }
+
     /// `secs` in whole ticks (at least one).
     fn ticks_of(&self, secs: f32) -> u32 {
         ((secs * self.config.tick_hz as f32).ceil() as u32).max(1)
@@ -777,7 +1033,7 @@ impl HubInstance {
         let mut transitions: Vec<(usize, usize)> = Vec::new();
         let mut stood_up: Vec<(MapIdx, u32)> = Vec::new();
         for (idx, p) in self.players.iter_mut().enumerate() {
-            if self.tick.wrapping_sub(p.last_input_tick) > timeout || p.fighter.as_ref().is_some_and(|f| !f.is_up()) {
+            if p.link_dead || self.tick.wrapping_sub(p.last_input_tick) > timeout || p.fighter.as_ref().is_some_and(|f| !f.is_up()) {
                 p.dir = (0.0, 0.0);
             }
             if p.sitting && p.dir != (0.0, 0.0) {
@@ -795,7 +1051,7 @@ impl HubInstance {
                     if dx != 0.0 || dy != 0.0 {
                         f.unhide();
                     }
-                    step * f.mods.pace() * f.status.speed()
+                    step * f.mods.pace() * f.status.speed() * if f.curses.intersects(ModFlags::SLOW) { modifiers::SLOW_PACE } else { 1.0 }
                 }
                 None => step,
             };
@@ -833,17 +1089,20 @@ impl HubInstance {
         if let Some(horde) = &mut self.horde {
             let light = horde.light_radius();
             self.horde_players.clear();
-            // Downed, dead and hidden players are no longer hunted.
-            self.horde_players.extend(
-                self.players
-                    .iter()
-                    .filter(|p| p.map == horde.map() && p.fighter.as_ref().is_none_or(Fighter::hunted))
-                    .map(|p| PlayerView { x: p.x, y: p.y, light: light + p.fighter.as_ref().map_or(0.0, |f| f.mods.light), id: p.profile.user_id }),
-            );
+            // Downed, dead and hidden players are no longer hunted (still
+            // seen: with nobody hunted, monsters roam instead of freezing).
+            self.horde_players.extend(self.players.iter().filter(|p| p.map == horde.map()).map(|p| PlayerView {
+                x: p.x,
+                y: p.y,
+                light: light + p.fighter.as_ref().map_or(0.0, |f| f.mods.light),
+                id: p.profile.user_id,
+                hunted: p.fighter.as_ref().is_none_or(Fighter::hunted),
+            }));
             horde.tick_views(self.tick, self.config.tick_hz, &self.horde_players);
         }
         self.fight(out);
         self.residents_step(out);
+        self.trade_tick(out);
         self.emit_snapshots(out);
     }
 
@@ -875,6 +1134,8 @@ impl HubInstance {
                 ));
             }
             PortalLink::Internal { map, arrival } => {
+                let user_id = self.players[idx].profile.user_id;
+                self.trade_end_for(user_id, trade::reason::MAP, out);
                 let id = self.players[idx].profile.character_id;
                 for other in self.players.iter().filter(|o| o.map == from && o.profile.character_id != id) {
                     out.push((other.profile.user_id, HubEvent::Control(ServerMsg::PlayerVanished { entity_id: id })));
@@ -895,6 +1156,16 @@ impl HubInstance {
     /// Sends `map_enter` to the player (then `pose` for everyone sitting
     /// there) and `player_appeared` to the others on that map.
     fn announce_arrival(&self, idx: usize, via_portal: Option<String>, out: &mut Outgoing) {
+        self.announce_map(idx, via_portal, out);
+        let p = &self.players[idx];
+        let info = p.info();
+        for o in self.players.iter().filter(|o| o.map == p.map && o.profile.user_id != p.profile.user_id) {
+            out.push((o.profile.user_id, HubEvent::Control(ServerMsg::PlayerAppeared { player: info.clone() })));
+        }
+    }
+
+    /// `map_enter` (then `pose` for everyone sitting there) to the player.
+    fn announce_map(&self, idx: usize, via_portal: Option<String>, out: &mut Outgoing) {
         let p = &self.players[idx];
         let others: Vec<&HubPlayer> = self
             .players
@@ -921,10 +1192,6 @@ impl HubInstance {
         let resting = self.residents.iter().filter(|r| here && r.is_sitting()).map(|r| r.id);
         for entity_id in sitting.chain(resting) {
             out.push((p.profile.user_id, HubEvent::Control(ServerMsg::Pose { entity_id, pose: pose::SIT })));
-        }
-        let info = p.info();
-        for o in others {
-            out.push((o.profile.user_id, HubEvent::Control(ServerMsg::PlayerAppeared { player: info.clone() })));
         }
     }
 
@@ -953,12 +1220,13 @@ impl HubInstance {
                 }
             }
             let horde = self.horde.as_ref().filter(|h| h.map() == map);
-            for p in self.players.iter_mut().filter(|p| p.map == map) {
+            // Nobody reads a link-dead player's frames.
+            for p in self.players.iter_mut().filter(|p| p.map == map && !p.link_dead) {
                 let frame = match horde {
                     Some(h) => {
                         self.monster_buf.clear();
                         let light = h.light_radius() + p.fighter.as_ref().map_or(0.0, |f| f.mods.light);
-                        let viewer = PlayerView { x: p.x, y: p.y, light, id: p.profile.user_id };
+                        let viewer = PlayerView { x: p.x, y: p.y, light, id: p.profile.user_id, hunted: true };
                         let view = p.monsters.get_or_insert_with(|| Box::new(MonsterView::new(h.capacity())));
                         h.write_delta(view, &viewer, self.tick, &mut self.monster_buf);
                         body.stage_frame(p.map_epoch, self.tick, p.last_seq, &self.monster_buf)
@@ -1027,6 +1295,8 @@ pub(crate) mod test_support {
             npcs: Vec::new(),
             light_radius: 0.0,
             residents: Default::default(),
+            spawn: None,
+            return_point: None,
         };
         MapData::new(manifest, walk, Heightmap::flat(w, h)).unwrap()
     }
@@ -1064,6 +1334,7 @@ pub(crate) mod test_support {
             sprite: "mission_npc".into(),
             name: "Board Keeper".into(),
             kind: MISSION_BOARD.into(),
+            shop: String::new(),
             x: 2,
             y: 5,
             facing: 4,
@@ -1074,7 +1345,19 @@ pub(crate) mod test_support {
             sprite: "4w_m_01".into(),
             name: "Stylist".into(),
             kind: STYLIST.into(),
+            shop: String::new(),
             x: 8,
+            y: 5,
+            facing: 4,
+            interact_radius: 1.5,
+        });
+        town.manifest.npcs.push(crate::world::map::NpcDef {
+            id: "merchant".into(),
+            sprite: "4_m_02".into(),
+            name: "Tool Dealer".into(),
+            kind: SHOP.into(),
+            shop: "tool".into(),
+            x: 5,
             y: 5,
             facing: 4,
             interact_radius: 1.5,
@@ -1084,6 +1367,7 @@ pub(crate) mod test_support {
             sprite: "kafra".into(),
             name: "Kafra Employee".into(),
             kind: KAFRA.into(),
+            shop: String::new(),
             x: 5,
             y: 1,
             facing: 0,
@@ -1102,7 +1386,7 @@ mod tests {
     use crate::world::combat::DamageType;
 
     pub(super) fn profile(user_id: u32) -> PlayerProfile {
-        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default() }
+        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default() }
     }
 
     /// Default simulation without town residents.
@@ -1163,6 +1447,8 @@ mod tests {
         assert_eq!(code(&out), "npc_too_far");
         hub.select_mission(1, "poring_island_survival", true, &mut out);
         assert_eq!(code(&out), "npc_too_far");
+        hub.quick_start(1, "poring_island_survival", 0, 0, &mut out);
+        assert_eq!(code(&out), "npc_too_far", "a quick start needs the giver too");
         hub.interact(1, "nobody", &mut out);
         assert_eq!(code(&out), "no_such_npc");
 
@@ -1187,6 +1473,12 @@ mod tests {
         hub.select_mission(1, "poring_island_survival", false, &mut out);
         assert!(
             matches!(&out[..], [(1, HubEvent::MissionChosen { mission, public: false })] if mission == "poring_island_survival"),
+            "{out:?}"
+        );
+        out.clear();
+        hub.quick_start(1, "poring_island_survival", 2, 1, &mut out);
+        assert!(
+            matches!(&out[..], [(1, HubEvent::QuickStart { mission, tier: 2, mask: 1 })] if mission == "poring_island_survival"),
             "{out:?}"
         );
     }
@@ -1323,6 +1615,46 @@ mod tests {
         out.clear();
         stage.emote(1, 3, &mut out);
         assert_eq!(emotes(&out, 2), vec![ServerMsg::Emote { entity_id: 101, emote: 3 }], "after 0.5 s");
+    }
+
+    #[test]
+    fn chat_reaches_players_in_range_on_hub_maps_and_the_whole_stage() {
+        use crate::world::chat::CHAT_RANGE;
+        let said = |out: &Outgoing, user: u32| -> Vec<ServerMsg> {
+            controls_for(out, user).into_iter().filter(|m| matches!(m, ServerMsg::Chat { .. })).collect()
+        };
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
+        let mut out = Vec::new();
+        for u in 1..=4 {
+            hub.join(profile(u), Uuid::nil(), None, 0, &mut out);
+        }
+        // 2 next to the speaker, 3 just out of range, 4 indoors.
+        let (x, y) = (hub.players[0].x, hub.players[0].y);
+        hub.players[1].x = x + CHAT_RANGE * 0.7;
+        hub.players[1].y = y + CHAT_RANGE * 0.7;
+        hub.players[2].x = x + CHAT_RANGE + 0.5;
+        hub.players[3].map = hub.world.map_index("house").unwrap();
+        out.clear();
+        hub.chat(1, "hello".into(), &mut out);
+        let line = ServerMsg::Chat { entity_id: 101, name: "p1".into(), text: "hello".into() };
+        assert_eq!(said(&out, 1), vec![line.clone()], "the speaker sees their own bubble");
+        assert_eq!(said(&out, 2), vec![line.clone()]);
+        assert!(said(&out, 3).is_empty(), "out of range");
+        assert!(said(&out, 4).is_empty(), "another map");
+        out.clear();
+        hub.chat(99, "ghost".into(), &mut out);
+        assert!(out.is_empty(), "not in the instance");
+
+        // A stage: the whole party, however far.
+        let mut stage = HubInstance::stage(1, "m1", Arc::new(stage_world()), HubSimConfig::default());
+        stage.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        stage.join(profile(2), Uuid::nil(), None, 0, &mut out);
+        stage.players[1].x += CHAT_RANGE * 3.0;
+        out.clear();
+        stage.chat(2, "go".into(), &mut out);
+        for u in [1, 2] {
+            assert_eq!(said(&out, u), vec![ServerMsg::Chat { entity_id: 102, name: "p2".into(), text: "go".into() }]);
+        }
     }
 
     #[test]
@@ -1614,6 +1946,30 @@ mod tests {
     }
 
     #[test]
+    fn joining_a_stage_sends_the_mission_brief_from_its_horde() {
+        use crate::world::horde::catalog::{test_def, MonsterCatalog};
+        use crate::world::horde::{Horde, HordeConfig};
+        let world = Arc::new(stage_world());
+        let mission = &crate::world::missions::MISSIONS[0];
+        let catalog = Arc::new(
+            MonsterCatalog::new(vec![test_def("blob", 2.0, 1, 0.0, false), test_def("king", 3.0, 50, 600.0, true)]).unwrap(),
+        );
+        let cfg = HordeConfig { waves: mission.waves.clone(), director_enabled: false, seed: Some(1), ..HordeConfig::default() };
+        let horde = Horde::new(Arc::clone(&world), Arc::clone(&catalog), cfg);
+        let mut stage = HubInstance::stage(1, mission.id, world, HubSimConfig::default()).with_horde(horde);
+        let mut out = Vec::new();
+        stage.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        let msgs = controls_for(&out, 1);
+        let brief = msgs.iter().find_map(|m| match m {
+            ServerMsg::MissionInfo { brief } => Some(brief.clone()),
+            _ => None,
+        });
+        assert_eq!(brief, Some(crate::world::missions::brief(mission, &mission.waves, &catalog)));
+        assert_eq!(brief.unwrap().monsters.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["blob", "king"]);
+        assert!(msgs.iter().any(|m| matches!(m, ServerMsg::StageClock { elapsed_ms: 0 })));
+    }
+
+    #[test]
     fn stage_with_horde_sends_monsters_in_view() {
         use crate::world::horde::catalog::{test_def, MonsterCatalog};
         use crate::world::horde::view::DeltaEntry;
@@ -1839,6 +2195,22 @@ mod tests {
         assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Cast { caster: 101, skill, .. } if skill.is_empty())));
         assert_eq!(fighter(&stage, 1).sp, sp);
         assert_eq!(fighter(&stage, 1).cooldowns.iter().sum::<u32>(), 0, "no cooldown after a cancel");
+        // Nothing of the called-off cast lands: the cancel is the clients'
+        // cue to drop the bolts they scheduled at the press.
+        out.clear();
+        stage.input(1, 2, 0.0, 0.0);
+        for _ in 0..30 {
+            stage.tick(&mut out);
+        }
+        let fire = controls_for(&out, 1)
+            .iter()
+            .flat_map(|m| match m {
+                ServerMsg::Combat { hits, .. } => hits.clone(),
+                _ => Vec::new(),
+            })
+            .filter(|h| h.flags >> 4 == DamageType::Fire as u8)
+            .count();
+        assert_eq!(fire, 0, "no bolt of the cancelled cast hits");
     }
 
     #[test]
@@ -1864,6 +2236,18 @@ mod tests {
         assert!((y - py).abs() < 0.01);
         assert!(stage.world.map(0).walk.is_walkable(x, y));
         assert!(fighter(&stage, 1).cooldowns.iter().any(|&c| c > 0));
+    }
+
+    #[test]
+    fn the_travel_key_casts_the_learned_movement_skill() {
+        let mut stage = skill_stage("swordsman", 5, &[("slide", 1)]);
+        assert!(fighter(&stage, 1).travel.is_some());
+        let (_, px, _) = stage.position_of(1).unwrap();
+        let mut out = Vec::new();
+        stage.act(1, [8, 0], 1 << super::cast::TRAVEL_SLOT);
+        stage.tick(&mut out);
+        let (_, x, _) = stage.position_of(1).unwrap();
+        assert!(x < px - 2.0, "slid west from {px} to {x}");
     }
 
     #[test]
@@ -1925,6 +2309,208 @@ mod tests {
         }
         assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Progress { gained, .. } if *gained > 0)));
         assert!(out.iter().any(|(u, e)| *u == 1 && matches!(e, HubEvent::Progress { exp, .. } if *exp > 0)));
+    }
+
+    /// A stage like [`fighting_stage`] whose blob (kind 0) and king (kind 1,
+    /// the boss) always drop: two jellopies and an apple, the king zeny and
+    /// a circlet.
+    fn looting_stage(players: &[u32], level: u32) -> HubInstance {
+        use crate::world::combat::loot::{Drop, ZENY};
+        use crate::world::horde::catalog::{test_def, MonsterCatalog, MonsterDef};
+        use crate::world::horde::{Horde, HordeConfig};
+        let world = Arc::new(stage_world());
+        let blob = vec![Drop::new("jellopy", 100.0, Some([2, 2])).unwrap(), Drop::new("apple", 100.0, None).unwrap()];
+        let king = vec![Drop::new(ZENY, 100.0, Some([500, 500])).unwrap(), Drop::new("circlet", 100.0, None).unwrap()];
+        let catalog = Arc::new(
+            MonsterCatalog::new(vec![
+                MonsterDef { drops: blob, ..test_def("blob", 2.0, 1, 0.0, false) },
+                MonsterDef { drops: king, ..test_def("king", 2.0, 50, 0.0, true) },
+            ])
+            .unwrap(),
+        );
+        let cfg = HordeConfig { light_radius: 6.0, director_enabled: false, seed: Some(1), ..HordeConfig::default() };
+        let horde = Horde::new(Arc::clone(&world), catalog, cfg);
+        let mut stage = HubInstance::stage(1, "m1", world, HubSimConfig::default()).with_horde(horde);
+        stage.dice = combat::Rng::new(3);
+        let mut out = Vec::new();
+        for &u in players {
+            stage.join(PlayerProfile { archetype: "mage".into(), level, ..profile(u) }, Uuid::new_v4(), None, 0, &mut out);
+        }
+        stage
+    }
+
+    fn loot_for(out: &Outgoing, user: u32) -> Vec<(String, u32, bool)> {
+        controls_for(out, user)
+            .into_iter()
+            .filter_map(|m| match m {
+                ServerMsg::Loot { item, count, rare, .. } => Some((item, count, rare)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_kill_drops_loot_for_the_killer_and_the_bag_gets_it() {
+        let mut stage = looting_stage(&[1], 1);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 2.0, py).unwrap();
+        let mut out = Vec::new();
+        for _ in 0..200 {
+            stage.tick(&mut out);
+            if !stage.horde().unwrap().store().is_alive(slot) {
+                break;
+            }
+        }
+        assert!(!stage.horde().unwrap().store().is_alive(slot), "the mage kills the blob");
+        let loot = loot_for(&out, 1);
+        assert_eq!(loot, vec![("jellopy".into(), 2, false), ("apple".into(), 1, false)]);
+        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Loot { entity_id, .. } if *entity_id == crate::world::protocol::MONSTER_ENTITY_BASE + slot as u32)));
+        for _ in 0..10 {
+            stage.tick(&mut out);
+        }
+        let reported: Vec<_> = out
+            .iter()
+            .filter_map(|(u, e)| match e {
+                HubEvent::Loot { items } if *u == 1 => Some(items.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reported, vec![vec![("jellopy", 2), ("apple", 1)]], "one report to the socket task");
+        assert!(fighter(&stage, 1).potions.iter().any(|(id, n)| id == "apple" && *n == 1), "the apple can be eaten at once");
+        assert!(fighter(&stage, 1).loot.is_empty());
+    }
+
+    #[test]
+    fn kills_build_the_killers_combo_and_a_pause_drops_it() {
+        use crate::world::combat::Rank;
+        let mut stage = fighting_stage("mage");
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slots: Vec<u16> = (0..3).filter_map(|i| stage.horde_mut().unwrap().spawn(0, px + 2.0, py - 0.5 + 0.5 * i as f32)).collect();
+        assert_eq!(slots.len(), 3);
+        let mut out = Vec::new();
+        // Three blobs would floor a level-1 mage: make it sturdy.
+        let i = stage.find(1).unwrap();
+        let f = stage.players[i].fighter.as_mut().unwrap();
+        (f.hp, f.max_hp) = (10_000, 10_000);
+        for _ in 0..300 {
+            stage.tick(&mut out);
+            if slots.iter().all(|&s| !stage.horde().unwrap().store().is_alive(s)) {
+                break;
+            }
+        }
+        assert_eq!(fighter(&stage, 1).combo().count(), 3, "every kill extends the combo");
+        assert_eq!(fighter(&stage, 1).combo().rank(), Rank::None);
+        let combos = |out: &Outgoing| -> Vec<(u32, u32, u32)> {
+            controls_for(out, 1)
+                .into_iter()
+                .filter_map(|m| match m {
+                    ServerMsg::Combo { count, window_ms, left_ms, .. } => Some((count, window_ms, left_ms)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let sent = combos(&out);
+        assert!(!sent.iter().any(|c| c.0 == 1), "a single kill is not shown");
+        assert!(sent.iter().any(|&(n, window, left)| n == 3 && window == 4000 && left <= 4000), "{sent:?}");
+        // Four seconds without a kill: it drops, and the client hears it.
+        out.clear();
+        for _ in 0..81 {
+            stage.tick(&mut out);
+        }
+        assert_eq!(fighter(&stage, 1).combo().count(), 0);
+        assert_eq!(fighter(&stage, 1).combo().best(), 3);
+        assert_eq!(combos(&out), vec![(0, 0, 0)]);
+    }
+
+    #[test]
+    fn loot_without_a_killer_goes_to_the_nearest_member() {
+        let mut stage = looting_stage(&[1, 2], 1);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let i2 = stage.find(2).unwrap();
+        stage.players[i2].x = px + 4.0;
+        let near_two = fight::looter(&stage.players, stage.players[i2].map, 0, px + 3.5, py);
+        assert_eq!(near_two, Some(i2));
+        let i1 = stage.find(1).unwrap();
+        assert_eq!(fight::looter(&stage.players, stage.players[i1].map, 1, px + 3.5, py), Some(i1), "the killer first");
+    }
+
+    #[test]
+    fn a_boss_drops_for_everyone_on_the_map() {
+        let mut stage = looting_stage(&[1, 2], 40);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(1, px + 1.0, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 1;
+        let mut out = Vec::new();
+        for _ in 0..200 {
+            stage.tick(&mut out);
+            if !stage.horde().unwrap().store().is_alive(slot) {
+                break;
+            }
+        }
+        assert!(!stage.horde().unwrap().store().is_alive(slot));
+        for u in [1, 2] {
+            assert_eq!(loot_for(&out, u), vec![("zeny".into(), 500, false), ("circlet".into(), 1, true)], "player {u}");
+        }
+    }
+
+    /// The lifetime counters each player's socket task heard (summed).
+    fn records_for(out: &Outgoing, user: u32) -> crate::world::record::Record {
+        let mut sum = crate::world::record::Record::default();
+        for (u, e) in out {
+            if let HubEvent::Record(r) = e
+                && *u == user
+            {
+                sum.add(r);
+            }
+        }
+        sum
+    }
+
+    #[test]
+    fn kills_falls_mvps_and_wins_are_credited_and_reported() {
+        let mut stage = looting_stage(&[1, 2], 40);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let mut out = Vec::new();
+        // A blob: one kill, the blow's.
+        let blob = stage.horde_mut().unwrap().spawn(0, px + 1.0, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[blob as usize] = 1;
+        for _ in 0..100 {
+            stage.tick(&mut out);
+            if !stage.horde().unwrap().store().is_alive(blob) {
+                break;
+            }
+        }
+        // Player 2 falls once (bleeding out later is not another fall).
+        let i2 = stage.find(2).unwrap();
+        let f2 = stage.players[i2].fighter.as_mut().unwrap();
+        f2.hp = 0;
+        f2.fall_if_spent(20.0);
+        f2.perish(20.0);
+        // The boss: an MVP for both, then the win.
+        let king = stage.horde_mut().unwrap().spawn(1, px + 1.0, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[king as usize] = 1;
+        for _ in 0..200 {
+            stage.tick(&mut out);
+            if !stage.horde().unwrap().store().is_alive(king) {
+                break;
+            }
+        }
+        let (r1, r2) = (records_for(&out, 1), records_for(&out, 2));
+        assert_eq!(r1.kills + r2.kills, 2, "one kill per monster: {r1:?} {r2:?}");
+        assert_eq!((r1.mvps, r2.mvps), (1, 1), "the boss counts for everyone on the map");
+        assert_eq!((r1.missions, r2.missions), (1, 1), "the victory too");
+        assert_eq!((r1.deaths, r2.deaths), (0, 1));
+        assert!(stage.players.iter().all(|p| p.fighter.as_ref().unwrap().record.is_empty()), "all reported");
+    }
+
+    #[test]
+    fn unreported_counters_leave_with_the_player() {
+        let mut stage = looting_stage(&[1], 1);
+        let i = stage.find(1).unwrap();
+        stage.players[i].fighter.as_mut().unwrap().tally().kills += 3;
+        let mut out = Vec::new();
+        assert!(stage.evict(1, &mut out));
+        assert_eq!(records_for(&out, 1).kills, 3);
     }
 
     #[test]
@@ -2094,6 +2680,8 @@ mod tests {
     fn a_fire_wall_burns_pushes_back_and_sets_alight() {
         use crate::world::combat::Condition;
         let mut stage = skill_stage("mage", 10, &[("flames", 1)]);
+        // A seed whose first saves fail: the burn is what is under test.
+        stage.dice = combat::Rng::new(1);
         let (_, px, py) = stage.position_of(1).unwrap();
         let slot = stage.horde_mut().unwrap().spawn(0, px + 6.0, py).unwrap();
         stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
@@ -2395,6 +2983,232 @@ mod tests {
         assert!(f.hp >= max / 2 - 1 && f.hp <= max / 2 + 1);
     }
 
+    fn put(stage: &mut HubInstance, user: u32, x: f32, y: f32) {
+        let i = stage.find(user).unwrap();
+        (stage.players[i].x, stage.players[i].y) = (x, y);
+    }
+
+    fn fighter_mut(stage: &mut HubInstance, user: u32) -> &mut Fighter {
+        let i = stage.find(user).unwrap();
+        stage.players[i].fighter.as_mut().unwrap()
+    }
+
+    fn knock_down(stage: &mut HubInstance, user: u32, ticks: u32) {
+        let f = fighter_mut(stage, user);
+        f.hp = 0;
+        f.state = fight::Vital::Downed { ticks };
+    }
+
+    /// `REVIVE` (progress, left_ms) about `entity` as `user` heard it.
+    fn revives(out: &Outgoing, user: u32, entity: u32) -> Vec<(u8, u32)> {
+        controls_for(out, user)
+            .into_iter()
+            .filter_map(|m| match m {
+                ServerMsg::Revive { entity_id, progress, left_ms } if entity_id == entity => Some((progress, left_ms)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A swordsman (1) and a mage (2) on the roomy field, far apart.
+    fn party_stage() -> HubInstance {
+        let mut stage = skill_stage("swordsman", 10, &[]);
+        let mut out = Vec::new();
+        stage.join(PlayerProfile { archetype: "mage".into(), level: 10, ..profile(2) }, Uuid::nil(), None, 0, &mut out);
+        put(&mut stage, 1, 4.5, 5.5);
+        put(&mut stage, 2, 17.5, 5.5);
+        stage
+    }
+
+    #[test]
+    fn an_ally_standing_by_revives_and_everyone_sees_the_ring_fill() {
+        let mut stage = party_stage();
+        let hz = stage.config.tick_hz;
+        knock_down(&mut stage, 2, 400);
+        let mut out = Vec::new();
+        stage.tick(&mut out);
+        assert_eq!(revives(&out, 1, 102), vec![(0, 399 * 1000 / hz)], "going down is announced with the bleed-out");
+        // Within 1.5 m for half of the 3 s: half the ring, bleed-out held.
+        put(&mut stage, 1, 16.5, 5.5);
+        out.clear();
+        for _ in 0..hz * 3 / 2 {
+            stage.tick(&mut out);
+        }
+        assert_eq!(fighter(&stage, 2).state, fight::Vital::Downed { ticks: 399 }, "help holds the bleed-out");
+        for user in [1, 2] {
+            let seen = revives(&out, user, 102);
+            assert!(seen.windows(2).all(|w| w[0].0 < w[1].0), "{seen:?}");
+            assert_eq!(seen.last().map(|r| r.0), Some(50), "{seen:?}");
+        }
+        // Stepping away drains it back as fast as it filled; the clock runs.
+        put(&mut stage, 1, 4.5, 5.5);
+        out.clear();
+        for _ in 0..hz / 2 {
+            stage.tick(&mut out);
+        }
+        assert_eq!(fighter(&stage, 2).state, fight::Vital::Downed { ticks: 399 - hz / 2 });
+        assert_eq!(revives(&out, 1, 102).last().map(|r| r.0), Some(30));
+        // Back for the rest: up at a quarter of their HP, and the ring goes.
+        put(&mut stage, 1, 16.5, 5.5);
+        out.clear();
+        for _ in 0..hz * 2 {
+            stage.tick(&mut out);
+        }
+        let f = fighter(&stage, 2);
+        assert!(f.is_up());
+        assert_eq!(f.hp, f.max_hp / 4);
+        assert_eq!(revives(&out, 1, 102).last(), Some(&(0, 0)));
+    }
+
+    #[test]
+    fn a_downed_member_stays_in_the_mission_until_the_whole_party_is_down() {
+        let mut stage = party_stage();
+        knock_down(&mut stage, 2, 10);
+        let mut out = Vec::new();
+        for _ in 0..40 {
+            stage.tick(&mut out);
+        }
+        // Bled out with nobody near: dead until the next wave, still here.
+        assert_eq!(fighter(&stage, 2).state, fight::Vital::Dead);
+        assert!(!out.iter().any(|(_, e)| matches!(e, HubEvent::Control(ServerMsg::StageEnd { .. }) | HubEvent::Transfer { .. })));
+        assert!(controls_for(&out, 2).iter().any(|m| matches!(m, ServerMsg::PlayerVitals { entity_id: 102, state: 2, .. })));
+        assert_eq!(revives(&out, 2, 102).last(), Some(&(0, 0)));
+        // The last one standing goes down: now the run is lost, for both.
+        knock_down(&mut stage, 1, 400);
+        out.clear();
+        stage.tick(&mut out);
+        for user in [1, 2] {
+            assert!(controls_for(&out, user).iter().any(|m| matches!(m, ServerMsg::StageEnd { victory: false, .. })), "{user}");
+        }
+    }
+
+    #[test]
+    fn heals_and_buffs_skip_the_downed() {
+        let mut stage = skill_stage("acolyte", 10, &[("mending", 2), ("haste", 2)]);
+        let mut out = Vec::new();
+        stage.join(PlayerProfile { archetype: "mage".into(), level: 10, ..profile(2) }, Uuid::nil(), None, 0, &mut out);
+        put(&mut stage, 1, 4.5, 5.5);
+        put(&mut stage, 2, 7.5, 5.5);
+        knock_down(&mut stage, 2, 4000);
+        fighter_mut(&mut stage, 1).hp -= 5;
+        for slot in [1, 2] {
+            stage.act(1, [0, 0], slot);
+            for _ in 0..20 {
+                stage.tick(&mut out);
+            }
+        }
+        // (An acolyte this close is reviving them meanwhile: not yet done.)
+        let f = fighter(&stage, 2);
+        assert_eq!((f.hp, f.mods.haste), (0, 0.0));
+        assert!(fighter(&stage, 1).mods.haste > 0.0, "the caster got the buff");
+    }
+
+    #[test]
+    fn coming_back_to_the_stage_keeps_the_wounds_and_drops_every_effect() {
+        use crate::world::combat::Condition;
+        let mut stage = skill_stage("acolyte", 10, &[("haste", 2)]);
+        let mut out = Vec::new();
+        stage.act(1, [0, 0], 1);
+        stage.tick(&mut out);
+        let profile1 = stage.players[stage.find(1).unwrap()].profile.clone();
+        {
+            let f = fighter_mut(&mut stage, 1);
+            assert!(f.mods.haste > 0.0);
+            f.afflict(Condition::Poisoned, 1000);
+            f.temp_hp = 30;
+            f.hp = 7;
+            f.sp = 5;
+            f.cooldowns[0] = 500;
+            f.potion_ready = 1000;
+        }
+        let (sp, cooldowns) = (5, fighter(&stage, 1).cooldowns.clone());
+        let check = |stage: &HubInstance, how: &str| {
+            let f = fighter(stage, 1);
+            assert_eq!((f.mods.haste, f.status.0, f.temp_hp), (0.0, 0, 0), "{how}: effects are gone");
+            assert_eq!((f.hp, f.sp), (7, sp), "{how}: wounds stay");
+            assert!(f.cooldowns.iter().zip(&cooldowns).all(|(now, was)| now >= was), "{how}: cooldowns stay");
+            assert_eq!(f.potion_ready, 1000, "{how}: the potion cooldown stays");
+        };
+        // A second session takes the fighter over as it is (a reconnect):
+        // nothing is settled, the effects run on.
+        stage.join(profile1.clone(), Uuid::from_u128(7), None, 0, &mut out);
+        let f = fighter(&stage, 1);
+        assert!(f.mods.haste > 0.0 && f.status.0 != 0, "taken over: effects stay");
+        assert_eq!((f.hp, f.sp, f.temp_hp), (7, sp, 30), "taken over: everything stays");
+        assert!(!stage.leave(1, Uuid::nil(), &mut out), "the old session no longer owns it");
+        // Leaving and coming back.
+        assert!(stage.leave(1, Uuid::from_u128(7), &mut out));
+        stage.join(profile1.clone(), Uuid::from_u128(8), None, 0, &mut out);
+        check(&stage, "rejoined");
+        // Down stays down.
+        knock_down(&mut stage, 1, 300);
+        assert!(stage.leave(1, Uuid::from_u128(8), &mut out));
+        stage.join(profile1, Uuid::from_u128(9), None, 0, &mut out);
+        assert_eq!(fighter(&stage, 1).state, fight::Vital::Downed { ticks: 300 });
+        assert_eq!(fighter(&stage, 1).hp, 0);
+    }
+
+    #[test]
+    fn every_arrival_settles_statuses_from_the_profile() {
+        use crate::world::combat::items::{Bag, Slot};
+        use crate::world::combat::{Class, Condition};
+        let skills: &[(&str, u8)] = &[("mastery", 4), ("endure", 1)];
+        let mut stage = skill_stage("swordsman", 10, skills);
+        let mut out = Vec::new();
+        // Endure (slot 2): a buff with temporary HP; then wounds, poison and
+        // a cooldown.
+        stage.act(1, [0, 0], 2);
+        stage.tick(&mut out);
+        let mut profile1 = stage.players[stage.find(1).unwrap()].profile.clone();
+        {
+            let f = fighter_mut(&mut stage, 1);
+            assert!(f.temp_hp > 0 && f.buff_list(0).count() > 0, "endure runs");
+            f.afflict(Condition::Poisoned, 1000);
+            f.hp = 3;
+            f.sp = 1;
+        }
+        // The mission ends (defeat) and everyone goes back to town.
+        let map = stage.players[stage.find(1).unwrap()].map;
+        stage.end_stage(map, false, &mut out);
+        for _ in 0..200 {
+            stage.tick(&mut out);
+            if stage.find(1).is_none() {
+                break;
+            }
+        }
+        assert!(stage.find(1).is_none(), "sent to town");
+        assert!(out.iter().any(|(u, e)| *u == 1 && matches!(e, HubEvent::Transfer { .. })));
+
+        // Town (and entering the game, which joins the same way): no combat
+        // state at all, so nothing transient is left and HP / SP are full.
+        let mut town = HubInstance::new(1, Arc::new(test_world()), quiet());
+        out.clear();
+        town.join(profile1.clone(), Uuid::nil(), None, 0, &mut out);
+        assert!(town.players[town.find(1).unwrap()].fighter.is_none());
+        assert!(!controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::PlayerVitals { .. } | ServerMsg::Buffs { .. })));
+
+        // The next mission: the permanent effects come back from the
+        // profile (worn helm: +10 HP; the Mastery passive), nothing else.
+        let mut bag = Bag::starting(Class::Swordsman, "");
+        bag.equip[Slot::UpperHead as usize] = "helm".into();
+        profile1.bag = bag;
+        let mut next = skill_stage("swordsman", 10, skills);
+        next.leave(1, Uuid::nil(), &mut out);
+        next.departed.clear();
+        next.join(profile1.clone(), Uuid::nil(), None, 0, &mut out);
+        let f = fighter(&next, 1);
+        assert_eq!(f.max_hp, Class::Swordsman.max_hp(10) + f.gear.hp);
+        assert!(f.gear.hp >= 10, "the helm counts");
+        assert_eq!((f.hp, f.sp), (f.max_hp, f.max_sp), "full HP and SP");
+        assert_eq!((f.temp_hp, f.status.0, f.buff_list(0).count()), (0, 0, 0), "no buff, temporary HP or condition");
+        assert_eq!((f.mods.to_hit, f.mods.damage_flat), (2, 4), "the passive is back");
+        assert!(f.cooldowns.iter().all(|&c| c == 0));
+        assert_eq!(f.state, fight::Vital::Up);
+        // The same settling as building the fighter straight from the profile.
+        let fresh = Fighter::arrive(&profile1, &next.skills);
+        assert_eq!((fresh.max_hp, fresh.max_sp, fresh.ac, fresh.mods), (f.max_hp, f.max_sp, f.ac, f.mods));
+    }
+
     #[test]
     fn a_nova_waits_for_monsters_but_a_self_buff_does_not() {
         let mut stage = skill_stage("swordsman", 10, &[("taunt", 1), ("endure", 1)]);
@@ -2443,6 +3257,39 @@ mod tests {
         assert_eq!((areas.len(), areas[0].a), (1, 3.0), "a 1.5 m splash around the monster");
         let cold = hits_on(&out, 1, 101).iter().filter(|h| h.flags >> 4 == DamageType::Cold as u8).count();
         assert!(cold >= 1, "the splash lands on the player ({cold} cold hits)");
+    }
+
+    #[test]
+    fn a_monster_stunned_in_its_wind_up_calls_it_off_for_the_clients() {
+        use crate::world::combat::Condition;
+        use crate::world::protocol::MONSTER_ENTITY_BASE;
+        let mut stage = skill_stage_with("swordsman", 40, &[], &["splash"], &[]);
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 1.5, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        let entity = MONSTER_ENTITY_BASE + slot as u32;
+        let mut out = Vec::new();
+        let mut started = false;
+        for _ in 0..140 {
+            stage.tick(&mut out);
+            if controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Cast { caster, skill, .. } if *caster == entity && skill == "splash")) {
+                started = true;
+                break;
+            }
+        }
+        assert!(started, "the monster winds up its splash");
+        stage.horde_mut().unwrap().store_mut().afflict(slot, Condition::Stunned, 60);
+        out.clear();
+        for _ in 0..20 {
+            stage.tick(&mut out);
+        }
+        let msgs = controls_for(&out, 1);
+        assert!(
+            msgs.iter().any(|m| matches!(m, ServerMsg::Cast { caster, skill, .. } if *caster == entity && skill.is_empty())),
+            "the clients hear the cast is off"
+        );
+        let cold = hits_on(&out, 1, 101).iter().filter(|h| h.flags >> 4 == DamageType::Cold as u8).count();
+        assert_eq!(cold, 0, "and nothing lands");
     }
 
     #[test]
@@ -2562,5 +3409,79 @@ mod tests {
         }
         assert!(fighter(&stage, 1).channel.is_none() && stage.lives.is_empty(), "let go: the field ends");
         assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::ZoneEnd { .. })));
+    }
+
+    #[test]
+    fn a_link_dead_player_stays_takes_hits_and_never_fights_back() {
+        let mut stage = party_stage();
+        let slot = stage.horde_mut().unwrap().spawn(0, 5.5, 5.5).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        fighter_mut(&mut stage, 1).hp = 10_000;
+        fighter_mut(&mut stage, 1).max_hp = 10_000;
+        // Walking east when the socket drops.
+        assert!(stage.input(1, 1, 1.0, 0.0));
+        let mut out = Vec::new();
+        assert_eq!(stage.detach(1, Uuid::from_u128(9), &mut out), None, "a stale socket owns nothing");
+        assert_eq!(stage.detach(1, Uuid::nil(), &mut out), Some(true), "kept, link-dead");
+        assert!(controls_for(&out, 2).contains(&ServerMsg::PlayerLink { entity_id: 101, online: false }));
+        let at = stage.position_of(1).map(|(_, x, y)| (x, y));
+        out.clear();
+        for _ in 0..200 {
+            stage.tick(&mut out);
+        }
+        assert_eq!(stage.position_of(1).map(|(_, x, y)| (x, y)), at, "does not move");
+        assert!(fighter(&stage, 1).hp < 10_000, "still hit: no invulnerability");
+        assert_eq!(stage.horde().unwrap().store().hp[slot as usize], 100_000, "never swings back");
+        // Someone joining the map learns who is link-dead.
+        stage.join(PlayerProfile { archetype: "mage".into(), ..profile(3) }, Uuid::nil(), None, 0, &mut out);
+        assert!(controls_for(&out, 3).contains(&ServerMsg::PlayerLink { entity_id: 101, online: false }));
+
+        // A new socket re-attaches: the same fighter where it stands.
+        let hp = fighter(&stage, 1).hp;
+        out.clear();
+        stage.join(profile(1), Uuid::from_u128(5), None, 9, &mut out);
+        assert_eq!(fighter(&stage, 1).hp, hp, "not a fresh fighter");
+        assert_eq!(stage.position_of(1).map(|(_, x, y)| (x, y)), at);
+        let mine = controls_for(&out, 1);
+        assert!(matches!(&mine[0], ServerMsg::StageJoined { entity_id: 101, .. }));
+        assert!(mine.iter().any(|m| matches!(m, ServerMsg::MapEnter { map_epoch: 9, players, .. } if players.len() == 2)));
+        assert!(mine.iter().any(|m| matches!(m, ServerMsg::PlayerVitals { entity_id: 101, .. })));
+        assert!(controls_for(&out, 2).contains(&ServerMsg::PlayerLink { entity_id: 101, online: true }));
+        assert!(!controls_for(&out, 2).iter().any(|m| matches!(m, ServerMsg::PlayerAppeared { .. })), "already on their map");
+        assert!(!stage.leave(1, Uuid::nil(), &mut out), "the old socket is out");
+        // Fights again.
+        out.clear();
+        for _ in 0..60 {
+            stage.tick(&mut out);
+        }
+        assert!(stage.horde().unwrap().store().hp[slot as usize] < 100_000, "swings again");
+    }
+
+    #[test]
+    fn a_link_dead_player_going_down_loses_the_mission() {
+        let mut stage = fighting_stage("swordsman");
+        let (_, px, py) = stage.position_of(1).unwrap();
+        let slot = stage.horde_mut().unwrap().spawn(0, px + 1.0, py).unwrap();
+        stage.horde_mut().unwrap().store_mut().hp[slot as usize] = 100_000;
+        stage.players[0].fighter.as_mut().unwrap().hp = 1;
+        let mut out = Vec::new();
+        assert_eq!(stage.detach(1, Uuid::nil(), &mut out), Some(true));
+        for _ in 0..600 {
+            stage.tick(&mut out);
+            if stage.position_of(1).is_none() {
+                break;
+            }
+        }
+        assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::StageEnd { victory: false, .. })), "down counts as down");
+        assert!(out.iter().any(|(u, e)| *u == 1 && matches!(e, HubEvent::Transfer { .. })), "sent home like everyone");
+    }
+
+    #[test]
+    fn detaching_in_town_leaves() {
+        let mut hub = HubInstance::new(1, Arc::new(test_support::test_world()), HubSimConfig { residents: 0, ..Default::default() });
+        let mut out = Vec::new();
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        assert_eq!(hub.detach(1, Uuid::nil(), &mut out), Some(false));
+        assert!(hub.position_of(1).is_none());
     }
 }

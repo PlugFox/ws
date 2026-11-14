@@ -4,20 +4,12 @@ import 'dart:js_interop';
 
 import 'package:game_client/src/api.dart';
 import 'package:game_client/src/classes.dart';
+import 'package:game_client/src/contacts.dart';
 import 'package:game_client/src/engine.dart';
+import 'package:game_client/src/online.dart';
 import 'package:game_client/src/protocol.dart' show Look;
+import 'package:game_client/src/version.dart';
 import 'package:web/web.dart' as web;
-
-/// Classes offered at creation (the server validates the id). Each line
-/// grows through three titles with level; see example/docs/COMBAT.md.
-const _classes = [
-  {'id': 'swordsman', 'name': 'Swordsman', 'description': 'Crusader → Paladin. Front line: taunts the horde, shield and holy blade.'},
-  {'id': 'mage', 'name': 'Mage', 'description': 'Wizard → High Wizard. Storms of fire, frost and lightning; fragile.'},
-  {'id': 'archer', 'name': 'Archer', 'description': 'Hunter → Sniper. Extreme range, traps and a falcon; bursts the biggest target.'},
-  {'id': 'acolyte', 'name': 'Acolyte', 'description': 'Priest → High Priest. Heals the most wounded, blesses the party, smites undead.'},
-  {'id': 'thief', 'name': 'Thief', 'description': 'Assassin → Assassin Cross.', 'locked': true},
-  {'id': 'merchant', 'name': 'Merchant', 'description': 'Blacksmith → Whitesmith.', 'locked': true},
-];
 
 /// Character slots per account (the server enforces the same limit).
 const maxCharacters = 6;
@@ -30,80 +22,100 @@ const _places = {
   'prt_fild08': 'Poring Island',
 };
 
-/// Sign-in form (HTML), then the engine's character slots and creation
+/// The engine's sign-in window, then its character slots and creation
 /// screens. Completes with the selected character once the server has it
-/// loaded into the session.
-Future<Map<String, Object?>> runLogin(Api api, web.HTMLElement host, GameView view, {required String assetsBase}) async {
-  await _signIn(api, host);
-  await view.loadCustomization('$assetsBase/client/customization/').toDart;
-  return _chooseCharacter(api, view);
+/// loaded into the session. [notice] is why the player is back at the
+/// sign-in (an expired session, signed in elsewhere), shown on its form.
+Future<Map<String, Object?>> runLogin(
+  Api api,
+  web.HTMLElement host,
+  GameView view, {
+  required String assetsBase,
+  String? notice,
+}) async {
+  // Start the menu BGM (Ragnarok Online 2 theme).
+  view.playBgm('$assetsBase/client/audio/bgm/menu_ro2.ogg');
+
+  // The interface atlas and the title backdrop first; a failure keeps the
+  // plain CSS look.
+  try {
+    await view.loadUi('$assetsBase/client/ui/').toDart;
+  } on Object catch (e) {
+    web.console.warn('interface atlas: $e'.toJS);
+  }
+  // Versions in the title screen corner: the client's now, the server's
+  // once `/health` answers.
+  view.setVersion(versionLine(null));
+  api
+      .json('/health')
+      .then((h) => view.setVersion(versionLine('${h['version'] ?? ''}')))
+      .catchError((Object e) => web.console.warn('health: $e'.toJS));
+  // The server's pulse under the panels while on these screens only.
+  final pulse = OnlinePoller(() => api.json('/api/online'), (s) => view.setServerStatus(jsonEncode(s.toJson())))..start();
+  try {
+    // Back from the world with a session: straight to the characters.
+    if (api.token == null) await _signIn(api, view, notice: notice);
+    if (!_customization) {
+      await view.loadCustomization('$assetsBase/client/customization/').toDart;
+      _customization = true;
+    }
+    return await _chooseCharacter(api, view);
+  } finally {
+    pulse.stop();
+    view.setServerStatus('');
+  }
 }
 
-Future<void> _signIn(Api api, web.HTMLElement host) {
+/// The customization pack is loaded once per page.
+var _customization = false;
+
+/// The class lines of `GET /api/classes`, fetched once per page.
+List<Map<String, Object?>>? _classLines;
+
+/// The account name the player asked to remember.
+const _rememberKey = 'ge.login.user';
+
+Future<void> _signIn(Api api, GameView view, {String? notice}) {
   final done = Completer<void>();
-  final panel = web.document.createElement('div') as web.HTMLDivElement..className = 'login';
-  host.appendChild(panel);
+  final saved = web.window.localStorage.getItem(_rememberKey);
+  var remember = saved != null;
+  var user = saved ?? '';
 
-  web.HTMLElement el(String tag, {String? text, String? cls}) {
-    final e = web.document.createElement(tag) as web.HTMLElement;
-    if (text != null) e.textContent = text;
-    if (cls != null) e.className = cls;
-    return e;
-  }
+  // [mode] keeps the "Create account" form up after its errors; [field]
+  // puts the error under that field (the server's `field`, or ours).
+  void show({bool busy = false, String? error, String? field, String? mode}) => view.showLogin(
+    jsonEncode({'user': user, 'remember': remember, 'busy': busy, 'error': ?error, 'field': ?field, 'mode': ?mode}),
+  );
 
-  web.HTMLInputElement input(String placeholder, {String type = 'text'}) =>
-      (web.document.createElement('input') as web.HTMLInputElement)
-        ..placeholder = placeholder
-        ..type = type;
-
-  final error = el('div', cls: 'error');
-  final user = input('username')..autocomplete = 'username';
-  final pass = input('password', type: 'password')..autocomplete = 'current-password';
-  final login = el('button', text: 'Log in');
-  final register = el('button', text: 'Create account', cls: 'secondary');
-  var busy = false;
-  Future<void> go(bool reg) async {
-    if (busy) return;
-    busy = true;
-    error.textContent = '';
-    try {
-      await api.login(user.value.trim(), pass.value, register: reg);
-      panel.remove();
-      done.complete();
-    } on Object catch (e) {
-      error.textContent = '$e';
-    } finally {
-      busy = false;
-    }
-  }
-
-  login.addEventListener(
-    'click',
-    ((web.Event _) {
-      go(false);
+  view.onUiEvent(
+    ((String json) {
+      if (done.isCompleted) return;
+      final e = jsonDecode(json) as Map<String, Object?>;
+      if (e['type'] != 'login') return;
+      user = '${e['user']}';
+      remember = e['remember'] == true;
+      final create = e['create'] == true;
+      final mode = create ? 'create' : null;
+      final email = '${e['email'] ?? ''}'.trim(), telegram = '${e['telegram'] ?? ''}'.trim();
+      if (create) {
+        final problem = contactProblem(email: email, telegram: telegram);
+        if (problem != null) return show(error: problem.message, field: problem.field, mode: mode);
+      }
+      show(busy: true, mode: mode);
+      api
+          .login(user, '${e['password']}', register: create, email: email, telegram: telegram)
+          .then((_) {
+            if (remember) {
+              web.window.localStorage.setItem(_rememberKey, user);
+            } else {
+              web.window.localStorage.removeItem(_rememberKey);
+            }
+            done.complete();
+          })
+          .catchError((Object err) => show(error: '$err', field: err is ApiException ? err.field : null, mode: mode));
     }).toJS,
   );
-  register.addEventListener(
-    'click',
-    ((web.Event _) {
-      go(true);
-    }).toJS,
-  );
-  pass.addEventListener(
-    'keydown',
-    ((web.KeyboardEvent e) {
-      if (e.key == 'Enter') go(false);
-    }).toJS,
-  );
-  panel
-    ..appendChild(el('h1', text: 'Izlude'))
-    ..appendChild(el('p', text: 'A survivors-like over WebSockets', cls: 'sub'))
-    ..appendChild(user)
-    ..appendChild(pass)
-    ..appendChild(login)
-    ..appendChild(register)
-    ..appendChild(error);
-  user.focus();
+  show(error: notice);
   return done.future;
 }
 
@@ -132,9 +144,12 @@ Future<Map<String, Object?>> _chooseCharacter(Api api, GameView view) {
             },
         ],
         'maxSlots': maxCharacters,
-        // Creation shows each class's tier-1 body.
+        // The server's class lines (`GET /api/classes`: dice, weapons,
+        // skills, ratings); creation shows each one's tier-1 body, locked
+        // lines a body of the all-bodies pack.
         'classes': [
-          for (final c in _classes) {...c, 'job': bodyJob('${c['id']}')},
+          for (final c in _classLines ?? const <Map<String, Object?>>[])
+            {...c, 'job': bodyJob('${c['id']}'), 'body': ?lockedBodies['${c['id']}']},
         ],
         'selected': ?selected,
         'busy': busy,
@@ -147,7 +162,9 @@ Future<Map<String, Object?>> _chooseCharacter(Api api, GameView view) {
   }
 
   Future<void> refresh() async {
+    final lines = _classLines == null ? api.json('/api/classes') : null;
     chars = await api.characters();
+    if (lines != null) _classLines = ((await lines)['classes']! as List).cast<Map<String, Object?>>();
   }
 
   view.onUiEvent(

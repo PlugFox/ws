@@ -99,6 +99,22 @@ impl Element {
         }
     }
 
+    /// The recipe id (the inverse of [`Element::from_id`]).
+    pub const fn id(self) -> &'static str {
+        match self {
+            Element::Neutral => "neutral",
+            Element::Water => "water",
+            Element::Earth => "earth",
+            Element::Fire => "fire",
+            Element::Wind => "wind",
+            Element::Poison => "poison",
+            Element::Holy => "holy",
+            Element::Shadow => "shadow",
+            Element::Ghost => "ghost",
+            Element::Undead => "undead",
+        }
+    }
+
     /// The element wheel: RO's logic in 5e terms.
     pub const fn affinity(self, kind: DamageType) -> Affinity {
         use Affinity::*;
@@ -132,18 +148,29 @@ impl Element {
 pub enum AttackOutcome {
     Miss,
     Hit,
-    /// Natural 20: damage dice are rolled twice.
+    /// A confirmed threat: damage dice are rolled twice.
     Critical,
 }
 
-/// `d20 + bonus` against `ac`. A natural 1 always misses; a natural roll of
-/// `crit_from` or higher (20 normally, 18 with Sharp Shooting) is a critical.
+/// A threat becomes a critical only if a second roll beats the armour
+/// class by this much (COMBAT.md §2.1).
+pub const CRIT_CONFIRM_MARGIN: i32 = 5;
+
+/// `d20 + bonus` against `ac`. A natural 1 always misses. A natural roll of
+/// `crit_from` or higher (20 normally, 18 with Sharp Shooting) is a threat:
+/// it always hits, and is a critical when a confirmation roll
+/// `d20 + bonus` (a natural 1 fails it) reaches `ac + CRIT_CONFIRM_MARGIN`.
 pub fn attack_roll(rng: &mut Rng, bonus: i32, ac: i32, advantage: i8, crit_from: u32) -> AttackOutcome {
     let d = rng.d20(advantage);
     if d == 1 {
         AttackOutcome::Miss
     } else if d >= crit_from.min(20) {
-        AttackOutcome::Critical
+        let confirm = rng.d20(advantage);
+        if confirm > 1 && confirm as i32 + bonus >= ac + CRIT_CONFIRM_MARGIN {
+            AttackOutcome::Critical
+        } else {
+            AttackOutcome::Hit
+        }
     } else if d as i32 + bonus >= ac {
         AttackOutcome::Hit
     } else {
@@ -210,10 +237,48 @@ mod tests {
                 AttackOutcome::Hit => {}
             }
         }
-        // Each is 1 in 20 even with an absurd bonus.
-        assert!((850..1150).contains(&miss) && (850..1150).contains(&crit), "{miss} {crit}");
-        // +0 against AC 21 only crits.
-        assert!((0..2000).all(|_| attack_roll(&mut rng, 0, 21, 0, 20) != AttackOutcome::Hit));
+        // A natural 1 misses even with an absurd bonus; every natural 20
+        // confirms then (a natural 1 on the confirmation spoils 1 in 20).
+        assert!((850..1150).contains(&miss) && (800..1100).contains(&crit), "{miss} {crit}");
+        // +0 against AC 21: only natural 20s land, and they never confirm.
+        let landed = (0..4000).filter(|_| attack_roll(&mut rng, 0, 21, 0, 20) != AttackOutcome::Miss).count();
+        assert!((140..260).contains(&landed), "{landed}");
+        assert!((0..2000).all(|_| attack_roll(&mut rng, 0, 21, 0, 20) != AttackOutcome::Critical));
+    }
+
+    /// Miss and critical rates at the Poring Island matchups (COMBAT.md
+    /// §2.1): `(bonus, ac, crit_from, miss ‰, crit ‰)`, each within ±12 ‰.
+    #[test]
+    fn miss_and_crit_rates_match_the_design() {
+        use super::super::monster::{Archetype, MonsterBlock};
+        let ac = |l, a| MonsterBlock::new(l, a, 1).ac;
+        let cases = [
+            // A level-1 player (+5) against a level-1 Poring.
+            (5, ac(1, Archetype::Swarm), 20, 100, 33),
+            // A level-10 player (+5) against level-10 chasers and tanks.
+            (5, ac(10, Archetype::Chaser), 20, 200, 28),
+            (5, ac(10, Archetype::Tank), 20, 300, 23),
+            // A level-20 player (+6) against the level-25 boss.
+            (6, ac(25, Archetype::Boss), 20, 450, 15),
+            // Sharp Shooting (crits from 18) against a level-10 chaser.
+            (5, ac(10, Archetype::Chaser), 18, 200, 83),
+            // A level-1 Poring (+2) against a swordsman's AC 16.
+            (2, 16, 20, 650, 5),
+        ];
+        let mut rng = Rng::new(21);
+        let n: u32 = 100_000;
+        for (bonus, ac, crit_from, miss_pm, crit_pm) in cases {
+            let (mut miss, mut crit) = (0u32, 0u32);
+            for _ in 0..n {
+                match attack_roll(&mut rng, bonus, ac, 0, crit_from) {
+                    AttackOutcome::Miss => miss += 1,
+                    AttackOutcome::Critical => crit += 1,
+                    AttackOutcome::Hit => {}
+                }
+            }
+            let (miss, crit) = (miss * 1000 / n, crit * 1000 / n);
+            assert!(miss.abs_diff(miss_pm) <= 12 && crit.abs_diff(crit_pm) <= 12, "+{bonus} vs AC {ac}: {miss} ‰ miss, {crit} ‰ crit");
+        }
     }
 
     #[test]

@@ -20,6 +20,7 @@
 //! are refunded into the bank.
 
 use super::catalog::MonsterCatalog;
+use crate::world::combat::Archetype;
 use rand::Rng;
 use std::collections::VecDeque;
 
@@ -51,6 +52,9 @@ pub struct WaveRules {
     /// of the run (still clamped); bosses spawn at `max + 5`.
     pub levels: (u32, u32),
     pub level_every_secs: f32,
+    /// Weight factor of elite kinds in the picks (mission modifiers ask
+    /// for more mini-bosses; 1 = the catalogue's weights).
+    pub elite_weight: f32,
 }
 
 impl WaveRules {
@@ -68,7 +72,23 @@ impl WaveRules {
         spawn_margin: (4.0, 12.0),
         levels: (1, 20),
         level_every_secs: 90.0,
+        elite_weight: 1.0,
     };
+}
+
+impl WaveRules {
+    /// Level a monster of RO level `level` spawns at `elapsed` seconds into
+    /// the run: clamped into the band, plus one per `level_every_secs`
+    /// (still clamped); bosses at the top of the band + 5. The one formula
+    /// the horde spawns with and the mission brief shows.
+    pub fn level_at(&self, level: u32, boss: bool, elapsed: f32) -> u32 {
+        let (lo, hi) = (self.levels.0.max(1), self.levels.1.max(self.levels.0.max(1)));
+        if boss {
+            return (hi + 5).min(u8::MAX as u32);
+        }
+        let grow = if self.level_every_secs > 0.0 { (elapsed.max(0.0) / self.level_every_secs) as u32 } else { 0 };
+        (level.clamp(lo, hi) + grow).min(hi)
+    }
 }
 
 impl Default for WaveRules {
@@ -126,6 +146,12 @@ impl Director {
 
     pub fn elapsed(&self) -> f32 {
         self.elapsed
+    }
+
+    /// Test hook: jumps the run clock.
+    #[cfg(test)]
+    pub fn set_elapsed(&mut self, secs: f32) {
+        self.elapsed = secs;
     }
 
     /// Waves bought so far.
@@ -188,8 +214,13 @@ impl Director {
             self.picks.clear();
             let mut total = 0u32;
             for (kind, def) in catalog.defs().iter().enumerate() {
-                if !def.boss && self.elapsed >= def.unlock_secs && def.spawn_cost as f32 <= points {
-                    total += def.weight;
+                // Plants are planted once at creation, never bought.
+                if !def.boss && !def.is_plant() && self.elapsed >= def.unlock_secs && def.spawn_cost as f32 <= points {
+                    total += if def.archetype == Archetype::Elite {
+                        (def.weight as f32 * self.rules.elite_weight).round().max(1.0) as u32
+                    } else {
+                        def.weight
+                    };
                     self.picks.push((kind as u8, total));
                 }
             }

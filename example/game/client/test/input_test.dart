@@ -106,6 +106,16 @@ void main() {
       expect(pad.update(buttons([Pad.a]), still, 0.75, menu: false).slots, 0);
     });
 
+    test('Y asks for the player menu once per press, never in a menu or with LB + RT', () {
+      final pad = PadMapper();
+      expect(pad.update(buttons([Pad.y]), still, 0, menu: false).people, isTrue);
+      expect(pad.update(buttons([Pad.y]), still, 0.05, menu: false).people, isFalse);
+      pad.update(buttons([]), still, 0.1, menu: false);
+      expect(pad.update(buttons([Pad.y]), still, 0.15, menu: true).people, isFalse);
+      pad.update(buttons([Pad.lb, Pad.rt]), still, 0.2, menu: false);
+      expect(pad.update(buttons([Pad.lb, Pad.rt, Pad.y]), still, 0.25, menu: false).people, isFalse);
+    });
+
     test('View and Menu fire once per press', () {
       final pad = PadMapper();
       final f = pad.update(buttons([Pad.view, Pad.menu]), still, 0, menu: false);

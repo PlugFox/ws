@@ -7,9 +7,11 @@ test('a new player signs up, creates a mage and walks the town', async ({ page }
   const name = await createCharacter(page, 'Mage');
   await enterWorld(page);
 
-  // The hero stands in town under its name label, with the hotbar below.
-  await expect(page.getByText(name, { exact: true })).toBeVisible();
-  await expect(page.locator('.ge-hotbar')).toBeVisible();
+  // The hero stands in town under its name label; Basic Info is up and the
+  // hotbar stays hidden (no skills in town).
+  await expect(page.locator('.ge-label', { hasText: name })).toBeVisible();
+  await expect(page.locator('.u-basic')).toBeVisible();
+  await expect(page.locator('.u-hotbar')).toBeHidden();
 
   // Moving keeps the session alive and the console clean.
   await hold(page, 'KeyD', 600);
@@ -23,7 +25,7 @@ test('the skill tree opens with K and closes with Escape', async ({ page }) => {
   await createCharacter(page, 'Mage');
   await enterWorld(page);
 
-  const tree = page.locator('.ge-tree');
+  const tree = page.locator('.u-skills');
   await page.keyboard.press('KeyK');
   await expect(tree).toBeVisible();
   // The mage tab lists its branches; a level 1 hero has no points yet.

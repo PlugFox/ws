@@ -48,10 +48,10 @@ test('touch: joystick, skill buttons, auto-cast and the page swipe', async ({ pa
   // Skills are set up with the keyboard; the rest is touch only.
   await page.keyboard.press('KeyK');
   await learn(page, 'Fire Bolt', 1);
-  await page.locator('.ge-tree header button', { hasText: 'Basic' }).click();
-  await learn(page, 'Back Slide', 1);
-  await slot(page, 'Back Slide', 0);
-  await page.locator('.ge-tree header button', { hasText: 'Mage' }).click();
+  await learn(page, 'Napalm Beat', 1);
+  await learn(page, 'Blink', 1);
+  await slot(page, 'Blink', 0);
+  await page.locator('.u-skills .u-tabs button', { hasText: 'Mage' }).click();
   await slot(page, 'Fire Bolt', 5);
   await page.keyboard.press('Escape');
 
@@ -59,7 +59,7 @@ test('touch: joystick, skill buttons, auto-cast and the page swipe', async ({ pa
   const t = await touch(page);
   await t.press(640, 120, 50);
   await expect(page.locator('.ge-touch')).toBeVisible();
-  await expect(page.locator('.ge-hk-row').first()).toBeHidden();
+  await expect(page.locator('.u-hotbar .slots')).toBeHidden();
 
   // Floating joystick: push right for a second; the character walks.
   const before = await position(page);
@@ -70,10 +70,10 @@ test('touch: joystick, skill buttons, auto-cast and the page swipe', async ({ pa
   await page.getByRole('button', { name: 'Start' }).tap();
   await expect(page.locator('body')).toContainText(/· Stage-\d+ ·/);
 
-  // Tap the first arc button (slot 1): Back Slide (needs no target, auto
-  // aim) slides the character.
+  // Tap the first arc button (slot 1): Blink (needs no target, auto
+  // aim) moves the character.
   const slot1 = '.ge-touch .tb[data-slot="0"]';
-  await expect(page.locator(`${slot1} img`)).toHaveAttribute('src', /\.png$/);
+  await expect(page.locator(`${slot1} img`)).toHaveAttribute('src', /^data:image\/|\.png$/); // atlas (kit/icons.ts) or loose file
   const s1 = await center(page, slot1);
   const from = await position(page);
   await expect
@@ -102,7 +102,7 @@ test('touch: joystick, skill buttons, auto-cast and the page swipe', async ({ pa
   }
   await t.press(s1.x, s1.y, 900);
   await expect.poll(auto).toBe(true);
-  await expect(page.locator('.ge-hk.auto')).toHaveCount(1);
+  await expect(page.locator('.u-hk.auto')).toHaveCount(1);
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('game.settings') ?? '{}').autoCast);
   expect(saved).toBe(1);
 

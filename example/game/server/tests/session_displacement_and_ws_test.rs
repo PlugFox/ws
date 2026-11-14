@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn test_single_active_session_mutual_exclusion() {
-    let config = AppConfig::test_config();
+    let config = AppConfig::test_config().await;
     let (app, state) = create_app(config).await.expect("Failed to create test app");
 
     // 1. Register a user
@@ -90,7 +90,7 @@ async fn test_single_active_session_mutual_exclusion() {
 
 #[tokio::test]
 async fn test_websocket_connection_and_displacement_close_code() {
-    let mut config = AppConfig::test_config();
+    let mut config = AppConfig::test_config().await;
     config.port = 0; // OS assigns free port
 
     // Start live TCP listener for real WebSocket handshake

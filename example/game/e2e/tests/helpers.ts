@@ -15,12 +15,18 @@ export function unique(prefix: string): string {
   return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
-/** Registers a fresh account through the login screen (opened at `path`). */
-export async function signUp(page: Page, path = '/'): Promise<string> {
+/** Registers a fresh account through the login screen (opened at `path`):
+ * "Create account" opens the form (ID and password carry over), its own
+ * "Create account" sends it, with the optional `contacts` filled in. */
+export async function signUp(page: Page, path = '/', contacts: { email?: string; telegram?: string } = {}): Promise<string> {
   const user = unique('e2e_');
   await page.goto(path);
   await page.getByPlaceholder('username').fill(user);
   await page.getByPlaceholder('password').fill('e2e-password');
+  await page.getByRole('button', { name: 'Create account' }).click();
+  await expect(page.locator('.login.create')).toBeVisible();
+  if (contacts.email) await page.getByLabel('Email (optional)').fill(contacts.email);
+  if (contacts.telegram) await page.getByLabel('Telegram (optional)').fill(contacts.telegram);
   await page.getByRole('button', { name: 'Create account' }).click();
   await expect(page.locator('.login')).toHaveCount(0);
   return user;
@@ -55,26 +61,28 @@ export async function hold(page: Page, key: string, ms: number): Promise<void> {
 
 /** A node of the open skill tree, by its exact name. */
 export function treeNode(page: Page, name: string) {
-  return page.locator('.ge-tree .ge-node', { has: page.locator('.nm', { hasText: new RegExp(`^${name}$`) }) });
+  return page.locator('.u-skills .u-node', { has: page.locator('.nm', { hasText: new RegExp(`^${name}$`) }) });
 }
 
 /** Spends points on `name` in the open tree until it reaches `level`. */
 export async function learn(page: Page, name: string, level: number): Promise<void> {
   for (let l = 1; l <= level; l++) {
-    await treeNode(page, name).locator('.plus').click();
+    await treeNode(page, name).locator('.up').click();
     await expect(treeNode(page, name).locator('.lv')).toHaveText(new RegExp(`^${l} /`));
   }
 }
 
 /** Hotbar slot holding `name` (the page-2 row comes first in the DOM). */
 export function hotkey(page: Page, name: string) {
-  return page.locator('.ge-hk', { has: page.locator('img') }).and(page.locator(`[title^="${name} —"]`));
+  return page.locator(`.u-hotbar .u-hk[data-name="${name}"]`);
 }
 
 /** Puts a learned skill of the open tree in hotbar slot `slot` (0-based). */
 export async function slot(page: Page, name: string, slot: number): Promise<void> {
-  await treeNode(page, name).click();
-  await page.locator('.ge-tree footer .slots button').nth(slot).click();
+  // Pick the skill, then tap the slot (the bar shows while the tree is open);
+  // dragging the icon onto the slot does the same.
+  await treeNode(page, name).locator('.nm').click();
+  await page.locator('.u-hotbar .u-hk').nth(slot).click();
   await expect(hotkey(page, name)).toHaveCount(1);
 }
 

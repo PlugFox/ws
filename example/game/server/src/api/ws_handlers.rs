@@ -1,8 +1,13 @@
 use super::state::AppState;
 use crate::session::{ActiveSession, SessionSignal, StateFlusher};
-use crate::world::combat::{Class, Loadout};
+use crate::session::registry::TownSpot;
+use crate::world::stage::Resumable;
+use crate::world::combat::items::{ItemError, Slot};
+use crate::world::combat::{Bag, Class, Loadout};
+use crate::world::protocol::ItemDef;
 use crate::world::map::LocationKind;
 use crate::world::protocol::ClientDecodeError;
+use crate::world::chat::{self, ChatLimiter};
 use crate::world::{
     Arrival, ClientMsg, HubCommand, HubEvent, HubTicket, JoinError, LobbyError, LobbyEvent, PlayerProfile, ServerMsg,
     LOBBY_CHANNEL_CAPACITY, OUTBOX_CAPACITY,
@@ -18,6 +23,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -81,6 +87,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
 
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (lobby_tx, mut lobby_rx) = mpsc::channel(LOBBY_CHANNEL_CAPACITY);
+    let (friend_tx, mut friend_rx) = mpsc::channel(crate::world::friends::FRIEND_CHANNEL_CAPACITY);
     let mut conn = Conn {
         state: state.clone(),
         session: Arc::clone(&session),
@@ -90,10 +97,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
         next_epoch: 0,
         last_channel: None,
         stranded: false,
+        items_due: false,
+        chat: ChatLimiter::default(),
+        friend_tx,
+        superseded: false,
     };
 
     // Send welcome / connected frame
-    let welcome = ServerMsg::Connected { user_id, session_id };
+    let welcome = ServerMsg::Connected { user_id, session_id, server_version: crate::version::version().into() };
     let _ = ws_tx.send(Message::Binary(welcome.encode())).await;
 
     // Pump: session signals, events from the current instance (hub channel
@@ -124,6 +135,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
                         let _ = ws_tx.send(Message::Close(Some(close_frame))).await;
                         break;
                     }
+                    Ok(SessionSignal::Announce { text }) => {
+                        let msg = ServerMsg::Announce { text };
+                        if ws_tx.send(Message::Binary(msg.encode())).await.is_err() {
+                            break;
+                        }
+                        Vec::new()
+                    }
                     Ok(SessionSignal::Notification { message }) => {
                         let note = ServerMsg::Notification { message };
                         if let Err(e) = ws_tx.send(Message::Binary(note.encode())).await {
@@ -140,6 +158,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
             event = recv_link(&mut conn.link) => conn.on_instance_event(event).await,
 
             Some(event) = lobby_rx.recv() => conn.on_lobby_event(event).await,
+
+            Some(event) = friend_rx.recv() => conn.on_friend_event(event).await,
 
             // Messages received from client
             msg_res = ws_rx.next() => {
@@ -178,16 +198,30 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
         if failed {
             break;
         }
+        if conn.superseded {
+            // A newer socket of this account took the stage over: this one
+            // must not reconnect and fight it for the slot.
+            let close_frame = axum::extract::ws::CloseFrame { code: 4009, reason: "Resumed on another connection".into() };
+            let _ = ws_tx.send(Message::Close(Some(close_frame))).await;
+            break;
+        }
     }
 
     // On disconnect, leave lobby and instance and flush dirty character state
     info!("Cleaning up WebSocket session for user {}", user_id);
     if let Some(lobbies) = &state.lobbies {
         lobbies.leave(user_id, conn.conn_id, "disconnected");
+        lobbies.forget_invites(user_id);
     }
-    conn.leave_link();
+    conn.drop_link().await;
+    state.friends.gone(user_id, conn.conn_id).await;
     let _ = StateFlusher::flush_session(&state.pool, &session).await;
 }
+
+#[path = "ws_friends.rs"]
+mod friends;
+#[path = "ws_feedback.rs"]
+mod feedback;
 
 /// Frame to send to the client.
 enum Out {
@@ -236,7 +270,18 @@ struct Conn {
     last_channel: Option<u16>,
     /// The stage dropped the player and the hub has not taken them yet.
     stranded: bool,
+    /// Joined an instance: `item_defs` and `inventory` go after its map.
+    items_due: bool,
+    /// Local chat rate limit (per socket: survives channel switches).
+    chat: ChatLimiter,
+    /// Friends' sockets reach this one here (`world::friends`).
+    friend_tx: mpsc::Sender<crate::world::friends::FriendEvent>,
+    /// A newer socket re-attached to this one's stage slot: close.
+    superseded: bool,
 }
+
+/// A remembered town spot is used by a reconnect within this long.
+const TOWN_SPOT_TTL: Duration = Duration::from_secs(15 * 60);
 
 fn hub_error(code: &str, message: impl Into<String>) -> Out {
     Out::Msg(ServerMsg::HubError { code: code.into(), message: message.into() })
@@ -267,6 +312,7 @@ impl Conn {
             exp: ch.base_exp,
             weapon: ch.weapon.clone(),
             loadout: ch.loadout.clone(),
+            bag: ch.bag.clone(),
         })
     }
 
@@ -287,10 +333,126 @@ impl Conn {
         }
     }
 
+    /// The socket is gone: a stage keeps the player link-dead for its link
+    /// grace (`world::stage`); in town the spot is remembered, so a
+    /// reconnect of this session lands there again.
+    async fn drop_link(&mut self) {
+        let Some(link) = self.link.take() else { return };
+        match link.place {
+            Place::Hub { .. } => {
+                let Some(dir) = self.state.hub.clone() else { return };
+                if let (Some(character_id), Some((channel, arrival))) =
+                    (self.character_id().await, dir.whereabouts(self.user_id()).await)
+                {
+                    *self.session.town_spot.lock().unwrap() = Some(TownSpot { character_id, channel, arrival, at: Instant::now() });
+                }
+                dir.leave(self.user_id(), self.session_id());
+            }
+            Place::Stage { stage_id } => {
+                if let Some(lobbies) = &self.state.lobbies {
+                    lobbies.stages().detach(stage_id, self.user_id(), self.session_id(), link.events);
+                }
+            }
+        }
+    }
+
+    async fn character_id(&self) -> Option<u32> {
+        self.session.character.read().await.as_ref().map(|c| c.id)
+    }
+
+    /// The stage the selected character is link-dead in. A stage another
+    /// character of the account left behind is forfeited here: one
+    /// character plays at a time.
+    async fn resumable(&self) -> Option<Resumable> {
+        let stages = self.state.lobbies.as_ref()?.stages();
+        let character_id = self.character_id().await?;
+        let found = stages.resumable(self.user_id(), character_id);
+        if found.is_none() {
+            stages.forfeit(self.user_id());
+        }
+        found
+    }
+
+    /// Where a reconnect lands in town: the spot this session's last socket
+    /// stood on (taken once), else where a stale socket of it still stands.
+    async fn town_spot(&self) -> Option<(u16, Arrival)> {
+        let character_id = self.character_id().await?;
+        let remembered = self.session.town_spot.lock().unwrap().take();
+        if let Some(s) = remembered.filter(|s| s.character_id == character_id && s.at.elapsed() < TOWN_SPOT_TTL) {
+            return Some((s.channel, s.arrival));
+        }
+        self.state.hub.as_ref()?.whereabouts(self.user_id()).await
+    }
+
+    /// `hub_join` from outside any instance (sign-in, reconnect): a
+    /// character link-dead in a stage is asked first (`resumable`); else
+    /// the town, on the remembered spot and channel after a short drop.
+    async fn enter_world(&mut self, channel: Option<u16>) -> Vec<Out> {
+        if self.link.is_some() || channel.is_some() {
+            return self.join_hub(channel, None).await;
+        }
+        if let Some(r) = self.resumable().await {
+            let left = r.left.unwrap_or(self.state.lobbies.as_ref().map_or(Duration::ZERO, |l| l.stages().link_grace()));
+            let mission = crate::world::missions::find(r.mission).map_or(r.mission, |m| m.name);
+            return vec![Out::Msg(ServerMsg::Resumable {
+                stage_id: r.stage_id,
+                mission: mission.into(),
+                left_ms: left.as_millis().min(u32::MAX as u128) as u32,
+            })];
+        }
+        let spot = self.town_spot().await;
+        if let Some((channel, _)) = &spot {
+            self.last_channel = Some(*channel);
+        }
+        self.join_hub(None, spot.map(|(_, a)| a)).await
+    }
+
+    /// `stage_resume`: back to the link-dead fighter, or forfeit it (and
+    /// to town, at the mission return point: they come from a mission).
+    async fn resume_stage(&mut self, accept: bool) -> Vec<Out> {
+        if self.link.is_some() {
+            return Vec::new();
+        }
+        let (Some(lobbies), Some(profile)) = (self.state.lobbies.clone(), self.profile().await) else {
+            return self.enter_world(None).await;
+        };
+        let mut out = Vec::new();
+        match self.resumable().await {
+            Some(r) if accept => {
+                let (tx, rx) = mpsc::channel(OUTBOX_CAPACITY);
+                match lobbies.stages().rejoin(r.stage_id, profile, self.session_id(), tx, self.next_epoch) {
+                    Ok(commands) => {
+                        self.link = Some(Link { place: Place::Stage { stage_id: r.stage_id }, commands, events: rx });
+                        return out;
+                    }
+                    Err(e) => {
+                        lobbies.stages().forfeit(self.user_id());
+                        out.push(lobby_error(e.code(), "The battle is over."));
+                    }
+                }
+            }
+            Some(_) => {
+                lobbies.stages().forfeit(self.user_id());
+            }
+            None if accept => out.push(lobby_error("stage_gone", "The battle is over.")),
+            None => {}
+        }
+        let back = self.mission_return();
+        out.extend(self.join_hub(None, back).await);
+        out
+    }
+
     /// Joins (or switches) a hub channel. A stage is left only once the hub
     /// took the player, so a failed join leaves them where they were. The
     /// channel they came from is a hint: if it is gone or full, any channel
     /// will do.
+    /// Where a player leaving a mission lands in town.
+    fn mission_return(&self) -> Option<Arrival> {
+        let dir = self.state.hub.as_ref()?;
+        let seed = (self.user_id() as u64) << 32 ^ std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(7, |d| d.as_nanos() as u64);
+        Some(dir.world().mission_return(seed))
+    }
+
     async fn join_hub(&mut self, channel: Option<u16>, arrival: Option<Arrival>) -> Vec<Out> {
         let Some(dir) = self.state.hub.clone() else {
             return self.join_failed(hub_error("hub_unavailable", "hub maps are not loaded"));
@@ -368,6 +530,12 @@ impl Conn {
     async fn on_instance_event(&mut self, event: Option<HubEvent>) -> Vec<Out> {
         match event {
             Some(HubEvent::Snapshot(frame)) => vec![Out::Binary(frame)],
+            // The result screen (parked for a link-dead player until they
+            // re-attach).
+            Some(HubEvent::Results(frames)) => {
+                let [stats, rewards] = *frames;
+                vec![Out::Msg(stats), Out::Msg(rewards)]
+            }
             Some(HubEvent::Control(msg)) => {
                 if let ServerMsg::MapEnter { map, map_epoch, .. } = &msg {
                     self.next_epoch = map_epoch.wrapping_add(1);
@@ -375,8 +543,63 @@ impl Conn {
                     if map.kind != LocationKind::Field {
                         remember_location(&self.session, &map.id).await;
                     }
+                    self.present(map).await;
+                }
+                // Every instance join, after its first map: the catalogue
+                // and the belongings.
+                if matches!(msg, ServerMsg::HubJoined { .. } | ServerMsg::StageJoined { .. }) {
+                    self.items_due = true;
+                }
+                if matches!(msg, ServerMsg::MapEnter { .. }) && std::mem::take(&mut self.items_due) {
+                    let mut out = vec![Out::Msg(msg), Out::Msg(ServerMsg::ItemDefs { items: ItemDef::catalogue() })];
+                    out.extend(self.inventory().await);
+                    return out;
+                }
+                // A mission giver: what each mission spawns and drops, from
+                // the catalogue the stages spawn from (the mission window).
+                if let ServerMsg::NpcDialog { missions, .. } = &msg
+                    && let Some(catalog) = self.state.lobbies.as_ref().and_then(|l| l.stages().monsters())
+                {
+                    let briefs = missions.iter().map(|m| Out::Msg(ServerMsg::MissionInfo { brief: crate::world::missions::brief(m, &m.waves, catalog) }));
+                    // The mission modifier table (the window's Modifiers section).
+                    let mods = (!missions.is_empty()).then(|| Out::Msg(crate::world::modifiers::defs_msg()));
+                    return std::iter::once(Out::Msg(msg.clone())).chain(briefs).chain(mods).collect();
                 }
                 vec![Out::Msg(msg)]
+            }
+            Some(HubEvent::Trade { item, count, sell }) => {
+                let mut out = self
+                    .change_bag(|_, bag| if sell { bag.sell(&item, count).map(|_| ()) } else { bag.buy(&item, count, &[item.as_str()]).map(|_| ()) })
+                    .await;
+                // The hub checks player trades against its copy of the bag.
+                out.extend(self.share_bag().await);
+                out
+            }
+            // A player trade went through (already stored by the vault).
+            Some(HubEvent::BagChanged) => self.inventory().await.into_iter().collect(),
+            Some(HubEvent::ItemUsed { item }) => self.change_bag(|_, bag| bag.take(&item, 1)).await,
+            Some(HubEvent::Zeny { amount }) => {
+                self.change_bag(|_, bag| {
+                    bag.earn(amount);
+                    Ok(())
+                })
+                .await
+            }
+            Some(HubEvent::Loot { items }) => {
+                // Whatever fits goes in; a full bag says so once.
+                let mut full = false;
+                let mut out = self
+                    .change_bag(|_, bag| {
+                        for &(id, n) in &items {
+                            full |= bag.add(id, n).is_err();
+                        }
+                        Ok(())
+                    })
+                    .await;
+                if full {
+                    out.push(hub_error(ItemError::BagFull.code(), "Your bag is full: some loot was left behind."));
+                }
+                out
             }
             Some(HubEvent::LookChanged(look)) => {
                 if let Some(ch) = self.session.character.write().await.as_mut() {
@@ -385,6 +608,13 @@ impl Conn {
                 Vec::new()
             }
             Some(HubEvent::SkillResetApproved) => self.change_loadout(SkillChange::Reset).await,
+            Some(HubEvent::FeedbackPlaced { draft, place }) => self.store_feedback(*draft, place).await,
+            Some(HubEvent::Record(delta)) => {
+                if let Some(ch) = self.session.character.write().await.as_mut() {
+                    ch.add_record(&delta);
+                }
+                Vec::new()
+            }
             Some(HubEvent::Progress { level, exp }) => {
                 if let Some(ch) = self.session.character.write().await.as_mut() {
                     ch.set_progress(level, exp);
@@ -400,6 +630,15 @@ impl Conn {
                     Err(e) => vec![Out::Msg(e.to_msg())],
                 }
             }
+            Some(HubEvent::QuickStart { mission, tier, mask }) => {
+                let (Some(lobbies), Some(profile)) = (self.state.lobbies.clone(), self.profile().await) else {
+                    return vec![lobby_error("mission_unavailable", "missions are not available on this server")];
+                };
+                match lobbies.quick_start(profile, self.session_id(), &mission, tier, mask, self.lobby_tx.clone()) {
+                    Ok(_) => Vec::new(),
+                    Err(e) => vec![Out::Msg(e.to_msg())],
+                }
+            }
             Some(HubEvent::Transfer { target_map, arrival: (x, y) }) => {
                 // Left the stage through its exit; the actor already dropped us.
                 if let Some(Link { place: Place::Stage { stage_id }, .. }) = self.link.take()
@@ -408,16 +647,30 @@ impl Conn {
                     lobbies.stages().leave(stage_id, self.user_id(), self.session_id(), false);
                 }
                 self.stranded = true;
-                self.join_hub(None, Some(Arrival { map: target_map, x, y })).await
+                // Back from a mission: the town's return point (any other
+                // target keeps the portal's arrival).
+                let back = self.mission_return().filter(|r| r.map == target_map);
+                self.join_hub(None, back.or(Some(Arrival { map: target_map, x, y }))).await
             }
             None => {
+                // A newer socket took our stage slot over (it re-attached):
+                // nothing to clean up, this socket is done.
+                if let Some(Link { place: Place::Stage { stage_id }, .. }) = &self.link
+                    && let Some(lobbies) = &self.state.lobbies
+                    && !lobbies.stages().owns(*stage_id, self.user_id(), self.session_id())
+                {
+                    self.link = None;
+                    self.superseded = true;
+                    return Vec::new();
+                }
                 // The instance dropped us (outbox overflow or shutdown).
                 let place = self.link.as_ref().map(|l| l.place);
                 self.leave_link();
                 match place {
                     Some(Place::Stage { .. }) => {
                         self.stranded = true;
-                        self.join_hub(None, None).await
+                        let back = self.mission_return();
+                        self.join_hub(None, back).await
                     }
                     _ => vec![Out::Msg(ServerMsg::HubLeft { reason: "evicted".into() })],
                 }
@@ -500,13 +753,59 @@ impl Conn {
             ClientMsg::Emote { emote } => self.cosmetic(HubCommand::Emote { user_id, emote }),
             ClientMsg::Pose { pose } => self.cosmetic(HubCommand::Pose { user_id, pose }),
             ClientMsg::Flag { flag, x, y } => self.cosmetic(HubCommand::Flag { user_id, flag, x, y }),
+            ClientMsg::Chat { text } => {
+                // Nothing left after cleaning: nothing to say.
+                let Some(text) = chat::sanitize(&text) else { return Vec::new() };
+                if self.link.is_none() {
+                    return vec![hub_error("not_in_hub", "join the hub first")];
+                }
+                if !self.chat.allow(std::time::Instant::now()) {
+                    return vec![hub_error("chat_too_fast", "You are talking too fast. Wait a moment.")];
+                }
+                self.forward(HubCommand::Chat { user_id, text })
+            }
             ClientMsg::NpcInteract { npc } => self.forward(HubCommand::Interact { user_id, npc }),
+            ClientMsg::ShopBuy { npc, item, count } => self.forward(HubCommand::Trade { user_id, npc, item, count, sell: false }),
+            ClientMsg::ShopSell { npc, item, count } => self.forward(HubCommand::Trade { user_id, npc, item, count, sell: true }),
+            ClientMsg::ItemUse { item } => self.forward(HubCommand::UseItem { user_id, item }),
+            ClientMsg::Friend { op } => self.on_friend(op).await,
+            ClientMsg::Feedback { draft } => self.on_feedback(draft),
+            ClientMsg::Equip { .. } | ClientMsg::Unequip { .. } if !self.in_hub() => {
+                vec![hub_error("not_in_hub", "change your equipment in town")]
+            }
+            ClientMsg::Equip { item, slot } => {
+                let mut out = self.change_bag(|class, bag| bag.equip(class, &item, Slot::from_index(slot)).map(|_| ())).await;
+                out.extend(self.share_bag().await);
+                out
+            }
+            ClientMsg::Unequip { slot } => {
+                let mut out = self.change_bag(|_, bag| bag.unequip(Slot::from_index(slot).ok_or(ItemError::NotEquipment)?)).await;
+                out.extend(self.share_bag().await);
+                out
+            }
             ClientMsg::StyleSet { look } => self.forward(HubCommand::Restyle { user_id, look }),
             ClientMsg::MissionSelect { mission, public } => {
                 if !self.in_hub() {
                     return vec![lobby_error("not_in_hub", "missions are picked from a Kafra employee in the hub")];
                 }
                 self.forward(HubCommand::SelectMission { user_id, mission, public })
+            }
+            // Quick start: a party leader starts from wherever the party
+            // window is; alone, the hub checks the player is at a giver.
+            ClientMsg::MissionStart { mission, tier, mask } => {
+                let Some(lobbies) = self.state.lobbies.clone() else {
+                    return vec![lobby_error("mission_unavailable", "missions are not available on this server")];
+                };
+                if !self.in_hub() {
+                    return vec![lobby_error("not_in_hub", "missions are started from the hub")];
+                }
+                if lobbies.lobby_of(user_id).is_none() {
+                    return self.forward(HubCommand::QuickStart { user_id, mission, tier, mask });
+                }
+                let Some(profile) = self.profile().await else {
+                    return vec![hub_error("no_character", "select a character first")];
+                };
+                lobby_result(lobbies.quick_start(profile, session_id, &mission, tier, mask, self.lobby_tx.clone()).map(|_| ()))
             }
             ClientMsg::HubChannels => match &self.state.hub {
                 Some(dir) => vec![Out::Msg(ServerMsg::HubChannels { channels: dir.channels() })],
@@ -515,6 +814,7 @@ impl Conn {
             ClientMsg::HubLeave => {
                 if let Some(lobbies) = &self.state.lobbies {
                     lobbies.leave(user_id, session_id, "left");
+                    lobbies.forget_invites(user_id);
                 }
                 if self.link.is_some() {
                     self.leave_link();
@@ -523,10 +823,12 @@ impl Conn {
                     Vec::new()
                 }
             }
-            ClientMsg::HubJoin { channel } => self.join_hub(channel, None).await,
+            ClientMsg::HubJoin { channel } => self.enter_world(channel).await,
+            ClientMsg::StageResume { accept } => self.resume_stage(accept).await,
             ClientMsg::StageLeave => {
                 if matches!(self.link, Some(Link { place: Place::Stage { .. }, .. })) {
-                    self.join_hub(None, None).await
+                    let back = self.mission_return();
+                    self.join_hub(None, back).await
                 } else {
                     vec![lobby_error("not_in_stage", "not in a stage")]
                 }
@@ -551,6 +853,10 @@ impl Conn {
                 Some(l) => lobby_result(l.start(user_id, session_id).map(|_| ())),
                 None => vec![Out::Msg(LobbyError::NotInLobby.to_msg())],
             },
+            ClientMsg::LobbyModifiers { tier, mask } => match &self.state.lobbies {
+                Some(l) => lobby_result(l.set_modifiers(user_id, session_id, tier, mask)),
+                None => vec![Out::Msg(LobbyError::NotInLobby.to_msg())],
+            },
             ClientMsg::LobbyKick { entity_id } => match &self.state.lobbies {
                 Some(l) => lobby_result(l.kick(user_id, session_id, entity_id)),
                 None => vec![Out::Msg(LobbyError::NotInLobby.to_msg())],
@@ -558,6 +864,47 @@ impl Conn {
             ClientMsg::LobbyLeave => match &self.state.lobbies {
                 Some(l) if l.leave(user_id, session_id, "left") => Vec::new(),
                 _ => vec![Out::Msg(LobbyError::NotInLobby.to_msg())],
+            },
+            // The player context menu (`lobby.rs` has the party rules).
+            ClientMsg::PartyInvite { entity_id } => {
+                let Some(lobbies) = self.state.lobbies.clone() else {
+                    return vec![lobby_error("mission_unavailable", "parties are not available on this server")];
+                };
+                if !self.in_hub() {
+                    return vec![lobby_error("not_in_hub", "invite players in town")];
+                }
+                let Some(profile) = self.profile().await else {
+                    return vec![hub_error("no_character", "select a character first")];
+                };
+                match lobbies.invite(profile, session_id, entity_id, self.lobby_tx.clone()) {
+                    Ok(mission) => {
+                        let ttl_ms = crate::world::lobby::INVITE_TTL.as_millis() as u32;
+                        self.forward(HubCommand::PartyInvite { user_id, target: entity_id, mission, ttl_ms })
+                    }
+                    Err(e) => vec![Out::Msg(e.to_msg())],
+                }
+            }
+            ClientMsg::PartyAnswer { from, accept } => {
+                let Some(lobbies) = self.state.lobbies.clone() else {
+                    return vec![lobby_error("mission_unavailable", "parties are not available on this server")];
+                };
+                if accept && !self.in_hub() {
+                    return vec![lobby_error("not_in_hub", "join a party in town")];
+                }
+                let Some(profile) = self.profile().await else {
+                    return vec![hub_error("no_character", "select a character first")];
+                };
+                lobby_result(lobbies.answer(profile, session_id, from, accept, self.lobby_tx.clone()))
+            }
+            ClientMsg::Inspect { entity_id } => self.forward(HubCommand::Inspect { user_id, target: entity_id }),
+            // Must not be lost (a dropped lock or cancel would stall the
+            // table); the hub refuses it on a stage.
+            ClientMsg::Trade { op } => match &self.link {
+                Some(link) => {
+                    let _ = link.commands.send(HubCommand::TradeOp { user_id, op }).await;
+                    Vec::new()
+                }
+                None => vec![hub_error("not_in_hub", "join the hub first")],
             },
         }
     }
@@ -606,6 +953,50 @@ impl Conn {
             }
             None => Vec::new(),
         }
+    }
+}
+
+impl Conn {
+    /// The character's belongings as `inventory`.
+    async fn inventory(&self) -> Option<Out> {
+        let guard = self.session.character.read().await;
+        let ch = guard.as_ref()?;
+        let bag = &ch.bag;
+        Some(Out::Msg(ServerMsg::Inventory {
+            zeny: bag.zeny,
+            // One entry per stack, named by its instance key (`sword+7`).
+            items: bag.items.iter().map(|s| (s.key(), s.count)).collect(),
+            equip: bag.equip.to_vec(),
+            // Derived numbers with this gear (the Equipment window).
+            stats: super::character_handlers::class_stats(&ch.archetype, ch.level as i64, bag).to_string(),
+        }))
+    }
+
+    /// Applies `change` to the character's bag: on success the new
+    /// `inventory` (persisted by the flusher), else the error.
+    async fn change_bag(&self, change: impl FnOnce(Class, &mut Bag) -> Result<(), ItemError>) -> Vec<Out> {
+        {
+            let mut guard = self.session.character.write().await;
+            let Some(ch) = guard.as_mut() else {
+                return vec![hub_error("no_character", "select a character first")];
+            };
+            let class = Class::from_id(&ch.archetype).unwrap_or(Class::Swordsman);
+            let mut bag = ch.bag.clone();
+            if let Err(e) = change(class, &mut bag) {
+                return vec![hub_error(e.code(), e.message())];
+            }
+            ch.set_bag(bag);
+        }
+        self.inventory().await.into_iter().collect()
+    }
+
+    /// Hands the belongings to the hub (what other players see held).
+    async fn share_bag(&self) -> Vec<Out> {
+        let bag = self.session.character.read().await.as_ref().map(|c| c.bag.clone());
+        if let (Some(bag), Some(link)) = (bag, &self.link) {
+            let _ = link.commands.send(HubCommand::Bag { user_id: self.user_id(), bag }).await;
+        }
+        Vec::new()
     }
 }
 

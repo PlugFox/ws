@@ -11,7 +11,7 @@ test('a mage lays a Fire Wall and a Quagmire on a mission', async ({ page }, inf
 
   // Level 30 (GAME_DEV_LEVEL): learn the path to both ground skills in town.
   await page.keyboard.press('KeyK');
-  await expect(page.locator('.ge-tree')).toBeVisible();
+  await expect(page.locator('.u-skills')).toBeVisible();
   await learn(page, 'Fire Bolt', 4);
   await learn(page, 'Sight', 1);
   await learn(page, 'Fire Wall', 1);
@@ -21,7 +21,7 @@ test('a mage lays a Fire Wall and a Quagmire on a mission', async ({ page }, inf
   await slot(page, 'Fire Wall', 0);
   await slot(page, 'Quagmire', 1);
   await page.keyboard.press('Escape');
-  await expect(page.locator('.ge-tree')).toBeHidden();
+  await expect(page.locator('.u-skills')).toBeHidden();
 
   // `?mission=` picked the mission on the town join: a lobby of one.
   await page.getByRole('button', { name: 'Start' }).click();
@@ -55,7 +55,7 @@ test('a swordsman provokes the wave and breaks it with fire', async ({ page }, i
   await enterWorld(page);
 
   await page.keyboard.press('KeyK');
-  await expect(page.locator('.ge-tree')).toBeVisible();
+  await expect(page.locator('.u-skills')).toBeVisible();
   await learn(page, 'Bash', 5);
   await learn(page, 'Magnum Break', 1);
   await learn(page, 'Provoke', 5);
@@ -64,7 +64,7 @@ test('a swordsman provokes the wave and breaks it with fire', async ({ page }, i
   await slot(page, 'Magnum Break', 1);
   await slot(page, 'Endure', 2);
   await page.keyboard.press('Escape');
-  await expect(page.locator('.ge-tree')).toBeHidden();
+  await expect(page.locator('.u-skills')).toBeHidden();
 
   await page.getByRole('button', { name: 'Start' }).click();
   await expect(page.locator('body')).toContainText(/· Stage-\d+ ·/);

@@ -246,7 +246,7 @@ fn deltas_keep_the_client_within_the_error_bound() {
     for t in 0..400u32 {
         // The player circles, so the crowd keeps turning.
         let a = t as f32 * 0.02;
-        let p = PlayerView { x: 60.5 + a.cos() * 15.0, y: 60.5 + a.sin() * 15.0, light: 20.0, id: 0 };
+        let p = PlayerView { x: 60.5 + a.cos() * 15.0, y: 60.5 + a.sin() * 15.0, light: 20.0, id: 0, hunted: true };
         h.tick_views(t, 20, &[p]);
         let (stats, delta) = v.frame(&h, p, t);
         assert_eq!(delta.baseline, if t == 0 { 0 } else { 1 });
@@ -277,7 +277,7 @@ fn a_settled_crowd_costs_almost_nothing() {
     for i in 0..40 {
         h.spawn(0, 20.5 + (i % 8) as f32, 20.5 + (i / 8) as f32).unwrap();
     }
-    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0, id: 0 };
+    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0, id: 0, hunted: true };
     let mut bytes = Vec::new();
     for t in 0..600u32 {
         h.tick_views(t, 20, &[p]);
@@ -299,7 +299,7 @@ fn the_budget_spreads_a_burst_and_nearest_monsters_come_first() {
     for i in 0..300 {
         h.spawn(0, 25.5 + (i % 20) as f32 * 2.5, 25.5 + (i / 20) as f32 * 2.5).unwrap();
     }
-    let p = PlayerView { x: 50.5, y: 50.5, light: 30.0, id: 0 };
+    let p = PlayerView { x: 50.5, y: 50.5, light: 30.0, id: 0, hunted: true };
     h.tick_views(0, 20, &[p]);
     let (s0, d0) = v.frame(&h, p, 0);
     assert!(s0.bytes <= 200 && s0.deferred > 0, "{s0:?}");
@@ -329,7 +329,7 @@ fn a_lost_frame_resyncs_through_a_keyframe() {
     for i in 0..10 {
         h.spawn(0, 22.5 + i as f32, 25.5).unwrap();
     }
-    let p = PlayerView { x: 30.5, y: 40.5, light: 20.0, id: 0 };
+    let p = PlayerView { x: 30.5, y: 40.5, light: 20.0, id: 0, hunted: true };
     for t in 0..5 {
         h.tick_views(t, 20, &[p]);
         v.frame(&h, p, t);
@@ -358,7 +358,7 @@ fn a_reused_slot_is_a_new_monster_to_the_client() {
     cfg.pool = 2;
     let mut h = Horde::new(w, catalog(), cfg);
     let mut v = Viewer::new(&h);
-    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0, id: 0 };
+    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0, id: 0, hunted: true };
     let a = h.spawn(0, 25.5, 30.5).unwrap();
     h.tick_views(0, 20, &[p]);
     v.frame(&h, p, 0);
@@ -382,7 +382,7 @@ fn removed_and_dead_monsters_leave_the_view() {
     let mut v = Viewer::new(&h);
     let a = h.spawn(0, 15.5, 30.5).unwrap();
     h.spawn(0, 18.5, 30.5).unwrap();
-    let mut p = PlayerView { x: 10.5, y: 30.5, light: 10.0, id: 0 };
+    let mut p = PlayerView { x: 10.5, y: 30.5, light: 10.0, id: 0, hunted: true };
     h.tick_views(0, 20, &[p]);
     v.frame(&h, p, 0);
     assert_eq!(v.mirror.monsters.len(), 2);
@@ -443,7 +443,7 @@ fn status_changes_reach_the_client_even_standing_still() {
     let w = world(60, 60, None);
     let mut h = Horde::new(w, catalog(), config(20.0));
     let mut v = Viewer::new(&h);
-    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0, id: 0 };
+    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0, id: 0, hunted: true };
     let a = h.spawn(0, 25.5, 30.5).unwrap();
     let b = h.spawn(0, 35.5, 30.5).unwrap();
     h.store_mut().afflict(b, Condition::Stunned, 50);
@@ -642,4 +642,80 @@ fn query_cost() {
         near.as_secs_f64() * 1e6 / n as f64,
         rebuild.as_secs_f64() * 1e6,
     );
+}
+
+#[test]
+fn with_nobody_hunted_monsters_roam_away_and_come_back_when_hunted() {
+    let w = world(80, 80, None);
+    let mut h = Horde::new(Arc::clone(&w), catalog(), config(30.0));
+    let walk = &w.map(0).walk;
+    let slots: Vec<u16> = (0..12).map(|i| h.spawn(0, 30.5 + (i % 4) as f32 * 2.0, 30.5 + (i / 4) as f32 * 2.0).unwrap()).collect();
+    let mut p = PlayerView { x: 40.5, y: 40.5, light: 30.0, id: 1, hunted: true };
+    let mean_dist = |h: &Horde| {
+        let sum: f32 = h.monsters().map(|m| ((m.3 - 40.5).powi(2) + (m.4 - 40.5).powi(2)).sqrt()).sum();
+        sum / h.len() as f32
+    };
+    // They close in on the player...
+    for t in 0..200 {
+        h.tick_views(t, 20, &[p]);
+    }
+    let gathered = mean_dist(&h);
+    assert!(gathered < 3.0, "the crowd reached the player: {gathered}");
+
+    // ... who goes down (or hides): no more chasing, no frozen crowd either.
+    p.hunted = false;
+    let before: Vec<(f32, f32)> = slots.iter().map(|&s| h.monsters().find(|m| m.0 == s).map(|m| (m.3, m.4)).unwrap()).collect();
+    let mut moved_ticks = 0;
+    let mut last = before.clone();
+    for t in 200..600 {
+        h.tick_views(t, 20, &[p]);
+        let now: Vec<(f32, f32)> = slots.iter().map(|&s| h.monsters().find(|m| m.0 == s).map(|m| (m.3, m.4)).unwrap()).collect();
+        if now.iter().zip(&last).any(|(a, b)| (a.0 - b.0).abs() + (a.1 - b.1).abs() > 1e-3) {
+            moved_ticks += 1;
+        }
+        for &(x, y) in &now {
+            assert!(walk.is_walkable(x, y), "roamed into a wall at {x},{y}");
+        }
+        last = now;
+    }
+    assert!(moved_ticks > 350, "the crowd keeps moving (moved on {moved_ticks} of 400 ticks)");
+    let wandered = slots
+        .iter()
+        .zip(&before)
+        .filter(|(s, b)| h.monsters().find(|m| m.0 == **s).is_some_and(|m| (m.3 - b.0).powi(2) + (m.4 - b.1).powi(2) > 4.0))
+        .count();
+    assert!(wandered >= slots.len() / 2, "most monsters wandered off: {wandered}");
+    let dispersed = mean_dist(&h);
+    assert!(dispersed > gathered + 2.0, "lost interest: {gathered} -> {dispersed}");
+    assert_eq!(h.len(), slots.len(), "nothing recycled or spawned meanwhile");
+
+    // Back up: they come for the player again.
+    p.hunted = true;
+    for t in 600..800 {
+        h.tick_views(t, 20, &[p]);
+    }
+    let back = mean_dist(&h);
+    assert!(back < 3.0, "re-acquired the target: {back}");
+}
+
+#[test]
+fn roaming_headings_vary_and_rest_some_legs() {
+    let (mut rest, mut moves) = (0, 0);
+    let mut sum = (0.0f32, 0.0f32);
+    for slot in 0..300u16 {
+        match roam_heading(slot, 0, 1000, 20) {
+            None => rest += 1,
+            Some((x, y)) => {
+                assert!(((x * x + y * y) - 1.0).abs() < 1e-4);
+                sum = (sum.0 + x, sum.1 + y);
+                moves += 1;
+            }
+        }
+    }
+    assert!((60..140).contains(&rest), "about a third rest: {rest}");
+    // Random directions: no common drift.
+    assert!((sum.0 * sum.0 + sum.1 * sum.1).sqrt() < moves as f32 * 0.2, "drift {sum:?}");
+    // One heading per leg: the same within a leg.
+    // Slot 5 at 20 Hz: legs of 50 ticks, offset 485, so 1000 and 1014 share one.
+    assert_eq!(roam_heading(5, 0, 1000, 20), roam_heading(5, 0, 1014, 20));
 }

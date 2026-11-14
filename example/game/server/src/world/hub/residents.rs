@@ -138,6 +138,7 @@ impl Resident {
             facing: self.facing,
             look: self.look,
             level: self.level,
+            weapon: String::new(),
         }
     }
 
@@ -660,10 +661,15 @@ fn walk(r: &mut Resident, w: u32) -> bool {
 /// At the end of a walk: use the spot, or pause.
 fn arrive(r: &mut Resident, spots: &[Spot], rng: &mut Rng, hz: u32, events: &mut Vec<ServerMsg>) {
     r.state = State::Stand;
-    let at = r.spot.filter(|_| r.legs == 0).map(|s| spots[s as usize]);
+    // Only when the walk ended on the spot itself: the last stroll around a
+    // wander spot also ends with `legs == 0` and the spot still held, but
+    // somewhere nearby. Snapping onto the spot from there was a warp of up
+    // to WANDER_RANGE cells, seen on clients as a stutter and a jump back.
+    let on = |s: &Spot| (r.x as i32, r.y as i32) == (s.x as i32, s.y as i32);
+    let at = r.spot.filter(|_| r.legs == 0).map(|s| spots[s as usize]).filter(on);
     match at {
         Some(s) if !r.pet => {
-            (r.x, r.y) = (s.x, s.y);
+            (r.x, r.y) = (s.x, s.y); // already there (cell centre)
             match s.kind {
                 SpotKind::Sit => {
                     r.facing = s.facing;
@@ -726,6 +732,7 @@ mod tests {
             exp: 0,
             weapon: String::new(),
             loadout: Default::default(),
+            bag: Default::default(),
         }
     }
 
@@ -930,6 +937,36 @@ mod tests {
         }
         assert!(visited.iter().filter(|v| **v).count() >= 3, "spots used: {visited:?}");
         assert!(!pet_posed, "pets never sit");
+    }
+
+    /// Residents only ever walk: between two ticks nobody moves further
+    /// than their pace (a jump reads as a lag spike and a snap backward on
+    /// clients). Covers the last stroll around a wander spot, which used to
+    /// warp the resident back onto the spot.
+    #[test]
+    fn residents_never_jump_between_ticks() {
+        let world = Arc::new(route_world());
+        let config = HubSimConfig { residents: 3, ..Default::default() };
+        let mut jumps = Vec::new();
+        for seed in 0..12u64 {
+            let mut hub = HubInstance::new(1, Arc::clone(&world), config.clone());
+            hub.residents = Residents::spawn(&world, &config, seed);
+            let mut out = Vec::new();
+            hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
+            let mut prev: Vec<(f32, f32)> = hub.residents.iter().map(|r| (r.x, r.y)).collect();
+            for tick in 0..(300 * 20) {
+                out.clear();
+                hub.tick(&mut out);
+                for (r, p) in hub.residents.iter().zip(&mut prev) {
+                    let d = ((r.x - p.0).powi(2) + (r.y - p.1).powi(2)).sqrt();
+                    if d > r.speed + 1e-4 {
+                        jumps.push((seed, tick, r.id, *p, (r.x, r.y)));
+                    }
+                    *p = (r.x, r.y);
+                }
+            }
+        }
+        assert!(jumps.is_empty(), "{} jumps, first: {:?}", jumps.len(), &jumps[..jumps.len().min(5)]);
     }
 
     #[test]

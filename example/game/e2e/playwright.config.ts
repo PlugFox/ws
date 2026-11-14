@@ -1,17 +1,21 @@
 /**
  * Browser tests of the example game. The config starts its own game server
- * (`cargo run` in ../server) on a spare port with a fresh SQLite file, so a
- * run never touches the development database. The web client must be built
- * first (`mise run game:e2e` does both).
+ * (`cargo run` in ../server) on a spare port with a fresh PostgreSQL
+ * database, so a run never touches the development data. It needs the dev
+ * database server (`mise run game:db:up`, or `E2E_DATABASE_URL` pointing at
+ * another server whose role may create databases) and the built web client
+ * (`mise run game:e2e` does all three).
  */
 import { defineConfig, devices } from '@playwright/test';
-import os from 'node:os';
-import path from 'node:path';
 
 const port = Number(process.env.E2E_PORT ?? 18091);
 // Workers re-evaluate this file: the first evaluation picks the database
-// and the environment carries it to the rest.
-process.env.E2E_DB ??= path.join(os.tmpdir(), `ws-game-e2e-${Date.now()}.db`);
+// and the environment carries it to the rest. The server creates it
+// (`DATABASE_CREATE=1`). The `gs_e2e_<unix secs>` name lets the server's
+// test runs (`cargo test`, `db::testing`) drop it once it is six hours old.
+const server = process.env.E2E_DATABASE_URL ?? 'postgres://mobbed:mobbed@127.0.0.1:55432/mobbed';
+process.env.E2E_DB ??= `gs_e2e_${Math.floor(Date.now() / 1000)}`;
+const databaseUrl = server.replace(/\/[^/?]*(\?|$)/, `/${process.env.E2E_DB}$1`);
 
 export default defineConfig({
   testDir: './tests',
@@ -52,7 +56,8 @@ export default defineConfig({
     stderr: 'pipe',
     env: {
       SERVER_PORT: String(port),
-      DATABASE_URL: `sqlite://${process.env.E2E_DB}?mode=rwc`,
+      DATABASE_URL: databaseUrl,
+      DATABASE_CREATE: '1',
       RUST_LOG: 'warn',
       // Test hooks: new characters start at level 30 (tier-2 skills), and
       // `/?mission=<id>` picks a mission without walking to the board.
