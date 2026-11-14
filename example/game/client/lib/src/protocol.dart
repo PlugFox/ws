@@ -115,6 +115,8 @@ abstract final class Kind {
   static const runStats = 0x81;
   static const runRewards = 0x82;
   static const shopDone = 0x8D;
+  static const refined = 0x8F;
+  static const carded = 0x95;
   static const monsterAffixes = 0xA0;
   static const affixEvent = 0xA1;
   static const affixDefs = 0xA2;
@@ -144,6 +146,8 @@ abstract final class Kind {
   static const shopBuy = 0x54;
   static const shopSell = 0x55;
   static const shopDeal = 0x8C;
+  static const refine = 0x8E;
+  static const card = 0x94;
   static const equip = 0x56;
   static const unequip = 0x57;
   static const itemUse = 0x58;
@@ -448,6 +452,25 @@ abstract final class ClientMsg {
     }
     return w.done();
   }
+
+  /// A monster card into ([insert]) or out of the item worn in [slot],
+  /// or (null) one copy of the bag stack [item]. Town only.
+  static Uint8List card({required bool insert, required String item, int? slot, required String card}) =>
+      (WireWriter(Kind.card)
+            ..u8(insert ? 0 : 1)
+            ..str(item)
+            ..u8(slot ?? 0xFF)
+            ..str(card))
+          .done();
+
+  /// One refine attempt at the smith [npc]: the item worn in [slot], or
+  /// (null) one copy of the bag stack [item] (`refine.dart`).
+  static Uint8List refine(String npc, String item, int? slot) =>
+      (WireWriter(Kind.refine)
+            ..str(npc)
+            ..str(item)
+            ..u8(slot ?? 0xFF))
+          .done();
 
   /// Wear [item] from the bag (in town); [slot] picks an accessory slot,
   /// null = the item's own.
@@ -789,12 +812,27 @@ const _magicWeapons = {
 
 /// One row of the item catalogue ([ItemDefs]).
 final class ItemDef {
-  ItemDef._(this.id, this.name, this.kind, this.slot, this.price, this.classes, this.desc, this.rarity);
+  ItemDef._(
+    this.id,
+    this.name,
+    this.kind,
+    this.slot,
+    this.price,
+    this.classes,
+    this.desc,
+    this.rarity,
+    this.refineSafe,
+    this.sockets,
+    this.card,
+    this.prefix,
+    this.suffix,
+    this.monster,
+  );
   final String id;
   final String name;
 
   /// 0 etc, 1 consumable, 2 weapon, 3 armour, 4 shield, 5 headgear,
-  /// 6 garment, 7 shoes, 8 accessory.
+  /// 6 garment, 7 shoes, 8 accessory, 9 card.
   final int kind;
 
   /// [EquipSlot] it is worn in; null = not worn.
@@ -808,13 +846,34 @@ final class ItemDef {
   /// Tooltip text (the engine's `markup()`).
   final String desc;
 
-  /// 0 common, 1 uncommon (green), 2 rare (blue): the name's colour.
+  /// 0 common, 1 uncommon (green), 2 rare (blue), 3 mythic (boss
+  /// cards): the name's colour.
   final int rarity;
+
+  /// Highest refine reached without risk; 0 = a smith cannot refine it
+  /// (`refine.dart`).
+  final int refineSafe;
+
+  bool get refinable => refineSafe > 0;
+
+  /// Card sockets (0..4).
+  final int sockets;
+
+  /// A card: what it fits (1 headgear … 7 accessory, `cards.dart`);
+  /// 0 = not a card.
+  final int card;
+
+  /// A card's word in an item's name: before it ([prefix]) or after "of"
+  /// ([suffix]); and the monster that drops it.
+  final String prefix;
+  final String suffix;
+  final String monster;
 
   static ItemDef _read(WireReader r) {
     final id = r.str(), name = r.str(), kind = r.u8(), slot = r.u8();
-    final price = r.varint(), classes = r.u8(), desc = r.str();
-    return ItemDef._(id, name, kind, slot == 0xFF ? null : slot, price, classes, desc, r.u8());
+    final price = r.varint(), classes = r.u8(), desc = r.str(), rarity = r.u8(), safe = r.u8();
+    final sockets = r.u8(), card = r.u8(), prefix = r.str(), suffix = r.str(), monster = r.str();
+    return ItemDef._(id, name, kind, slot == 0xFF ? null : slot, price, classes, desc, rarity, safe, sockets, card, prefix, suffix, monster);
   }
 }
 
@@ -945,6 +1004,8 @@ sealed class ServerMsg {
       Kind.itemDefs => ItemDefs(r.list(ItemDef._read)),
       Kind.shop => Shop(r.str(), r.str(), r.list((r) => r.str())),
       Kind.shopDone => ShopDone(r.varint(), r.varint()),
+      Kind.refined => Refined(r.str(), r.u8() != 0, r.u8(), r.u8()),
+      Kind.carded => Carded(r.u8() == 0, r.str(), r.str()),
       Kind.itemUsed => ItemUsed(r.str(), r.varint()),
       Kind.playerGear => PlayerGear(r.varint(), r.str()),
       Kind.playerHeadgear => PlayerHeadgear(r.varint(), r.list((r) => r.str())),
@@ -1690,6 +1751,27 @@ final class Shop extends ServerMsg {
   final String npc;
   final String name;
   final List<String> items;
+}
+
+/// The own refine attempt (`refine`): [item] is the key the item has now,
+/// [refine] its level; [ok] false = it failed and fell back, [slip] the
+/// face the slip die showed (0 on a success; the new [Inventory] came
+/// first).
+final class Refined extends ServerMsg {
+  const Refined(this.item, this.ok, this.refine, this.slip);
+  final String item;
+  final bool ok;
+  final int refine;
+  final int slip;
+}
+
+/// The own card went in ([inserted]) or came out: [item] is the host's key
+/// now (the new [Inventory] came first).
+final class Carded extends ServerMsg {
+  const Carded(this.inserted, this.item, this.card);
+  final bool inserted;
+  final String item;
+  final String card;
 }
 
 /// The own merchant order (`shopDeal`) went through: [spent] on buys,

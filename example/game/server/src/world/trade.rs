@@ -436,10 +436,11 @@ mod tests {
     #[test]
     fn the_exchange_checks_room_and_the_zeny_cap() {
         // A hundred different knives (refine × card): a hundred stacks.
-        let knife = |i: usize| Attrs { refine: (i % 10) as u8 + 1, cards: vec![format!("card_{}", i / 10)] };
+        const W: [&str; 10] = ["drops_card", "hornet_card", "tarou_card", "drainliar_card", "scorpion_card", "desert_wolf_card", "skeleton_card", "poporing_card", "sirocco_card", "sohee_card"];
+        let knife = |i: usize| Attrs { refine: (i % 10) as u8 + 1, cards: vec![W[i / 10].to_string()] };
         let full = Bag { items: (0..MAX_STACKS).map(|i| Stack { id: "knife".into(), count: 1, attrs: knife(i) }).collect(), ..Bag::default() };
         let first = items::key("knife", &knife(0));
-        assert_eq!(first, "knife+1[card_0]");
+        assert_eq!(first, "knife+1[drops_card]");
         let a = bag(0, &[("sword", 1)]);
         assert_eq!(exchange(&a, &full, &offer(0, &[("sword", 1)]), &Offer::default()), Err(TradeError::BagFull));
         // Giving a stack away frees the slot the incoming one needs.
@@ -481,17 +482,17 @@ mod tests {
     #[test]
     fn stacks_split_and_merge_by_instance() {
         let a = bag(0, &[("sword", 3), ("sword+7", 2), ("red_potion", 4)]);
-        let b = bag(0, &[("sword", 1), ("sword+7[poring_card]", 1)]);
+        let b = bag(0, &[("sword", 1), ("sword+7[hornet_card]", 1)]);
         let mut o = Offer::default();
         o.set_item(&a, "sword+7", 1).unwrap();
         o.set_item(&a, "sword", 2).unwrap();
         assert_eq!(o.set_item(&a, "sword+7", 3), Err(TradeError::NotOwned));
         // Aliases of a key are refused (one spelling per instance).
         assert_eq!(o.set_item(&a, "sword+07", 1), Err(TradeError::NotOwned));
-        let (na, nb) = exchange(&a, &b, &o, &offer(0, &[("sword+7[poring_card]", 1)])).unwrap();
-        assert_eq!((na.count("sword"), na.count("sword+7"), na.count("sword+7[poring_card]")), (1, 1, 1));
-        assert_eq!((nb.count("sword"), nb.count("sword+7"), nb.count("sword+7[poring_card]")), (3, 1, 0));
-        for k in ["sword", "sword+7", "sword+7[poring_card]", "red_potion"] {
+        let (na, nb) = exchange(&a, &b, &o, &offer(0, &[("sword+7[hornet_card]", 1)])).unwrap();
+        assert_eq!((na.count("sword"), na.count("sword+7"), na.count("sword+7[hornet_card]")), (1, 1, 1));
+        assert_eq!((nb.count("sword"), nb.count("sword+7"), nb.count("sword+7[hornet_card]")), (3, 1, 0));
+        for k in ["sword", "sword+7", "sword+7[hornet_card]", "red_potion"] {
             assert_eq!(na.count(k) + nb.count(k), a.count(k) + b.count(k), "{k}");
         }
         // One stack per instance on each side.

@@ -5,10 +5,11 @@
 
 use super::aim::aimed_plant;
 use super::area::Area;
-use super::cast::{envenom, push, ticks16, wound, Casting, Kill, VENOM_SECS};
+use super::cast::{envenom, inflict, push, ticks16, wound, Casting, Kill, VENOM_SECS};
 use super::{facing_of, HubEvent, HubInstance, HubPlayer, MapIdx, Outgoing};
 use crate::world::combat::skills::SLOTS;
 use crate::world::combat::rules::{attack_roll, AttackOutcome};
+use crate::world::combat::cards::Procs;
 use crate::world::combat::items::{self, Bag, Gear};
 use crate::world::combat::loot;
 use crate::world::combat::{
@@ -16,6 +17,7 @@ use crate::world::combat::{
     Status, Weapon, CONDITIONS,
 };
 use crate::world::horde::storage::{FLAG_BOSS, FLAG_FULL};
+use crate::world::horde::Horde;
 use crate::world::protocol::{hit, HitEvent, ServerMsg, Swing, MONSTER_ENTITY_BASE};
 use crate::world::record::Record;
 use crate::world::modifiers::ModFlags;
@@ -65,6 +67,32 @@ struct Buff {
     mods: Mods,
     /// It granted temporary HP (gone with the last such buff).
     temp: bool,
+}
+
+/// What the worn cards keep track of during a stage (cards.rs): counters
+/// and cooldowns of the effects that are not plain numbers.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct CardState {
+    /// Kills this expedition (Mastering's feast, Phreeoni's growth).
+    pub kills: u32,
+    /// Damage Phreeoni's card has grown to.
+    pub growth: u8,
+    /// Skill casts (Nine Tail's free one).
+    pub casts: u32,
+    /// Ticks until the Sandman's veil, the Moonlight Flower's free skill
+    /// and the Horong's wisp are ready again.
+    pub veil_cd: u32,
+    pub moon_cd: u32,
+    pub wisp_cd: u32,
+    /// Ticks left of a dodge's rush (Creamy).
+    pub rush: u32,
+    /// The Angeling's last stand is spent for this expedition.
+    pub stood: bool,
+    /// A block or dodge readied the Bongun's counter.
+    pub counter: bool,
+    /// Standing still 2 s (Willow) and 3 s (Hode), set each tick.
+    pub planted: bool,
+    pub settled: bool,
 }
 
 /// A player's combat state inside a stage.
@@ -163,6 +191,8 @@ pub struct Fighter {
     /// Zeny kills paid this player this run (the modifiers' clear bonus
     /// is a share of it).
     pub(super) run_zeny: u64,
+    /// Counters and cooldowns of the worn cards.
+    pub(super) cards: CardState,
 }
 
 impl Fighter {
@@ -225,6 +255,7 @@ impl Fighter {
             record: Record::default(),
             curses: ModFlags::NONE,
             run_zeny: 0,
+            cards: CardState::default(),
         }
     }
 
@@ -232,6 +263,93 @@ impl Fighter {
     /// (COMBAT.md §5.4).
     pub fn combo(&self) -> &Combo {
         &self.combo
+    }
+
+    /// The worn cards' effects (cards.rs).
+    pub(super) fn procs(&self) -> &Procs {
+        &self.gear.procs
+    }
+
+    /// Under 30% HP (the Weeping Bride's card).
+    fn desperate(&self) -> bool {
+        self.hp * 10 < self.max_hp * 3
+    }
+
+    /// Walking pace the cards add: under half HP, per style rank, riding,
+    /// a dodge's rush.
+    pub(super) fn card_pace(&self) -> f32 {
+        let o = &self.gear.procs;
+        let mut p = 1.0;
+        if o.flee_speed > 0 && self.hp * 2 < self.max_hp {
+            p += o.flee_speed as f32 / 100.0;
+        }
+        if o.rank_speed > 0 {
+            p += o.rank_speed as f32 * self.combo.rank() as u8 as f32 / 100.0;
+        }
+        if o.ride_speed > 0 && self.riding {
+            p += o.ride_speed as f32 / 100.0;
+        }
+        if self.cards.rush > 0 {
+            p += 0.2;
+        }
+        p
+    }
+
+    /// A kill by this player: the cards' counters (Mastering's feast,
+    /// Phreeoni's growth) and the longer combo window.
+    fn card_kill(&mut self, hz: f32) {
+        let o = self.gear.procs;
+        if o.is_none() {
+            return;
+        }
+        self.cards.kills += 1;
+        if o.combo_secs > 0 {
+            self.combo.stretch((o.combo_secs as f32 * hz) as u32);
+        }
+        if o.feast > 0 && self.cards.kills.is_multiple_of(o.feast as u32) {
+            self.hp = (self.hp + self.max_hp / 4).min(self.max_hp);
+            self.sp = (self.sp + self.max_sp / 4).min(self.max_sp);
+        }
+        if o.growth > 0 && self.cards.kills.is_multiple_of(25) {
+            self.cards.growth = (self.cards.growth + 1).min(o.growth);
+        }
+    }
+
+    /// One tick of the cards' timers and stances.
+    fn card_tick(&mut self, hz: f32) {
+        let c = &mut self.cards;
+        c.veil_cd = c.veil_cd.saturating_sub(1);
+        c.moon_cd = c.moon_cd.saturating_sub(1);
+        c.wisp_cd = c.wisp_cd.saturating_sub(1);
+        c.rush = c.rush.saturating_sub(1);
+        c.planted = self.still as f32 >= 2.0 * hz;
+        c.settled = self.still as f32 >= 3.0 * hz;
+    }
+
+    /// The skill about to be cast is free (no SP, and with the Moonlight
+    /// Flower no cooldown): read before the SP check, nothing spent.
+    pub(super) fn free_cast(&self) -> (bool, bool) {
+        let o = &self.gear.procs;
+        let moon = o.moon > 0 && self.cards.moon_cd == 0;
+        let fox = o.free_every > 0 && (self.cards.casts + 1).is_multiple_of(o.free_every as u32);
+        (moon || fox, moon)
+    }
+
+    /// A skill went off: counts it, spends the Moonlight Flower's charge.
+    /// Returns (SP free, cooldown free); `roll` is a d100 when the
+    /// Vocal's card is worn (else unused).
+    pub(super) fn card_cast(&mut self, hz: f32, roll: impl FnOnce() -> u32) -> (bool, bool) {
+        let o = self.gear.procs;
+        if o.is_none() {
+            return (false, false);
+        }
+        let (free, moon) = self.free_cast();
+        self.cards.casts += 1;
+        if moon {
+            self.cards.moon_cd = (o.moon as f32 * hz) as u32;
+        }
+        let encore = o.free_cd > 0 && roll() <= o.free_cd as u32;
+        (free, moon || encore)
     }
 
     /// The combo as the client sees it.
@@ -409,9 +527,18 @@ impl Fighter {
     }
 
     fn afflict_inner(&mut self, c: Condition, ticks: u16) {
-        if self.mods.steady && matches!(c, Condition::Stunned | Condition::Frozen) {
+        let o = &self.gear.procs;
+        if o.immune & c.bit() != 0 {
             return;
         }
+        let planted = o.still_ac != 0 && self.cards.planted;
+        if (self.mods.steady || planted) && matches!(c, Condition::Stunned | Condition::Frozen) {
+            return;
+        }
+        if c == Condition::Feared && o.desperate_ac != 0 && self.desperate() {
+            return;
+        }
+        let ticks = if o.cond_short > 0 { ((ticks as u32 * (100 - o.cond_short as u32) / 100).max(1)) as u16 } else { ticks };
         let t = &mut self.cond[c as usize];
         *t = (*t).max(ticks);
         self.status.0 |= c.bit();
@@ -442,7 +569,10 @@ impl Fighter {
 
     /// Armour class with buffs and conditions.
     pub(super) fn armour(&self) -> i32 {
-        self.ac + self.mods.ac + self.status.ac()
+        let o = &self.gear.procs;
+        let planted = if self.cards.planted { o.still_ac as i32 } else { 0 };
+        let desperate = if o.desperate_ac != 0 && self.desperate() { o.desperate_ac as i32 } else { 0 };
+        self.ac + self.mods.ac + self.status.ac() + planted + desperate
     }
 
     /// Saving throw bonus against `c` (or a plain Reflex save).
@@ -454,7 +584,18 @@ impl Fighter {
     /// Takes a hit: resistance and armour, then temporary HP, then HP.
     /// Returns what came off HP and temporary HP together.
     pub(super) fn take(&mut self, amount: i32, physical: bool) -> i32 {
-        let a = self.mods.taken(amount, physical);
+        let mut a = self.mods.taken(amount, physical);
+        let o = self.gear.procs;
+        // The Golden Thief Bug's card: magic turns to coin.
+        if o.gilded > 0 && !physical && a > 0 {
+            let cut = a * o.gilded as i32 / 100;
+            a -= cut;
+            self.add_zeny(cut as u64);
+        }
+        // The Jiangshi General's: no blow takes more than a share.
+        if o.blow_cap > 0 {
+            a = a.min((self.max_hp * o.blow_cap as i32 / 100).max(1));
+        }
         let soak = a.min(self.temp_hp);
         self.temp_hp -= soak;
         let mut rest = a - soak;
@@ -508,9 +649,17 @@ impl Fighter {
     /// Downed at 0 HP (conditions end).
     pub(super) fn fall_if_spent(&mut self, hz: f32) {
         if self.hp <= 0 && self.is_up() {
+            // The Angeling's card: once per expedition, not yet.
+            if self.gear.procs.last_stand && !self.cards.stood {
+                self.cards.stood = true;
+                self.hp = (self.max_hp * 3 / 10).max(1);
+                return;
+            }
             self.hp = 0;
             self.tally().deaths += 1;
-            self.state = Vital::Downed { ticks: (DOWNED_SECS * hz) as u32 };
+            let bleed = if self.gear.procs.deathless { 2.0 } else { 1.0 };
+            self.state = Vital::Downed { ticks: (DOWNED_SECS * bleed * hz) as u32 };
+            self.cards.growth = 0;
             self.revive = 0;
             self.clear_conditions();
             self.regen = [None, None];
@@ -521,6 +670,7 @@ impl Fighter {
     /// whatever was standing or bleeding out.
     pub(super) fn perish(&mut self, hz: f32) {
         self.hp = 0;
+        self.cards.stood = true;
         self.fall_if_spent(hz);
         self.state = Vital::Dead;
         self.revive = 0;
@@ -612,6 +762,10 @@ impl Fighter {
         // The fog's toll is not a timed effect: a relog keeps it.
         self.fog = old.fog;
         self.fog_dead = old.fog_dead;
+        // The cards' run counters are spent like HP.
+        self.cards.stood = old.cards.stood;
+        self.cards.kills = old.cards.kills;
+        self.cards.growth = old.cards.growth;
     }
 
     /// The clear bonus of mission modifiers: experience (levelling as kills
@@ -729,6 +883,12 @@ impl HubInstance {
         //    cone in front for melee, a splash at the impact for ranged; the
         //    target is the nearest monster in reach (index queries only).
         let mut targets: Vec<u16> = Vec::new();
+        // The Baby Desert Wolf's card: who stands where (only when worn).
+        let pack: Vec<(u32, f32, f32)> = if self.players.iter().any(|p| p.fighter.as_ref().is_some_and(|f| f.procs().pack != 0)) {
+            self.players.iter().filter(|p| p.map == map && p.fighter.as_ref().is_some_and(Fighter::is_up)).map(|p| (p.profile.user_id, p.x, p.y)).collect()
+        } else {
+            Vec::new()
+        };
         for p in self.players.iter_mut().filter(|p| p.map == map) {
             let Some(f) = p.fighter.as_mut() else { continue };
             f.attack_cd = f.attack_cd.saturating_sub(1);
@@ -747,14 +907,25 @@ impl HubInstance {
             }
             let weapon = f.weapon;
             let mut m = f.mods;
+            let o = *f.procs();
             // Katars crit a step earlier.
             m.crit += weapon.kind.crit();
             let (dice, kind) = weapon.damage(f.class, f.level);
-            let damage = Damage::new(Dice { bonus: dice.bonus + m.damage_flat, ..dice }, kind);
+            // A card's element replaces the weapon's.
+            let kind = o.endow.unwrap_or(kind);
+            let uid0 = p.profile.user_id;
+            let near = o.pack != 0
+                && pack.iter().any(|&(u, x, y)| u != uid0 && (x - p.x).powi(2) + (y - p.y).powi(2) <= 25.0);
+            if near {
+                m.to_hit += o.pack as i32;
+            }
+            let flat = m.damage_flat + if near { o.pack as i32 } else { 0 } + f.cards.growth as i32;
+            let damage = Damage::new(Dice { bonus: dice.bonus + flat, ..dice }, kind);
             let (range, arc_cos, splash) = match weapon.reach {
                 Reach::Melee { range, arc_cos } => (range, Some(arc_cos), 0.0),
-                Reach::Ranged { range, splash } => (range, None, splash),
+                Reach::Ranged { range, splash } => (range + o.reach as f32, None, splash),
             };
+            let ranged = arc_cos.is_none();
             // Monsters first; a plant only when the player means it (aim.rs).
             let Some(target) = horde.nearest_foe(p.x, p.y, range).map(|(s, _)| s).or_else(|| aimed_plant(horde, p.x, p.y, p.aim, range)) else {
                 continue;
@@ -779,7 +950,10 @@ impl HubInstance {
             if ambush {
                 f.unhide();
             }
-            let venom = ticks16(VENOM_SECS, hz);
+            let venom = ticks16(VENOM_SECS * if o.venom_long { 2.0 } else { 1.0 }, hz);
+            // The Bongun's counter: the first blow of this swing.
+            let mut counter = if f.cards.counter && o.counter > 0 { o.counter as u32 } else { 0 };
+            f.cards.counter = false;
             let entity = p.profile.character_id;
             let uid = p.profile.user_id;
             let k = cantrip_k(f.level);
@@ -795,9 +969,36 @@ impl HubInstance {
                     match attack_roll(rng, weapon.to_hit(f.level) + m.to_hit + bless, ac, advantage, m.crit_from()) {
                         AttackOutcome::Miss => hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS }),
                         outcome => {
+                            let def = horde.catalog().get(horde.store().kind[s as usize]);
+                            let (evil, size, elite) = (def.evil, def.size, matches!(def.archetype, Archetype::Elite | Archetype::Boss));
+                            let hp_now = horde.store().hp[s as usize];
+                            // The Desert Wolf's card: the weak are finished.
+                            let cull = o.cull && hp_now * 5 <= block.hp;
                             // A plant takes one HP whatever lands (wound).
-                            let crit = outcome == AttackOutcome::Critical && !horde.is_plant(s);
-                            let bane = if horde.catalog().get(horde.store().kind[s as usize]).evil { m.evil_damage } else { 0 };
+                            let crit = (outcome == AttackOutcome::Critical || cull) && !horde.is_plant(s);
+                            let mut bane = if evil { m.evil_damage } else { 0 };
+                            if !o.is_none() && !horde.is_plant(s) {
+                                bane += o.size_bonus(size);
+                                if status.0 != 0 {
+                                    bane += o.afflicted_bane as i32;
+                                }
+                                if status.has(Condition::Stunned) || status.has(Condition::Frozen) || status.has(Condition::Rooted) || status.has(Condition::Slowed) {
+                                    bane += o.held_bane as i32;
+                                }
+                                if elite || horde.store().affix[s as usize] != 0 {
+                                    bane += o.elite_bane as i32;
+                                }
+                                if o.fresh > 0 && hp_now >= block.hp {
+                                    bane += rng.die(o.fresh as u32) as i32;
+                                }
+                                if crit && ranged && o.crit_die > 0 {
+                                    bane += rng.die(o.crit_die as u32) as i32;
+                                }
+                                if counter > 0 {
+                                    bane += Dice::new(counter, 6, 0).roll(rng, false);
+                                    counter = 0;
+                                }
+                            }
                             let amount = wound(horde, rng, s, damage, m.damage, crit, false, k) + bane;
                             horde.store_mut().hp[s as usize] -= bane;
                             let dead = horde.store().hp[s as usize] <= 0;
@@ -815,6 +1016,9 @@ impl HubInstance {
                             }
                             if m.venom > 0 && amount > 0 && rng.die(100) <= m.venom {
                                 envenom(horde, s, venom);
+                            }
+                            if !o.is_none() && amount > 0 {
+                                card_hit(&o, f, horde, rng, s, crit, hz, &mut hits, p.profile.character_id);
                             }
                         }
                     }
@@ -849,6 +1053,7 @@ impl HubInstance {
                     && f.is_up()
                 {
                     f.combo.kill(1, hz);
+                    f.card_kill(hz);
                     let best = f.combo.count();
                     let r = f.tally();
                     r.best_combo = r.best_combo.max(best);
@@ -883,10 +1088,15 @@ impl HubInstance {
                 let shares = share_kill(loot::scale_amount(kill_value(level, def.archetype), paid, rng), level, &levels);
                 let zeny = loot::scale_amount(items::kill_zeny(level, def.archetype), paid, rng);
                 let mut it = shares.into_iter();
+                let starred = matches!(def.archetype, Archetype::Elite | Archetype::Boss) || store.affix[s as usize] != 0;
                 for p in self.players.iter_mut().filter(|p| p.map == map) {
                     if let Some(f) = p.fighter.as_mut() {
                         let before = f.level;
                         f.gain(it.next().unwrap_or(0));
+                        // Cards that pay more (rolled only when worn).
+                        let o = f.procs();
+                        let pct = o.zeny_pct as u32 + if starred { o.elite_zeny as u32 } else { 0 };
+                        let zeny = if pct > 0 && zeny > 0 { loot::scale_amount(zeny, 1000 + 10 * pct, rng) } else { zeny };
                         f.zeny += zeny;
                         f.run_zeny += zeny;
                         if f.level > before && f.is_up() {
@@ -1005,9 +1215,18 @@ impl HubInstance {
                 // Safety Wall: the blow lands on the ward.
                 w.absorb();
                 hits.push(HitEvent { target: id, amount: 0, flags: hit::GUARD });
+            } else if f.procs().veil > 0 && f.cards.veil_cd == 0 {
+                // The Sandman's card: the sand takes it.
+                f.cards.veil_cd = (f.procs().veil as f32 * hz) as u32;
+                hits.push(HitEvent { target: id, amount: 0, flags: hit::GUARD });
             } else if f.mods.block > 0 && rng.chance(f.mods.block) {
                 // Auto Guard: the shield takes it.
                 hits.push(HitEvent { target: id, amount: 0, flags: hit::GUARD });
+                card_guarded(f, horde, rng, s, true, hz, &mut hits);
+            } else if f.procs().dodge > 0 && rng.chance(f.procs().dodge as u32) {
+                // The Creamy's card: a flutter aside.
+                hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS });
+                card_guarded(f, horde, rng, s, false, hz, &mut hits);
             } else {
                 let advantage = (status.advantage() + f.status.advantage_against() - off_target as i8).clamp(-1, 1);
                 match attack_roll(rng, block.attack, f.armour(), advantage, 20) {
@@ -1020,6 +1239,9 @@ impl HubInstance {
                         hits.push(HitEvent { target: id, amount: amount as u32, flags });
                         // Affixes: Vampiric heals, an enchantment adds its element.
                         super::affix::melee(horde, s, &block, f, id, amount, rng, hz, &mut hits);
+                        if !f.procs().is_none() {
+                            card_struck(f, horde, rng, s, hz, &mut hits);
+                        }
                         f.fall_if_spent(hz);
                     }
                 }
@@ -1053,6 +1275,7 @@ impl HubInstance {
             }
             match f.state {
                 Vital::Up => {
+                    f.card_tick(hz);
                     // Burning and poison bite once a second (staggered).
                     if f.status.ailing() && (tick + uid).is_multiple_of(every) {
                         for (c, kind) in [(Condition::Burning, DamageType::Fire), (Condition::Poisoned, DamageType::Poison)] {
@@ -1074,6 +1297,11 @@ impl HubInstance {
                     }
                     if f.mods.hp_regen > 0.0 && f.hp < f.max_hp {
                         f.regen_hp += f.max_hp as f32 * f.mods.hp_regen / hz;
+                    }
+                    // The Hode's card: dug in, it heals.
+                    let still_regen = f.procs().still_regen;
+                    if still_regen > 0 && f.cards.settled && f.hp < f.max_hp {
+                        f.regen_hp += f.max_hp as f32 * still_regen as f32 / 1000.0 / hz;
                     }
                     let sp_rate = if p.dir == (0.0, 0.0) { 0.02 } else { 0.005 } + f.mods.sp_regen;
                     if f.sp < f.max_sp {
@@ -1098,7 +1326,7 @@ impl HubInstance {
                     f.revive = if helped { f.revive + 1 } else { f.revive.saturating_sub(1) };
                     if f.revive as f32 >= REVIVE_SECS * hz {
                         f.state = Vital::Up;
-                        f.hp = (f.max_hp / 4).max(1);
+                        f.hp = (f.max_hp / if f.procs().deathless { 2 } else { 4 }).max(1);
                         f.revive = 0;
                         f.quiet = 0;
                     } else if !helped && ticks <= 1 {
@@ -1235,6 +1463,81 @@ impl HubInstance {
             }
         }
         out.push((p.profile.user_id, HubEvent::Control(f.progress())));
+    }
+}
+
+
+/// Seconds of the conditions the cards put on monsters.
+const CARD_COND_SECS: f32 = 3.0;
+const CARD_STING_SECS: f32 = 4.0;
+
+/// What the worn cards do when a basic attack lands on monster `s` (each
+/// rolls only when its card is worn, so a fighter without cards keeps the
+/// dice stream it had).
+#[allow(clippy::too_many_arguments)]
+fn card_hit(o: &Procs, f: &mut Fighter, horde: &mut Horde, rng: &mut combat::Rng, s: u16, crit: bool, hz: f32, hits: &mut Vec<HitEvent>, me: u32) {
+    let t = ticks16(CARD_COND_SECS, hz);
+    if o.ignite > 0 && rng.chance(o.ignite as u32) {
+        inflict(horde, s, Condition::Burning, t, 1);
+    }
+    if o.chill > 0 && rng.chance(o.chill as u32) {
+        inflict(horde, s, Condition::Slowed, t, 1);
+    }
+    if crit && o.crit_sting {
+        let t = ticks16(CARD_STING_SECS, hz);
+        inflict(horde, s, Condition::Poisoned, t, 1);
+        inflict(horde, s, Condition::Slowed, t, 1);
+    }
+    if crit && o.crit_zeny {
+        let n = horde.store().level[s as usize] as u64;
+        f.add_zeny(n);
+        f.run_zeny += n;
+    }
+    if o.leech > 0 && f.hp < f.max_hp && rng.chance(o.leech as u32) {
+        let h = rng.die(4) as i32;
+        f.hp = (f.hp + h).min(f.max_hp);
+        hits.push(HitEvent { target: me, amount: h as u32, flags: hit::HEAL });
+    }
+}
+
+/// Damage to monster `s` that never kills it (thorns, ripostes): the kill
+/// list of this tick is already done.
+fn sting_back(horde: &mut Horde, s: u16, amount: i32, hits: &mut Vec<HitEvent>) {
+    let hp = &mut horde.store_mut().hp[s as usize];
+    let d = amount.min(*hp - 1).max(0);
+    *hp -= d;
+    if d > 0 {
+        hits.push(HitEvent { target: MONSTER_ENTITY_BASE + s as u32, amount: d as u32, flags: damage_type_bits(DamageType::Physical) });
+    }
+}
+
+/// A melee blow blocked (`blocked`) or dodged: the cards' answers.
+fn card_guarded(f: &mut Fighter, horde: &mut Horde, rng: &mut combat::Rng, s: u16, blocked: bool, hz: f32, hits: &mut Vec<HitEvent>) {
+    let o = *f.procs();
+    if o.counter > 0 {
+        f.cards.counter = true;
+    }
+    if !blocked && o.dodge_rush {
+        f.cards.rush = (2.0 * hz) as u32;
+    }
+    if blocked && o.riposte > 0 {
+        let d = rng.die(o.riposte as u32) as i32;
+        sting_back(horde, s, d, hits);
+    }
+}
+
+/// A melee blow landed on the fighter: thorns and what the shield spits back.
+fn card_struck(f: &mut Fighter, horde: &mut Horde, rng: &mut combat::Rng, s: u16, hz: f32, hits: &mut Vec<HitEvent>) {
+    let o = *f.procs();
+    if o.thorns > 0 {
+        let d = rng.die(o.thorns as u32) as i32;
+        sting_back(horde, s, d, hits);
+    }
+    if o.slow_back > 0 && rng.chance(o.slow_back as u32) {
+        inflict(horde, s, Condition::Slowed, ticks16(CARD_COND_SECS, hz), 1);
+    }
+    if o.blind_back > 0 && rng.chance(o.blind_back as u32) {
+        inflict(horde, s, Condition::Blinded, ticks16(CARD_STING_SECS, hz), 1);
     }
 }
 

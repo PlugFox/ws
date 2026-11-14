@@ -233,6 +233,14 @@ pub const WEAPONS: &[Weapon] = &[
     w("ember_staff", "Staff of Embers", WeaponKind::Staff, 2, 1, 8, 16000),
     w("tome_of_mercy", "Tome of Mercy", WeaponKind::Book, 2, 1, 6, 6000),
     w("shadowfang", "Shadowfang", WeaponKind::Katar, 2, 1, 6, 16000),
+    w("guardian_blade", "Guardian Blade", WeaponKind::Sword, 2, 1, 8, 6000),
+    w("giantsbane", "Giantsbane", WeaponKind::TwoHandSword, 2, 2, 6, 16000),
+    w("stalker_bow", "Stalker's Longbow", WeaponKind::Bow, 2, 1, 10, 7000),
+    w("scorpion_jur", "Scorpion Jur", WeaponKind::Katar, 1, 1, 6, 5000),
+    w("moonlit_rod", "Moonlit Rod", WeaponKind::Staff, 1, 1, 6, 5000),
+    w("crusader_pike", "Crusader's Pike", WeaponKind::Spear, 2, 1, 10, 6000),
+    w("soul_stiletto", "Soulreaver Stiletto", WeaponKind::Dagger, 2, 1, 4, 6000),
+    w("thunder_axe", "Thunderhead Axe", WeaponKind::Axe, 2, 1, 8, 16000),
 ];
 
 impl Weapon {

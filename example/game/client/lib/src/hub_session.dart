@@ -21,6 +21,7 @@ import 'package:game_client/src/interpolation.dart';
 import 'package:game_client/src/key_bindings.dart';
 import 'package:game_client/src/prediction.dart';
 import 'package:game_client/src/protocol.dart';
+import 'package:game_client/src/refine.dart';
 import 'package:game_client/src/tips.dart';
 import 'package:game_client/src/version.dart';
 import 'package:game_client/src/walk_grid.dart';
@@ -221,11 +222,20 @@ final class HubSession {
 
   /// The stylist window is open (NPC id), and a restyle is in flight.
   String? _stylist;
+
+  /// The smith the refine window is for (id, name) while it is open, and
+  /// the row of the attempt on its way (null: none; its answer plays in the
+  /// window, which then lists the item under its new key).
+  ({String id, String name})? _refiner;
+  String? _refining;
   bool _styling = false;
   String _channel = '-';
 
   /// In a stage instance (not the hub).
   bool _inStage = false;
+
+  /// Cards dropped on this run, shown (turned over) back in town.
+  final _newCards = <String>[];
 
   /// Players online (beside the town's minimap, the Ranking tab's footer).
   late final _pulse = OnlinePoller(() => api.json('/api/online'), (_) => _showOnline(), every: const Duration(seconds: 30));
@@ -667,6 +677,7 @@ final class HubSession {
     }
     _resumeOffer = r;
     _npcDialog = false;
+    _dropRefiner();
     final secs = (r.leftMs / 1000).ceil();
     view.showDialog(
       jsonEncode({
@@ -811,7 +822,14 @@ final class HubSession {
         view.setMissionClock('', 0, false);
         view.setMissionModifiers(jsonEncode({'scope': 'stage'}));
         _vitals.clear();
-        if (_inStage) _inStage = false;
+        if (_inStage) {
+          _inStage = false;
+          // The cards found on the run, the first one turned over.
+          if (_newCards.isNotEmpty) {
+            view.showCard(_newCards.first, true);
+            _newCards.clear();
+          }
+        }
         _renderParty();
         _showOnline();
         _devMission();
@@ -896,8 +914,13 @@ final class HubSession {
       case HubError(:final message) when _shopNpc != null:
         view.shopNote(message);
         view.toast(message);
+      case HubError(:final message) when _refining != null && _refiner != null:
+        // The attempt did not go through (no ore, too far): the window says so.
+        _refining = null;
+        view.refineResult(jsonEncode({'error': message}));
       case LobbyError(:final message) || HubError(:final message):
         view.toast(message);
+        _refining = null;
       case final Inventory inv:
         _inventory = inv;
         // Gear changed the derived numbers (armour class, weapon).
@@ -907,6 +930,9 @@ final class HubSession {
         }
         _renderInventory();
         _renderStatus();
+        // The smith's list follows the bag (loot, a sale) while it is open;
+        // an attempt's answer redraws it with the outcome.
+        if (_refiner != null && _refining == null && view.dialogOpen()) _showRefiner();
       case ItemDefs(:final items):
         _itemDefs
           ..clear()
@@ -914,6 +940,7 @@ final class HubSession {
         view.setItems(
           jsonEncode({
             'icons': '$assetsBase/client/items/icons',
+            'cards': '$assetsBase/client/cards',
             'items': [
               for (final d in items)
                 {
@@ -925,6 +952,8 @@ final class HubSession {
                   'classes': d.classes,
                   'desc': d.desc,
                   'rarity': d.rarity,
+                  if (d.sockets > 0) 'sockets': d.sockets,
+                  if (d.card > 0) ...{'card': d.card, 'prefix': d.prefix, 'suffix': d.suffix, 'monster': d.monster},
                 },
             ],
           }),
@@ -935,6 +964,25 @@ final class HubSession {
         view.showShop(jsonEncode({'npc': npc, 'name': name, 'items': items}));
       case ShopDone(:final spent, :final earned):
         view.shopDone(spent, earned);
+      case Refined(:final item, :final ok, :final refine, :final slip):
+        final row = _refining;
+        _refining = null;
+        if (row == null || _refiner == null) {
+          // The window was closed meanwhile: a toast tells how it went.
+          final name = _itemDefs[splitKey(item).id]?.name ?? item;
+          view.toast(ok ? 'Success! Your $name is now +$refine.' : 'The hammer slipped... your $name fell back to +$refine.');
+          return;
+        }
+        // `<slot | b>:<key>`: the level before, and the row it is now.
+        final i = row.indexOf(':');
+        view.refineResult(
+          jsonEncode({'ok': ok, 'item': item, 'from': splitKey(row.substring(i + 1)).refine, 'to': refine, 'slip': slip}),
+        );
+        _showRefiner(select: '${row.substring(0, i)}:$item');
+      case Carded(:final inserted, :final item, :final card):
+        view.cardCarded(item);
+        final name = _itemDefs[card]?.name ?? card;
+        view.toast(inserted ? '$name socketed.' : '$name taken out.');
       case ItemUsed(:final item):
         final d = _itemDefs[item];
         if (d != null) view.toast('${d.name}: ${d.desc.split('\n').first.replaceAll('**', '')}');
@@ -947,12 +995,16 @@ final class HubSession {
         if (rare) {
           final def = _itemDefs[item];
           final name = def?.name ?? item;
-          final what = switch (def?.rarity ?? 0) {
-            2 => 'Rare magic item',
-            1 => 'Magic item',
-            _ => 'Rare drop',
-          };
+          final what = def?.kind == 9
+              ? 'Monster card'
+              : switch (def?.rarity ?? 0) {
+                  2 => 'Rare magic item',
+                  1 => 'Magic item',
+                  _ => 'Rare drop',
+                };
           view.toast('$what: ${count > 1 ? '$count × ' : ''}$name!');
+          // A card is turned over back in town (not in the fight).
+          if (def?.kind == 9 && _inStage && !_newCards.contains(item)) _newCards.add(item);
         }
       case Combo(:final count, :final rank, :final windowMs, :final leftMs):
         _combo = count;
@@ -2086,6 +2138,7 @@ final class HubSession {
     }
     _inviteFrom = inv.from;
     _npcDialog = false;
+    _dropRefiner();
     view.showDialog(
       jsonEncode({
         'id': 'party_invite',
@@ -2159,6 +2212,12 @@ final class HubSession {
 
   void _onNpcDialog(NpcDialog msg) {
     if (msg.npc != _devNpc) _devNpc = null;
+    if (msg.kind == 'refiner') {
+      _refiner = (id: msg.npc, name: msg.name);
+      _showRefiner();
+      return;
+    }
+    _dropRefiner();
     if (msg.kind == 'stylist') {
       view.closeDialog();
       _stylist = msg.npc;
@@ -2259,6 +2318,56 @@ final class HubSession {
         if (isBoard && !inLobby) 'input': {'id': 'code', 'label': 'Join', 'placeholder': 'Party code', 'maxLength': 8},
       }),
     );
+  }
+
+  /// The smith's refine window: every refinable item worn, then in the
+  /// bag, each with its next attempt worked out (`refineRow`); [select]
+  /// picks a row (an attempt's item under its new key).
+  void _showRefiner({String? select}) {
+    final smith = _refiner, inv = _inventory;
+    if (smith == null || inv == null) return;
+    final npc = _npcs.where((n) => n.id == smith.id).firstOrNull;
+    final rows = <Map<String, Object?>>[];
+    void offer(String key, int? slot) {
+      final def = _itemDefs[splitKey(key).id];
+      if (def == null) return;
+      final row = refineRow(
+        def,
+        key,
+        slot,
+        have: inv.count,
+        oreName: (ore) => _itemDefs[ore]?.name ?? ore,
+        zeny: inv.zeny,
+      );
+      if (row != null) rows.add(row);
+    }
+
+    for (var s = 0; s < inv.equip.length; s++) {
+      if (inv.equip[s].isNotEmpty) offer(inv.equip[s], s);
+    }
+    for (final st in inv.items) {
+      offer(st.id, null);
+    }
+    _npcDialog = true;
+    view.showRefine(
+      jsonEncode({
+        'npc': smith.id,
+        'name': smith.name,
+        'text': npc?.text ?? 'What shall I refine?',
+        'zeny': inv.zeny,
+        'rows': rows,
+        'select': ?select,
+        'rules': refineRules,
+      }),
+    );
+  }
+
+  /// The smith's window goes (another window takes over, out of reach).
+  void _dropRefiner() {
+    if (_refiner == null) return;
+    _refiner = null;
+    _refining = null;
+    view.showRefine('');
   }
 
   /// One line for the Kafra's "Choose an expedition": how many, which levels.
@@ -2655,6 +2764,7 @@ final class HubSession {
         }
       case ('party', 'code'):
         _npcDialog = false;
+        _dropRefiner();
         view.showDialog(
           jsonEncode({
             'id': 'party_code',
@@ -2772,6 +2882,17 @@ final class HubSession {
           _inviteFrom = null;
           if (from != null) _send(ClientMsg.partyAnswer(from, accept: false));
         }
+      case 'refine_strike':
+        // `<slot | b>:<key>` (refineRow).
+        final row = '${e['row'] ?? ''}', i = row.indexOf(':');
+        final smith = _refiner;
+        if (smith == null || i < 0 || _refining != null) return;
+        _refining = row;
+        _send(ClientMsg.refine(smith.id, row.substring(i + 1), int.tryParse(row.substring(0, i))));
+      case 'refine_close':
+        _refiner = null;
+        _refining = null;
+        _npcDialog = false;
       case 'style_apply':
         if (_stylist == null || _styling) return;
         _styling = true;
@@ -2828,6 +2949,16 @@ final class HubSession {
         _send(ClientMsg.equip(e['item']! as String, (e['slot'] as num?)?.toInt()));
       case 'item_unequip':
         _send(ClientMsg.unequip((e['slot']! as num).toInt()));
+      case 'card_insert' || 'card_remove':
+        final slot = (e['slot'] as num?)?.toInt() ?? 255;
+        _send(
+          ClientMsg.card(
+            insert: e['type'] == 'card_insert',
+            item: e['item']! as String,
+            slot: slot == 255 ? null : slot,
+            card: e['card']! as String,
+          ),
+        );
       case 'shop_buy' || 'shop_sell':
         final npc = e['npc']! as String, item = e['item']! as String, n = (e['count']! as num).toInt();
         _send(e['type'] == 'shop_buy' ? ClientMsg.shopBuy(npc, item, n) : ClientMsg.shopSell(npc, item, n));
@@ -3300,6 +3431,7 @@ final class HubSession {
   /// The game menu (Esc, the gamepad's Start, the touch ☰ button).
   void _toggleMenu() {
     _npcDialog = false;
+    _dropRefiner();
     if (view.dialogOpen()) {
       view.closeDialog();
       _settingsOpen = false;
@@ -3382,6 +3514,7 @@ final class HubSession {
 
   void _showControls() {
     _npcDialog = false;
+    _dropRefiner();
     final b = _binds;
     String k(KeyBinding? x, String fallback) => x?.caption ?? fallback;
     view.showDialog(
@@ -4083,6 +4216,7 @@ final class HubSession {
     if (_nearNpc == null && _npcDialog && view.dialogOpen() && !_settingsOpen && _devNpc == null) {
       view.closeDialog();
       _npcDialog = false;
+      _dropRefiner();
     }
     view.setHint(
       _nearNpc != null && !view.dialogOpen()

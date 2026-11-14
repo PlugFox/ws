@@ -6,6 +6,7 @@ import 'package:game_client/src/classes.dart';
 import 'package:game_client/src/interpolation.dart';
 import 'package:game_client/src/prediction.dart';
 import 'package:game_client/src/protocol.dart';
+import 'package:game_client/src/refine.dart';
 import 'package:game_client/src/walk_grid.dart';
 import 'package:test/test.dart';
 
@@ -99,12 +100,16 @@ void main() {
       expect(inv.count('red_potion'), 5);
       expect(inv.equip, ['', '', '', 'cotton_shirt', 'sword', '', '', '', '', '']);
       expect(inv.statsJson, '{"ac":12}');
-      final defs = ServerMsg.decode(hex('3b0103636170034361700500a01f0b052b3120414302'))! as ItemDefs;
-      final cap = defs.items.single;
+      final defs = ServerMsg.decode(hex(
+        '3b0203636170034361700500a01f0b052b31204143020401000000000a64726f70735f636172640a44726f7073204361726409ff90031f04436172640000000300084b696e646c696e670564726f7073',
+      ))! as ItemDefs;
+      final cap = defs.items.first;
       expect(
-        (cap.id, cap.name, cap.kind, cap.slot, cap.price, cap.classes, cap.desc, cap.rarity),
-        ('cap', 'Cap', 5, 0, 4000, 11, '+1 AC', 2),
+        (cap.id, cap.name, cap.kind, cap.slot, cap.price, cap.classes, cap.desc, cap.rarity, cap.refineSafe, cap.sockets, cap.card),
+        ('cap', 'Cap', 5, 0, 4000, 11, '+1 AC', 2, 4, 1, 0),
       );
+      final card = defs.items.last;
+      expect((card.id, card.kind, card.slot, card.card, card.prefix, card.suffix, card.monster), ('drops_card', 9, null, 3, '', 'Kindling', 'drops'));
       final shop = ServerMsg.decode(hex('3c04646567610444656761010573776f7264'))! as Shop;
       expect((shop.npc, shop.name), ('dega', 'Dega'));
       expect(shop.items, ['sword']);
@@ -340,6 +345,14 @@ void main() {
       );
       final d = ServerMsg.decode(hex('8dd804e209'))! as ShopDone;
       expect((d.spent, d.earned), (600, 1250));
+      expect(toHex(ClientMsg.refine('smith', 'sword+7', 4)), '8e05736d6974680773776f72642b3704');
+      final r = ServerMsg.decode(hex('8f0773776f72642b38010800'))! as Refined;
+      expect((r.item, r.ok, r.refine, r.slip), ('sword+8', true, 8, 0));
+      final f = ServerMsg.decode(hex('8f0773776f72642b35000503'))! as Refined;
+      expect((f.item, f.ok, f.refine, f.slip), ('sword+5', false, 5, 3));
+      expect(toHex(ClientMsg.card(insert: true, item: 'sword+7', slot: 4, card: 'drops_card')), '94000773776f72642b37040a64726f70735f63617264');
+      final c = ServerMsg.decode(hex('95010573776f72640b686f726e65745f63617264'))! as Carded;
+      expect((c.inserted, c.item, c.card), (false, 'sword', 'hornet_card'));
     });
 
     test('feedback goldens (protocol.rs `golden::feedback`)', () {
@@ -626,6 +639,84 @@ void main() {
       expect(facingOf(0, -1), 4);
       expect(facingOf(-1, 0), 6);
       expect(facingOf(1, 1), 1);
+    });
+  });
+
+  group('refine', () {
+    ItemDef def(String id, int kind, int safe) {
+      final w = WireWriter(Kind.itemDefs)
+        ..varint(1)
+        ..str(id)
+        ..str(id)
+        ..u8(kind)
+        ..u8(0)
+        ..varint(100)
+        ..u8(31)
+        ..str('')
+        ..u8(0)
+        ..u8(safe)
+        ..u8(0)
+        ..u8(0)
+        ..str('')
+        ..str('')
+        ..str('');
+      return (ServerMsg.decode(w.done())! as ItemDefs).items.single;
+    }
+
+    String table(ItemDef d) => [
+      for (var r = 0; r < maxRefine; r++)
+        if (refineStep(d, r) case final s?) '${s.to}:${s.ore.substring(0, 2)}:${s.fee}:${s.chance}${s.chance < 100 ? 'd${s.slip}' : ''}',
+    ].join(' ');
+
+    test('refine table (combat/refine.rs `ores_fees_and_odds_follow_the_level`)', () {
+      expect(
+        table(def('sword', 2, 7)),
+        '1:ph:50:100 2:ph:100:100 3:ph:200:100 4:ph:400:100 5:em:1000:100 6:em:2000:100 7:em:4000:100 8:or:10000:70d4 9:or:20000:55d6 10:or:40000:40d8',
+      );
+      expect(
+        table(def('blade', 2, 5)),
+        '1:ph:50:100 2:ph:100:100 3:ph:200:100 4:ph:400:100 5:em:1000:100 6:em:2000:70d2 7:em:4000:55d4 8:or:10000:40d4 9:or:20000:30d6 10:or:40000:20d8',
+      );
+      expect(
+        table(def('coat', 3, 4)),
+        '1:ph:50:100 2:ph:100:100 3:ph:200:100 4:ph:400:100 5:em:1000:70d2 6:em:2000:55d2 7:em:4000:40d4 8:el:10000:30d4 9:el:20000:20d6 10:el:40000:10d8',
+      );
+      expect(refineStep(def('ring', 8, 0), 0), isNull);
+      expect(refineStep(def('sword', 2, 7), maxRefine), isNull);
+    });
+
+    test('bonus lines and instance keys', () {
+      expect(refineBonus(def('sword', 2, 7), 3), '+2 damage');
+      expect(refineBonus(def('coat', 3, 4), 8), '+2 AC, +24 max HP');
+      expect(refineBonus(def('boots', 7, 4), 5), '+15 max HP');
+      expect(splitKey('sword+7[a_card]'), (id: 'sword', refine: 7));
+      expect(splitKey('coat'), (id: 'coat', refine: 0));
+      expect(withRefine('sword+7[a_card]', 8), 'sword+8[a_card]');
+      expect(withRefine('sword+1', 0), 'sword');
+    });
+
+    test('the smith window rows: the next attempt against the bag and the purse', () {
+      final sword = def('sword', 2, 7);
+      Map<String, Object?>? row(String key, int? slot, {int have = 1, int zeny = 100000}) =>
+          refineRow(sword, key, slot, have: (_) => have, oreName: (o) => o == oridecon ? 'Oridecon' : o, zeny: zeny);
+      final r = row('sword+7', 4)!;
+      expect((r['id'], r['where'], r['level'], r['safe'], r['bonus'], r['blocked']), ('4:sword+7', 'Weapon · worn', 7, 7, '+4 damage', ''));
+      expect(r['next'], {
+        'to': 8,
+        'ore': oridecon,
+        'oreName': 'Oridecon',
+        'have': 1,
+        'fee': 10000,
+        'chance': 70,
+        'slip': 4,
+        'gain': '+4 damage',
+      });
+      expect(row('sword+7', null)!['id'], 'b:sword+7');
+      expect(row('sword+7', null, have: 0)!['blocked'], 'You need 1 Oridecon.');
+      expect(row('sword+7', null, zeny: 9999)!['blocked'], 'Not enough zeny: the fee is 10000 z.');
+      final top = row('sword+10', null)!;
+      expect((top.containsKey('next'), top['blocked']), (false, 'Refined to the limit: +10.'));
+      expect(refineRow(def('ring', 8, 0), 'ring', null, have: (_) => 1, oreName: (o) => o, zeny: 0), isNull);
     });
   });
 

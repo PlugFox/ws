@@ -21,6 +21,8 @@ pub enum Rarity {
     Common,
     Uncommon,
     Rare,
+    /// Boss cards (the only mythic items).
+    Mythic,
 }
 
 impl Rarity {
@@ -33,6 +35,7 @@ impl Rarity {
             Rarity::Common => "Common",
             Rarity::Uncommon => "Uncommon",
             Rarity::Rare => "Rare",
+            Rarity::Mythic => "Mythic",
         }
     }
 }
@@ -71,6 +74,14 @@ pub const MAGIC: &[Magic] = &[
     Magic { sp: 10, ..m("ember_staff", Rare, Mods { spell_power: 2, ..N }) },
     m("tome_of_mercy", Uncommon, Mods { heal_power: 3, ..N }),
     m("shadowfang", Rare, Mods { crit: 1, double: 10, ..N }),
+    m("guardian_blade", Uncommon, Mods { ac: 1, ..N }),
+    m("giantsbane", Rare, Mods { steady: true, damage_flat: 2, ..N }),
+    m("stalker_bow", Uncommon, Mods { to_hit: 1, speed: 0.05, ..N }),
+    m("scorpion_jur", Uncommon, Mods { venom: 15, haste: 0.05, ..N }),
+    m("moonlit_rod", Uncommon, Mods { sp_regen: 0.002, light: 1.0, ..N }),
+    m("crusader_pike", Uncommon, Mods { evil_damage: 2, evil_resist: 0.05, ..N }),
+    m("soul_stiletto", Uncommon, Mods { soul_drain: 1, double: 5, ..N }),
+    m("thunder_axe", Rare, Mods { damage: Some(Dice::new(1, 4, 0)), double: 5, ..N }),
     // Armour and shields.
     m("mithril_shirt", Uncommon, N),
     m("elven_mail", Rare, Mods { speed: 0.05, ..N }),
@@ -95,6 +106,20 @@ pub const MAGIC: &[Magic] = &[
     m("cutpurse_gloves", Uncommon, Mods { double: 10, ..N }),
     Magic { hp: 20, ..m("bear_amulet", Uncommon, N) },
     m("sun_pendant", Uncommon, Mods { heal_power: 2, evil_resist: 0.1, ..N }),
+    // The second batch: guards, steadiness, aim and quick hands.
+    Magic { hp: 10, ..m("bulwark_shield", Rare, Mods { block: 10, ..N }) },
+    m("steadfast_helm", Uncommon, Mods { steady: true, ..N }),
+    m("sage_robe", Rare, Mods { spell_power: 1, spell_dc: 1, ..N }),
+    m("grace_vestments", Uncommon, Mods { heal_power: 2, evil_resist: 0.05, ..N }),
+    m("shadow_tights", Uncommon, Mods { speed: 0.05, double: 5, ..N }),
+    m("warm_muffler", Uncommon, Mods { hp_regen: 0.002, ..N }),
+    m("winged_sandals", Uncommon, Mods { haste: 0.05, speed: 0.05, ..N }),
+    m("owl_spectacles", Uncommon, Mods { spell_dc: 1, ..N }),
+    m("plague_mask", Uncommon, Mods { evil_resist: 0.05, potion: 0.2, ..N }),
+    m("quickness_ring", Uncommon, Mods { haste: 0.05, speed: 0.03, ..N }),
+    m("wellspring_earring", Uncommon, Mods { sp_regen: 0.003, ..N }),
+    m("valor_medal", Uncommon, Mods { to_hit: 1, ..N }),
+    m("dawn_rosary", Uncommon, Mods { evil_damage: 2, heal_power: 1, ..N }),
 ];
 
 pub fn magic(id: &str) -> Option<&'static Magic> {
@@ -134,6 +159,12 @@ impl Magic {
         }
         if o.crit != 0 {
             ok(format!("Critical hits on {}–20", 20 - o.crit as i32));
+        }
+        if o.block != 0 {
+            ok(format!("{}% chance to block a melee blow", o.block));
+        }
+        if o.steady {
+            ok("Cannot be stunned or frozen".into());
         }
         if o.double != 0 {
             ok(format!("{}% chance to strike twice", o.double));
@@ -215,7 +246,7 @@ mod tests {
         for g in MAGIC {
             let o = &g.mods;
             assert!(o.ac <= 1 && g.saves <= 1 && o.to_hit <= 1, "{}", g.id);
-            assert!(o.crit <= 1 && o.double <= 10 && o.venom <= 15, "{}", g.id);
+            assert!(o.crit <= 1 && o.double <= 10 && o.venom <= 15 && o.block <= 10, "{}", g.id);
             assert!(o.haste <= 0.15 && o.speed <= 0.1 && o.resist <= 0.05, "{}", g.id);
             assert!(o.damage.is_none_or(|d| d.count == 1 && d.sides <= 4), "{}", g.id);
             assert!(o.spell_dc <= 1 && o.spell_power <= 2 && o.heal_power <= 3 && o.damage_flat <= 2, "{}", g.id);

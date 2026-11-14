@@ -606,6 +606,15 @@ impl Conn {
                 out.extend(self.share_bag().await);
                 out
             }
+            Some(HubEvent::Refine { item, slot, roll, slip }) => {
+                let mut done = None;
+                let mut out = self.change_bag(|_, bag| bag.refine(&item, slot, roll, slip).map(|r| done = Some(r))).await;
+                if let Some(r) = done {
+                    out.push(Out::Msg(ServerMsg::Refined { item: r.key, ok: r.ok, refine: r.refine, slip: r.slip }));
+                }
+                out.extend(self.share_bag().await);
+                out
+            }
             // A player trade went through (already stored by the vault).
             Some(HubEvent::BagChanged) => self.inventory().await.into_iter().collect(),
             Some(HubEvent::ItemUsed { item }) => self.change_bag(|_, bag| bag.take(&item, 1)).await,
@@ -632,6 +641,7 @@ impl Conn {
                 }
                 out
             }
+            Some(HubEvent::DevGive { key }) => self.change_bag(|_, bag| bag.add(&key, 1)).await,
             Some(HubEvent::LookChanged(look)) => {
                 if let Some(ch) = self.session.character.write().await.as_mut() {
                     ch.set_look(look);
@@ -818,11 +828,31 @@ impl Conn {
                 self.forward(HubCommand::Shop { user_id, npc, order: ShopOrder { buy: Vec::new(), sell: vec![(item, count.clamp(1, MAX_ORDER_COUNT))] } })
             }
             ClientMsg::ShopDeal { npc, order } => self.forward(HubCommand::Shop { user_id, npc, order }),
+            ClientMsg::Refine { npc, item, slot } => self.forward(HubCommand::Refine { user_id, npc, item, slot }),
             ClientMsg::ItemUse { item } => self.forward(HubCommand::UseItem { user_id, item }),
             ClientMsg::Friend { op } => self.on_friend(op).await,
             ClientMsg::Feedback { draft } => self.on_feedback(draft),
-            ClientMsg::Equip { .. } | ClientMsg::Unequip { .. } if !self.in_hub() => {
+            ClientMsg::Equip { .. } | ClientMsg::Unequip { .. } | ClientMsg::Card { .. } if !self.in_hub() => {
                 vec![hub_error("not_in_hub", "change your equipment in town")]
+            }
+            ClientMsg::Card { op, item, slot, card } => {
+                let at = if slot == 0xFF { None } else { Slot::from_index(slot) };
+                if slot != 0xFF && at.is_none() {
+                    return vec![hub_error(ItemError::NotInBag.code(), ItemError::NotInBag.message())];
+                }
+                let mut done = None;
+                let mut out = self
+                    .change_bag(|_, bag| {
+                        let key = if op == 0 { bag.socket(&item, at, &card)? } else { bag.unsocket(&item, at, &card)? };
+                        done = Some(key);
+                        Ok(())
+                    })
+                    .await;
+                if let Some(key) = done {
+                    out.push(Out::Msg(ServerMsg::Carded { op, item: key, card }));
+                }
+                out.extend(self.share_bag().await);
+                out
             }
             ClientMsg::Equip { item, slot } => {
                 let mut out = self.change_bag(|class, bag| bag.equip(class, &item, Slot::from_index(slot)).map(|_| ())).await;

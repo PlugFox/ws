@@ -87,6 +87,9 @@ pub enum HubCommand {
     Chat { user_id: u32, text: String },
     /// Buy and sell at a merchant NPC (checked here, applied by the socket).
     Shop { user_id: u32, npc: String, order: crate::world::trade::ShopOrder },
+    /// One refine attempt at a smith (checked and rolled here, applied by
+    /// the socket).
+    Refine { user_id: u32, npc: String, item: String, slot: u8 },
     /// Drink a potion (stages).
     UseItem { user_id: u32, item: String },
     /// Another player's worn gear (the player context menu).
@@ -472,6 +475,7 @@ async fn run_loop(
                     HubCommand::Flag { user_id, flag, x, y } => hub.flag(user_id, flag, x, y, &mut out),
                     HubCommand::Chat { user_id, text } => hub.chat(user_id, text, &mut out),
                     HubCommand::Shop { user_id, npc, order } => hub.shop(user_id, &npc, order, &mut out),
+                    HubCommand::Refine { user_id, npc, item, slot } => hub.refine(user_id, &npc, item, slot, &mut out),
                     HubCommand::UseItem { user_id, item } => hub.use_item(user_id, &item, &mut out),
                     HubCommand::Bag { user_id, bag } => hub.set_bag(user_id, bag, &mut out),
                     HubCommand::Inspect { user_id, target } => hub.inspect(user_id, target, &mut out),

@@ -196,7 +196,7 @@ List<Map<String, Object?>> guideTopics(Bindings binds, List<MissionCard> ladder,
       _fig(diagram: 'fog', caption: 'Get inside the circle'),
       _p('Late in a run the **poison fog** rises and closes in: stay inside the safe circle, it hurts more the longer you stay out.'),
     ]),
-    _topic('items', 'Items and trade', 'Gear, shops and trading', 'item:sword', [
+    _topic('items', 'Items and trade', 'Gear, shops, refining, cards and trading', 'item:sword', [
       _fig(icons: ['item:sword', 'item:helm', 'item:shield', 'item:boots'], caption: 'Weapon, headgear, shield, shoes'),
       _list([
         'Ten equipment slots: three headgear, armour, weapon, shield, garment, shoes and two accessories. **Double-click** an item to wear or use it.',
@@ -214,6 +214,36 @@ List<Map<String, Object?>> guideTopics(Bindings binds, List<MissionCard> ladder,
         'Besides their plain numbers they carry an enchantment: faster boots, a blade that burns, a wand that makes your spells harder to resist, '
         'a periapt that makes potions heal more. Every class has its own.',
       ),
+      _fig(
+        icons: ['item:phracon', 'item:emveretarcon', 'item:oridecon', 'item:elunium'],
+        labels: ['+1–4', '+5–7', 'Weapon +8–10', 'Armour +8–10'],
+        caption: 'Refine ores',
+      ),
+      _p(
+        '**Refining**: Hollgrehenn the Smith, by the weapon dealer in Izlude, hammers a weapon, body armour, shield, hat, garment or shoes '
+        'one level up, to +10, for an ore and a fee. A weapon gains damage, armour gains HP (and AC at +4 and +8).',
+      ),
+      _list([
+        '**Phracon** (+1 to +4) and **Emveretarcon** (+5 to +7) are sold by the weapon and armour dealers; **Oridecon** (weapons) and **Elunium** (armour) for +8 to +10 drop from elites and bosses.',
+        'Up to the **safe limit** it always works: +4 for armour, +4 to +7 for weapons (the lower the weapon level, the further). Past it the odds fall from 70% to 10%.',
+        'A failed refine costs the ore, the fee and a **roll of levels**: d2 up to +5, d4 at +6 and +7, d6 at +8, d8 at +9. A failed +9 can fall all the way to +1. Nothing ever breaks.',
+      ]),
+      _fig(
+        icons: ['item:poring_card', 'item:willow_card', 'item:eclipse_card', 'item:angeling_card'],
+        labels: ['Common', 'Uncommon', 'Rare', 'Mythic'],
+        caption: 'Monster cards',
+      ),
+      _p(
+        '**Monster cards**: every monster has its own card and only it drops it, rarely (elites more often, bosses for the whole party). '
+        'A card fits one kind of equipment and adds its word to the name: a Drops Card makes a **Sword of Kindling** that sets monsters alight, '
+        'a Hornet Card a **Stinging** one that hurts small monsters more.',
+      ),
+      _list([
+        'Plain gear has the most **sockets** (up to 4 on a two-handed weapon), magic gear fewer: a carded common build is a match for drops.',
+        'Socket and take cards out **for free, in town**: Equipment → **Cards**, or select an item in the inventory and press Cards. Nothing is lost; a carded item cannot be sold until it is empty.',
+        'Effects go beyond numbers: setting monsters alight, dodging, a wisp that casts Fire Bolt, a free skill every 20 s, one last stand per expedition. Sets of one family (the slimes, the desert pack, the restless dead) add more.',
+        'The **Card Album** (Equipment → Album) keeps every card you have held; double-click a card to look at it and tilt it.',
+      ]),
     ]),
     _topic('party', 'Parties', 'Playing together', 'cc:role_support', [
       _fig(diagram: 'party'),

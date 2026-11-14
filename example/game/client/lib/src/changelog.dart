@@ -6,6 +6,27 @@ typedef ChangelogEntry = ({String title, String date, List<String> items});
 
 const changelog = <ChangelogEntry>[
   (
+    title: 'Monster cards',
+    date: '2026-11-14',
+    items: [
+      'Every monster now has a card of its own, and only it drops it: rarely from the horde, more often from elites, and bosses roll one for everyone in the party. Fifty-two cards in four rarities, from bronze common to prismatic mythic.',
+      'Cards go into equipment sockets (up to 4 on plain two-handed weapons; magic gear has fewer) and change its name: a Drops and a Hornet Card turn your Sword into a Stinging Sword of Kindling. Socketing and taking cards out is free, in town: Equipment → Cards.',
+      'Their effects are more than numbers: burning and slowing blows, dodges that speed you up, a Horong wisp that casts Fire Bolt for you, the Angeling\'s once-per-run last stand, the Moonlight Flower\'s free skill every 20 s, the Golden Thief Bug turning spells into zeny. Three families (the slimes, the desert pack, the restless dead) give set bonuses.',
+      'Each card shows its monster at home, its level, element, size and race, and tilts under your pointer with a frame, foil and gloss by rarity. New cards from a run are turned over for you back in town; the Card Album keeps every card you have held.',
+    ],
+  ),
+  (
+    title: 'Refining and more magic items',
+    date: '2026-11-14',
+    items: [
+      'New in Izlude: Hollgrehenn the Smith, by the weapon dealer. He refines weapons, body armour, shields, hats, garments and shoes up to +10: a weapon hits harder (+1 damage every two levels), armour gives HP (+3 a level) and body armour AC at +4 and +8.',
+      'Each level takes an ore and a fee: Phracon to +4 and Emveretarcon to +7 (sold by the weapon and armour dealers), then Oridecon for weapons or Elunium for armour (drops from elites and bosses).',
+      'Safe up to +4 on armour and +4 to +7 on weapons (the lower the weapon level, the further). Past that the odds fall from 70% to 10%, and a failure costs the ore, the fee and a roll of levels: the higher the item, the bigger the die (d2 up to +5, d4 at +6 and +7, d6 at +8, d8 at +9), so a failed +9 → +10 can throw it back to +1. Nothing ever breaks.',
+      'The smith has a forge of his own: pick a worn or carried item, see the ore, fee and odds, which levels are safe and what each face of the slip die would cost, then Strike. The hammer rings, a success glows (+7 and up shines brighter) and a failure rolls the die before your eyes. Space strikes, or skips the show.',
+      'Twenty-one more magic items, 53 in all: the Bulwark Shield blocks blows, the Helm of Steadfastness and Giantsbane keep you on your feet, the Medal of Valor and Stalker\'s Longbow aim truer, the Robe of the Sage and Spectacles of the Owl sharpen spells, Winged Sandals and the Ring of Quickness speed you up, and more.',
+    ],
+  ),
+  (
     title: 'Magic items',
     date: '2026-11-14',
     items: [

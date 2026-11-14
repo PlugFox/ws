@@ -83,6 +83,14 @@ impl Combo {
         self.count
     }
 
+    /// Lengthens the running window by `ticks` (the Rocker's card).
+    pub fn stretch(&mut self, ticks: u32) {
+        if self.left > 0 {
+            self.left += ticks;
+            self.window += ticks;
+        }
+    }
+
     pub fn rank(&self) -> Rank {
         self.rank
     }

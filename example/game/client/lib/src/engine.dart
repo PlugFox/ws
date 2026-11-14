@@ -321,6 +321,27 @@ extension type GameView._(JSObject _) implements JSObject {
   /// The cart went through ([spent] and [earned] zeny): the shop empties it.
   external void shopDone(int spent, int earned);
 
+  /// The smith's refine window (`RefineSpec` JSON: `{npc, name, text?, zeny,
+  /// rows: [{id, key, where, level, safe, bonus, next?: {to, ore, oreName,
+  /// have, fee, chance, slip, gain}, blocked?}], select?, rules?}`, see
+  /// `refine.dart`); '' closes it. It counts as a dialog ([dialogOpen],
+  /// [closeDialog]). Events: `refine_strike {npc, row}`, `refine_close`.
+  external void showRefine(String json);
+
+  /// The answer to a `refine_strike`: `{ok, item, from, to, slip}` or
+  /// `{error}`; the window plays the outcome.
+  external void refineResult(String json);
+
+  /// Monster cards: the card [id] large in the card viewer; [reveal] flips
+  /// it over first (a new card). Events: `card_insert` / `card_remove
+  /// {item, slot, card}` from the Card Sockets window (slot 255 = one off
+  /// the bag stack `item`).
+  external void showCard(String id, bool reveal);
+
+  /// A `card_insert` / `card_remove` went through: [item] is the host's
+  /// key now (the sockets window follows it).
+  external void cardCarded(String item);
+
   /// Player trade: `{request: {name, level}}`, `{pending: {name}}`, the
   /// table `{partner, mine, theirs, myLock, theirLock, myOk, theirOk}`,
   /// `{result: 'done'}` or '' (closes). Events: `trade_respond {accept}`,

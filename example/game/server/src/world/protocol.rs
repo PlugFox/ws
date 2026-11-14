@@ -137,6 +137,13 @@
 //!                      `protocol/results.rs`
 //! 0x8D SHOP_DONE       var spent, var earned (a SHOP_DEAL went through;
 //!                      the new INVENTORY comes before it)
+//! 0x8F REFINED         str item, bool ok, u8 refine, u8 slip (a REFINE
+//!                      attempt: the item's key and level now, and on a
+//!                      failure the face of the slip die, 0 on a success;
+//!                      the new INVENTORY comes before it)
+//! 0x95 CARDED          u8 op, str item, str card (a CARD went through:
+//!                      `item` is the host's key now; the new INVENTORY
+//!                      comes before it)
 //! 0x6A BOSS_CAST, 0x6B BOSS_ZONES, 0x6F BOSS_SHOUT, 0x72 BOSS_BAR
 //!                      scripted elite and boss fights (`hub::boss`): see
 //!                      `protocol/boss.rs` for their bodies
@@ -250,6 +257,13 @@
 //!                      window's cart, at a merchant, all or nothing:
 //!                      sales first; at most 20 lines a side, 1..=999
 //!                      each; answered by SHOP_DONE or HUB_ERROR)
+//! 0x8E REFINE          str npc, str item, u8 slot (one refine attempt at
+//!                      a smith: the worn item in `slot`, 0xFF = one off
+//!                      its bag stack; answered by REFINED or HUB_ERROR)
+//! 0x94 CARD            u8 op (0 insert, 1 remove), str item, u8 slot, str
+//!                      card (a monster card into or out of the worn item
+//!                      in `slot`, 0xFF = one off its bag stack; town only;
+//!                      answered by CARDED or HUB_ERROR)
 //! 0x56 EQUIP           str item, u8 slot (0xFF = its own slot; town only)
 //! 0x57 UNEQUIP         u8 slot (town only)
 //! 0x58 ITEM_USE        str item (a potion, on a mission)
@@ -390,6 +404,8 @@ pub mod kind {
     pub const RUN_STATS: u8 = 0x81;
     pub const RUN_REWARDS: u8 = 0x82;
     pub const SHOP_DONE: u8 = 0x8D;
+    pub const REFINED: u8 = 0x8F;
+    pub const CARDED: u8 = 0x95;
     pub const MONSTER_AFFIXES: u8 = 0xA0;
     pub const AFFIX_EVENT: u8 = 0xA1;
     pub const AFFIX_DEFS: u8 = 0xA2;
@@ -420,6 +436,8 @@ pub mod kind {
     pub const SHOP_BUY: u8 = 0x54;
     pub const SHOP_SELL: u8 = 0x55;
     pub const SHOP_DEAL: u8 = 0x8C;
+    pub const REFINE: u8 = 0x8E;
+    pub const CARD: u8 = 0x94;
     pub const EQUIP: u8 = 0x56;
     pub const UNEQUIP: u8 = 0x57;
     pub const ITEM_USE: u8 = 0x58;
@@ -652,7 +670,7 @@ pub struct ItemDef {
     pub id: String,
     pub name: String,
     /// `items::Kind::code`: 0 etc, 1 consumable, 2 weapon, 3 armour,
-    /// 4 shield, 5 headgear, 6 garment, 7 shoes, 8 accessory.
+    /// 4 shield, 5 headgear, 6 garment, 7 shoes, 8 accessory, 9 card.
     pub kind: u8,
     /// Equipment slot index, 0xFF = not worn.
     pub slot: u8,
@@ -661,8 +679,22 @@ pub struct ItemDef {
     pub classes: u8,
     /// Tooltip text (`**bold**`, `[ok]…[/]`).
     pub desc: String,
-    /// `magic::Rarity::code`: 0 common, 1 uncommon (green), 2 rare (blue).
+    /// `magic::Rarity::code`: 0 common, 1 uncommon (green), 2 rare
+    /// (blue), 3 mythic (boss cards).
     pub rarity: u8,
+    /// Highest refine reached without risk (`refine::safe_limit`); 0 = a
+    /// smith cannot refine it.
+    pub refine_safe: u8,
+    /// Card sockets (`cards::slots`, 0..=4).
+    pub sockets: u8,
+    /// A card: the equipment it fits (`cards::CardSlot::code`, 1..=7);
+    /// 0 = not a card.
+    pub card: u8,
+    /// A card: the word it adds to an item's name, before it (`prefix`)
+    /// or after "of" (`suffix`), and the monster that drops it.
+    pub prefix: String,
+    pub suffix: String,
+    pub monster: String,
 }
 
 impl ItemDef {
@@ -675,6 +707,12 @@ impl ItemDef {
         b.put_u8(self.classes);
         b.put_str(&self.desc);
         b.put_u8(self.rarity);
+        b.put_u8(self.refine_safe);
+        b.put_u8(self.sockets);
+        b.put_u8(self.card);
+        b.put_str(&self.prefix);
+        b.put_str(&self.suffix);
+        b.put_str(&self.monster);
     }
 
     fn read(r: &mut Reader<'_>) -> Option<Self> {
@@ -687,14 +725,28 @@ impl ItemDef {
             classes: r.u8()?,
             desc: r.str()?,
             rarity: r.u8()?,
+            refine_safe: r.u8()?,
+            sockets: r.u8()?,
+            card: r.u8()?,
+            prefix: r.str()?,
+            suffix: r.str()?,
+            monster: r.str()?,
         })
     }
 
     /// The whole catalogue, as sent on join.
     pub fn catalogue() -> Vec<ItemDef> {
+        use super::combat::cards::{self, Affix};
         super::combat::items::catalogue()
             .iter()
-            .map(|e| ItemDef {
+            .map(|e| {
+                let c = cards::card(e.id);
+                let (prefix, suffix) = match c.map(|c| c.affix) {
+                    Some(Affix::Prefix(w)) => (w, ""),
+                    Some(Affix::Suffix(w)) => ("", w),
+                    None => ("", ""),
+                };
+                ItemDef {
                 id: e.id.into(),
                 name: e.name.into(),
                 kind: e.kind.code(),
@@ -703,7 +755,13 @@ impl ItemDef {
                 classes: e.classes,
                 desc: e.desc.clone(),
                 rarity: e.rarity.code(),
-            })
+                refine_safe: if super::combat::refine::refinable(e) { super::combat::refine::safe_limit(e) } else { 0 },
+                sockets: cards::slots(e),
+                card: c.map_or(0, |c| c.fits.code()),
+                prefix: prefix.into(),
+                suffix: suffix.into(),
+                monster: c.map_or("", |c| c.monster).into(),
+            }})
             .collect()
     }
 }
@@ -1034,6 +1092,12 @@ pub enum ServerMsg {
     Shop { npc: String, name: String, items: Vec<String> },
     /// The recipient's merchant order went through.
     ShopDone { spent: u64, earned: u64 },
+    /// The recipient's refine attempt: `item` is the key it has now.
+    /// `slip`: the face the slip die showed on a failure (0 on success).
+    Refined { item: String, ok: bool, refine: u8, slip: u8 },
+    /// The recipient's card went in (`op` 0) or came out (1): `item` is
+    /// the host's key now.
+    Carded { op: u8, item: String, card: String },
     /// The recipient drank `item`; the next potion waits `cooldown_ms`.
     ItemUsed { item: String, cooldown_ms: u32 },
     /// A player on the recipient's map now holds `weapon`.
@@ -1429,6 +1493,19 @@ impl ServerMsg {
                 b.put_var(*spent);
                 b.put_var(*earned);
             }
+            ServerMsg::Refined { item, ok, refine, slip } => {
+                b.put_u8(kind::REFINED);
+                b.put_str(item);
+                b.put_u8(*ok as u8);
+                b.put_u8(*refine);
+                b.put_u8(*slip);
+            }
+            ServerMsg::Carded { op, item, card } => {
+                b.put_u8(kind::CARDED);
+                b.put_u8(*op);
+                b.put_str(item);
+                b.put_str(card);
+            }
             ServerMsg::ItemUsed { item, cooldown_ms } => {
                 b.put_u8(kind::ITEM_USED);
                 b.put_str(item);
@@ -1749,6 +1826,8 @@ impl ServerMsg {
             kind::ITEM_DEFS => ServerMsg::ItemDefs { items: read_list(&mut r, ItemDef::read)? },
             kind::SHOP => ServerMsg::Shop { npc: r.str()?, name: r.str()?, items: read_list(&mut r, |r| r.str())? },
             kind::SHOP_DONE => ServerMsg::ShopDone { spent: r.var()?, earned: r.var()? },
+            kind::REFINED => ServerMsg::Refined { item: r.str()?, ok: r.u8()? != 0, refine: r.u8()?, slip: r.u8()? },
+            kind::CARDED => ServerMsg::Carded { op: r.u8()?, item: r.str()?, card: r.str()? },
             kind::ITEM_USED => ServerMsg::ItemUsed { item: r.str()?, cooldown_ms: r.var32()? },
             kind::PLAYER_GEAR => ServerMsg::PlayerGear { entity_id: r.var32()?, weapon: r.str()? },
             kind::PLAYER_HEADGEAR => ServerMsg::PlayerHeadgear { entity_id: r.var32()?, items: read_list(&mut r, |r| r.str())? },
@@ -1897,6 +1976,12 @@ pub enum ClientMsg {
     ShopSell { npc: String, item: String, count: u32 },
     /// The shop window's cart at the merchant `npc`: buys and sells at once.
     ShopDeal { npc: String, order: ShopOrder },
+    /// One refine attempt at the smith `npc`: the item worn in `slot`, or
+    /// (0xFF) one off the bag stack `item`.
+    Refine { npc: String, item: String, slot: u8 },
+    /// A monster card into (`op` 0) or out of (1) the item worn in `slot`,
+    /// or (0xFF) one off the bag stack `item`. Town only.
+    Card { op: u8, item: String, slot: u8, card: String },
     /// Wear `item` from the bag; `slot` picks an accessory slot (0xFF =
     /// the item's own). Town only.
     Equip { item: String, slot: u8 },
@@ -2036,6 +2121,19 @@ impl ClientMsg {
                 b.put_str(npc);
                 order.put(&mut b);
             }
+            ClientMsg::Refine { npc, item, slot } => {
+                b.put_u8(kind::REFINE);
+                b.put_str(npc);
+                b.put_str(item);
+                b.put_u8(*slot);
+            }
+            ClientMsg::Card { op, item, slot, card } => {
+                b.put_u8(kind::CARD);
+                b.put_u8(*op);
+                b.put_str(item);
+                b.put_u8(*slot);
+                b.put_str(card);
+            }
             ClientMsg::Equip { item, slot } => {
                 b.put_u8(kind::EQUIP);
                 b.put_str(item);
@@ -2132,6 +2230,8 @@ impl ClientMsg {
                 kind::SHOP_BUY => ClientMsg::ShopBuy { npc: r.str()?, item: r.str()?, count: r.var32()? },
                 kind::SHOP_SELL => ClientMsg::ShopSell { npc: r.str()?, item: r.str()?, count: r.var32()? },
                 kind::SHOP_DEAL => ClientMsg::ShopDeal { npc: r.str()?, order: ShopOrder::read(r)? },
+                kind::REFINE => ClientMsg::Refine { npc: r.str()?, item: r.str()?, slot: r.u8()? },
+                kind::CARD => ClientMsg::Card { op: r.u8()?, item: r.str()?, slot: r.u8()?, card: r.str()? },
                 kind::EQUIP => ClientMsg::Equip { item: r.str()?, slot: r.u8()? },
                 kind::UNEQUIP => ClientMsg::Unequip { slot: r.u8()? },
                 kind::ITEM_USE => ClientMsg::ItemUse { item: r.str()? },
@@ -2158,7 +2258,7 @@ impl ClientMsg {
             })
         };
         // The retired ready flag (`LOBBY_READY`) is unknown now: ignored.
-        let known = k != kind::LOBBY_READY && matches!(k, INPUT_KIND | kind::PING..=kind::ITEM_USE | kind::CHAT_REQ | kind::PARTY_REQ | kind::INSPECT_REQ | kind::FRIEND_REQ | kind::TRADE_REQ | kind::FEEDBACK_REQ | kind::STAGE_RESUME | kind::LOBBY_MODIFIERS | kind::MISSION_START | kind::CAST_PREFS | kind::SHOP_DEAL | kind::MOUNT_REQ);
+        let known = k != kind::LOBBY_READY && matches!(k, INPUT_KIND | kind::PING..=kind::ITEM_USE | kind::CHAT_REQ | kind::PARTY_REQ | kind::INSPECT_REQ | kind::FRIEND_REQ | kind::TRADE_REQ | kind::FEEDBACK_REQ | kind::STAGE_RESUME | kind::LOBBY_MODIFIERS | kind::MISSION_START | kind::CAST_PREFS | kind::SHOP_DEAL | kind::REFINE | kind::CARD | kind::MOUNT_REQ);
         if !known {
             return Err(Unknown);
         }
@@ -2670,7 +2770,7 @@ pub(crate) mod golden {
             (
                 "item_defs",
                 ServerMsg::ItemDefs {
-                    items: vec![ItemDef { id: "cap".into(), name: "Cap".into(), kind: 5, slot: 0, price: 4000, classes: 11, desc: "+1 AC".into(), rarity: 2 }],
+                    items: vec![ItemDef { id: "cap".into(), name: "Cap".into(), kind: 5, slot: 0, price: 4000, classes: 11, desc: "+1 AC".into(), rarity: 2, refine_safe: 4, sockets: 1, card: 0, prefix: String::new(), suffix: String::new(), monster: String::new() }, ItemDef { id: "drops_card".into(), name: "Drops Card".into(), kind: 9, slot: 0xFF, price: 400, classes: 31, desc: "Card".into(), rarity: 0, refine_safe: 0, sockets: 0, card: 3, prefix: String::new(), suffix: "Kindling".into(), monster: "drops".into() }],
                 }
                 .encode(),
             ),
@@ -2816,7 +2916,7 @@ pub(crate) mod golden {
         ("boss", "35858080040442617068d00fe615"),
         ("buffs", "36010568617374659423"),
         ("inventory", "3aac02010a7265645f706f74696f6e050000000c636f74746f6e5f73686972740573776f72640000000000097b226163223a31327d"),
-        ("item_defs", "3b0103636170034361700500a01f0b052b3120414302"),
+        ("item_defs", "3b0203636170034361700500a01f0b052b31204143020401000000000a64726f70735f636172640a44726f7073204361726409ff90031f04436172640000000300084b696e646c696e670564726f7073"),
         ("shop", "3c04646567610444656761010573776f7264"),
         ("item_used", "3d0a7265645f706f74696f6ee807"),
         ("player_gear", "3eac0203626f77"),
@@ -2964,16 +3064,21 @@ pub(crate) mod golden {
         vec![
             ("shop_deal", ClientMsg::ShopDeal { npc: "tool".into(), order }.encode()),
             ("shop_done", ServerMsg::ShopDone { spent: 600, earned: 1250 }.encode()),
+            ("refine", ClientMsg::Refine { npc: "smith".into(), item: "sword+7".into(), slot: 4 }.encode()),
+            ("refined", ServerMsg::Refined { item: "sword+8".into(), ok: true, refine: 8, slip: 0 }.encode()),
+            ("refine_failed", ServerMsg::Refined { item: "sword+5".into(), ok: false, refine: 5, slip: 3 }.encode()),
+            ("card", ClientMsg::Card { op: 0, item: "sword+7".into(), slot: 4, card: "drops_card".into() }.encode()),
+            ("carded", ServerMsg::Carded { op: 1, item: "sword".into(), card: "hornet_card".into() }.encode()),
         ]
     }
 
-    const SHOP_EXPECTED: &[(&str, &str)] = &[("shop_deal", "8c04746f6f6c010a7265645f706f74696f6e0c02076a656c6c6f7079ac020773776f72642b3701"), ("shop_done", "8dd804e209")];
+    const SHOP_EXPECTED: &[(&str, &str)] = &[("shop_deal", "8c04746f6f6c010a7265645f706f74696f6e0c02076a656c6c6f7079ac020773776f72642b3701"), ("shop_done", "8dd804e209"), ("refine", "8e05736d6974680773776f72642b3704"), ("refined", "8f0773776f72642b38010800"), ("refine_failed", "8f0773776f72642b35000503"), ("card", "94000773776f72642b37040a64726f70735f63617264"), ("carded", "95010573776f72640b686f726e65745f63617264")];
 
     #[test]
     fn shop_frames_round_trip_and_match_the_dart_goldens() {
         for (name, b) in shop() {
             println!("(\"{name}\", \"{}\"),", hex(&b));
-            if name == "shop_done" {
+            if name == "shop_done" || name == "carded" || name.starts_with("refine") && name != "refine" {
                 assert_eq!(ServerMsg::decode(&b).unwrap().encode(), b);
                 assert!(ServerMsg::decode(&b[..b.len() - 1]).is_none(), "truncated {name}");
             } else {

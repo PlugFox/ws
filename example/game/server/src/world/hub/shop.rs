@@ -7,9 +7,9 @@
 //! [`HubEvent::ItemUsed`], so the stage never writes belongings it does
 //! not own.
 
-use super::{hub_error, HubEvent, HubInstance, Outgoing, SHOP};
+use super::{hub_error, HubEvent, HubInstance, Outgoing, REFINER, SHOP};
 use crate::world::combat::items::{self, Effect, Kind, POTION_COOLDOWN_MS, POTION_REGEN_MS};
-use crate::world::combat::{Bag, Condition, Weapon};
+use crate::world::combat::{Bag, Condition, Slot, Weapon};
 use crate::world::protocol::ServerMsg;
 use crate::world::trade::{OrderError, ShopOrder};
 
@@ -46,6 +46,36 @@ impl HubInstance {
                 Err(e) => HubEvent::Control(hub_error(e.code(), e.message())),
                 Ok(()) => HubEvent::Shop(order),
             },
+        };
+        out.push((user_id, event));
+    }
+
+    /// One refine attempt at the smith `npc` on the item worn in `slot` or
+    /// (0xFF) off the bag stack `item`: the player must stand at it and not
+    /// be trading. The smith rolls the d100 and the slip die here; the socket task applies
+    /// the attempt to the bag ([`HubEvent::Refine`]) and answers it.
+    pub fn refine(&mut self, user_id: u32, npc: &str, item: String, slot: u8, out: &mut Outgoing) {
+        let Some(i) = self.find(user_id) else { return };
+        if self.is_trading(user_id) {
+            out.push((user_id, HubEvent::Control(hub_error("trade_busy", "Finish your trade first."))));
+            return;
+        }
+        let p = &self.players[i];
+        let map = self.world.map(p.map);
+        let slot = match slot {
+            0xFF => None,
+            s => match Slot::from_index(s) {
+                Some(s) => Some(s),
+                None => return out.push((user_id, HubEvent::Control(hub_error("bad_message", "no such slot")))),
+            },
+        };
+        let event = match map.manifest.npcs.iter().find(|n| n.id == npc && n.kind == REFINER) {
+            None => HubEvent::Control(hub_error("no_such_npc", format!("no smith {npc} here"))),
+            Some(n) if !self.at_merchant(n, p.x, p.y) => HubEvent::Control(hub_error("npc_too_far", format!("walk closer to {}", n.name))),
+            Some(_) => {
+                let (roll, slip) = self.rigged_refine.take().unwrap_or_else(|| (self.dice.die(100), self.dice.die(crate::world::combat::refine::SLIP_ROLL)));
+                HubEvent::Refine { item, slot, roll, slip }
+            }
         };
         out.push((user_id, event));
     }
@@ -138,9 +168,15 @@ impl HubInstance {
             }
             Effect::Antidote => f.cure(Condition::Poisoned),
         }
+        // The Black Mushroom's card: spores against poison.
+        if f.procs().spore_cure && matches!(effect, Effect::Heal(_) | Effect::Spirit(_)) {
+            f.cure(Condition::Poisoned);
+        }
         f.potions[slot].1 -= 1;
-        f.potion_ready = tick + (POTION_COOLDOWN_MS * hz).div_ceil(1000);
-        out.push((user_id, HubEvent::Control(ServerMsg::ItemUsed { item: item.into(), cooldown_ms: POTION_COOLDOWN_MS })));
+        // The Picky's card: quicker sips.
+        let cooldown = POTION_COOLDOWN_MS * (100 - f.procs().potion_cd as u32) / 100;
+        f.potion_ready = tick + (cooldown * hz).div_ceil(1000);
+        out.push((user_id, HubEvent::Control(ServerMsg::ItemUsed { item: item.into(), cooldown_ms: cooldown })));
         out.push((user_id, HubEvent::ItemUsed { item: item.into() }));
     }
 }
@@ -267,6 +303,63 @@ mod tests {
 
     fn refused(out: &[(u32, HubEvent)], want: &str) -> bool {
         matches!(&events(out, 1)[..], [HubEvent::Control(ServerMsg::HubError { code, .. })] if code == want)
+    }
+
+    #[test]
+    fn a_smith_rolls_a_refine_only_for_players_standing_at_it() {
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
+        let mut out = Vec::new();
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        place(&mut hub, 1, 2.5, 2.5);
+        out.clear();
+        hub.refine(1, "smith", "sword".into(), 4, &mut out);
+        assert!(refused(&out, "npc_too_far"), "{out:?}");
+        out.clear();
+        // The smith stands at (8,1); the merchant is no smith.
+        place(&mut hub, 1, 8.5, 2.0);
+        hub.refine(1, "merchant", "sword".into(), 4, &mut out);
+        assert!(refused(&out, "no_such_npc"), "{out:?}");
+        out.clear();
+        hub.refine(1, "smith", "sword".into(), 42, &mut out);
+        assert!(refused(&out, "bad_message"), "{out:?}");
+        out.clear();
+        hub.refine(1, "smith", "sword".into(), 4, &mut out);
+        assert!(
+            matches!(&events(&out, 1)[..], [HubEvent::Refine { item, slot: Some(crate::world::combat::Slot::Weapon), roll, slip }] if item == "sword" && (1..=100).contains(roll) && (1..=24).contains(slip)),
+            "{out:?}"
+        );
+        out.clear();
+        hub.refine(1, "smith", "coat".into(), 0xFF, &mut out);
+        assert!(matches!(&events(&out, 1)[..], [HubEvent::Refine { slot: None, .. }]), "{out:?}");
+    }
+
+    #[test]
+    fn the_e2e_hooks_rig_the_next_refine_and_hand_out_refined_copies() {
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), HubSimConfig { missions_anywhere: true, ..quiet() });
+        let mut out = Vec::new();
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        place(&mut hub, 1, 8.5, 2.0);
+        out.clear();
+        hub.chat(1, "/give sword+8".into(), &mut out);
+        hub.chat(1, "/give zeny 5000".into(), &mut out);
+        hub.chat(1, "/give sword+11".into(), &mut out);
+        let got = events(&out, 1);
+        assert!(matches!(&got[..], [HubEvent::DevGive { key }, HubEvent::Zeny { amount: 5000 }, HubEvent::Control(ServerMsg::Chat { .. })] if key == "sword+8"), "{got:?}");
+        out.clear();
+        // One rigged roll, then the dice again.
+        hub.chat(1, "/rig 100 3".into(), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        hub.refine(1, "smith", "sword+8".into(), 0xFF, &mut out);
+        assert!(matches!(&events(&out, 1)[..], [HubEvent::Refine { roll: 100, slip: 3, .. }]), "{out:?}");
+        out.clear();
+        hub.refine(1, "smith", "sword+8".into(), 0xFF, &mut out);
+        assert!(matches!(&events(&out, 1)[..], [HubEvent::Refine { .. }]), "{out:?}");
+        // Without the test hooks it is only chat.
+        let mut plain = HubInstance::new(1, Arc::new(test_world()), quiet());
+        plain.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        out.clear();
+        plain.chat(1, "/rig 100 3".into(), &mut out);
+        assert!(matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::Chat { .. })]), "{out:?}");
     }
 
     #[test]

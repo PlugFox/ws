@@ -626,9 +626,13 @@ impl HubInstance {
                     f.casting = None;
                     let def = book.get(c.skill);
                     let cost = def.sp_cost(c.level);
-                    if f.sp >= cost {
-                        f.sp -= cost;
-                        f.cooldowns[c.skill as usize] = (def.cooldown_secs(c.level) * hz).round() as u32;
+                    if f.sp >= cost || f.free_cast().0 {
+                        let rng = &mut self.dice;
+                        let (free_sp, free_cd) = f.card_cast(hz, || rng.die(100));
+                        if !free_sp {
+                            f.sp -= cost;
+                        }
+                        f.cooldowns[c.skill as usize] = if free_cd { 0 } else { (def.cooldown_secs(c.level) * hz).round() as u32 };
                         f.recovery = (RECOVERY_SECS * hz).round() as u32;
                         f.quiet = 0;
                         let walk = &self.world.map(map).walk;
@@ -669,7 +673,7 @@ impl HubInstance {
                     || busy
                     || !rooted_ok
                     || f.cooldowns[skill as usize] > 0
-                    || f.sp < def.sp_cost(level)
+                    || (f.sp < def.sp_cost(level) && !f.free_cast().0)
                 {
                     continue;
                 }
@@ -716,8 +720,12 @@ impl HubInstance {
                     if f.casting.take().is_some() {
                         casts.push(cancel(entity));
                     }
-                    f.sp -= def.sp_cost(level);
-                    f.cooldowns[skill as usize] = (def.cooldown_secs(level) * hz).round() as u32;
+                    let rng = &mut self.dice;
+                    let (free_sp, free_cd) = f.card_cast(hz, || rng.die(100));
+                    if !free_sp {
+                        f.sp -= def.sp_cost(level);
+                    }
+                    f.cooldowns[skill as usize] = if free_cd { 0 } else { (def.cooldown_secs(level) * hz).round() as u32 };
                     if !def.mobile {
                         f.recovery = (RECOVERY_SECS * hz).round() as u32;
                     }
@@ -1048,7 +1056,7 @@ pub(super) fn envenom(horde: &mut Horde, s: u16, ticks: u16) {
 }
 
 /// Puts a condition on a monster; fire remembers the strongest `k` lit.
-fn inflict(horde: &mut Horde, s: u16, c: Condition, ticks: u16, k: u32) {
+pub(super) fn inflict(horde: &mut Horde, s: u16, c: Condition, ticks: u16, k: u32) {
     let store = horde.store_mut();
     store.afflict(s, c, ticks);
     if c == Condition::Burning {

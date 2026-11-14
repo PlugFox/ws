@@ -13,8 +13,10 @@
 
 use super::class::{Class, Save};
 use super::buffs::Mods;
+use super::cards::{self, CardError, CardSlot, CardSum, Procs};
 use super::dice::Dice;
 use super::magic::{magic, Rarity};
+use super::refine::{self, Refined};
 use super::weapon::{Weapon, WEAPONS};
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
@@ -106,6 +108,8 @@ pub enum Kind {
     Garment,
     Shoes,
     Accessory,
+    /// A monster card: socketed into equipment of one kind (cards.rs).
+    Card(CardSlot),
 }
 
 impl Kind {
@@ -120,13 +124,14 @@ impl Kind {
             Kind::Garment => 6,
             Kind::Shoes => 7,
             Kind::Accessory => 8,
+            Kind::Card(_) => 9,
         }
     }
 
     /// The slot it is worn in (accessories: the first of the two).
     pub const fn slot(self) -> Option<Slot> {
         match self {
-            Kind::Etc | Kind::Consumable(_) => None,
+            Kind::Etc | Kind::Consumable(_) | Kind::Card(_) => None,
             Kind::Weapon => Some(Slot::Weapon),
             Kind::Armour(..) => Some(Slot::Armour),
             Kind::Shield => Some(Slot::Shield),
@@ -293,6 +298,19 @@ pub const ITEMS: &[Item] = &[
     item("cutpurse_gloves", "Cutpurse Gloves", Kind::Accessory, 6000, TH, Bonus::NONE, "Thin gloves for very quick hands."),
     item("bear_amulet", "Amulet of the Bear", Kind::Accessory, 6000, SW, save(Save::Body, 1), "A bear's claw on a cord; you feel twice as broad."),
     item("sun_pendant", "Sun Pendant", Kind::Accessory, 6000, AC, Bonus::NONE, "A golden sun that warms the hands that heal."),
+    item("bulwark_shield", "Bulwark Shield", Kind::Shield, 16000, SW | AC, Bonus { ac: 2, hp: 10, ..Bonus::NONE }, "A tower of oak and iron; blows simply stop on it."),
+    item("steadfast_helm", "Helm of Steadfastness", Kind::Headgear(Slot::UpperHead), 8000, SW | AC, ac(1), "Whoever wears it keeps their feet in any storm."),
+    item("sage_robe", "Robe of the Sage", Kind::Armour(Weight::Light, 12), 14000, MG, sp(20), "Star charts are woven into the hem; spells come out sharper."),
+    item("grace_vestments", "Vestments of Grace", Kind::Armour(Weight::Medium, 14), 9000, AC, save(Save::Mind, 1), "White and gold, they carry a prayer in every thread."),
+    item("shadow_tights", "Shadowweave Tights", Kind::Armour(Weight::Light, 12), 8000, AR | TH, save(Save::Reflex, 1), "Dark cloth that moves before you do."),
+    item("warm_muffler", "Muffler of Warmth", Kind::Garment, 6000, ALL_CLASSES, hp(10), "Knitted by someone who cared; small wounds close under it."),
+    item("winged_sandals", "Winged Sandals", Kind::Shoes, 6000, ALL_CLASSES, hp(4), "Tiny wings at the heel beat when you hurry."),
+    item("owl_spectacles", "Spectacles of the Owl", Kind::Headgear(Slot::MidHead), 6000, MG | AC, save(Save::Mind, 1), "Through them every weakness of a spell's target is plain."),
+    item("plague_mask", "Plague Doctor's Mask", Kind::Headgear(Slot::LowerHead), 5000, ALL_CLASSES, save(Save::Body, 1), "The beak is stuffed with herbs that make every draught stronger."),
+    item("quickness_ring", "Ring of Quickness", Kind::Accessory, 7000, ALL_CLASSES, Bonus::NONE, "A thin band of quicksilver that never sits still."),
+    item("wellspring_earring", "Earring of the Wellspring", Kind::Accessory, 6000, MG | AC, sp(10), "A drop of blue water that is never used up."),
+    item("valor_medal", "Medal of Valor", Kind::Accessory, 6000, SW | AR | TH, Bonus::NONE, "Given for a battle nobody else survived."),
+    item("dawn_rosary", "Rosary of the Dawn", Kind::Accessory, 6000, AC, Bonus::NONE, "Beads of sunstone; the dead flinch at their light."),
     // Loot (Etc): sold at any merchant for half the price.
     item("jellopy", "Jellopy", Kind::Etc, 6, 0, Bonus::NONE, "A small crystal left behind by Porings."),
     item("flower", "Flower", Kind::Etc, 4, 0, Bonus::NONE, "A small field flower. It smells of spring."),
@@ -318,6 +336,12 @@ pub const ITEMS: &[Item] = &[
     item("white_jewel", "Opal", Kind::Etc, 3000, 0, Bonus::NONE, "A milky gem that shimmers in every colour."),
     item("scarlet_jewel", "Garnet", Kind::Etc, 3000, 0, Bonus::NONE, "A deep red gem."),
     item("emperium", "Emperium", Kind::Etc, 8000, 0, Bonus::NONE, "A golden crystal the angels guard."),
+    // Refine ores (refine.rs): Phracon and Emveretarcon from the weapon
+    // and armour dealers, Oridecon and Elunium from elites and bosses.
+    item("phracon", "Phracon", Kind::Etc, 200, 0, Bonus::NONE, "A metal for refining. A smith takes it for +1 to +4."),
+    item("emveretarcon", "Emveretarcon", Kind::Etc, 1000, 0, Bonus::NONE, "A harder metal for refining. A smith takes it for +5 to +7."),
+    item("oridecon", "Oridecon", Kind::Etc, 5000, 0, Bonus::NONE, "A rare metal that refines a weapon from +8 to +10."),
+    item("elunium", "Elunium", Kind::Etc, 5000, 0, Bonus::NONE, "A rare metal that refines armour from +8 to +10."),
 ];
 
 /// Merchants and what they sell (`shop` of a `"shop"` NPC).
@@ -329,7 +353,7 @@ pub const SHOPS: &[(&str, &[&str])] = &[
         "weapon",
         &[
             "knife", "cutter", "main_gauche", "sword", "falchion", "katana", "javelin", "pike", "axe", "battle_axe", "club", "mace",
-            "bow", "composite_bow", "rod", "wand", "bible", "jur", "katar",
+            "bow", "composite_bow", "rod", "wand", "bible", "jur", "katar", "phracon", "emveretarcon",
         ],
     ),
     (
@@ -338,7 +362,7 @@ pub const SHOPS: &[(&str, &[&str])] = &[
             "cotton_shirt", "jacket", "adventurers_suit", "silk_robe", "tights", "wooden_mail", "coat", "saints_robe", "padded_armor",
             "chain_mail", "full_plate", "guard", "buckler", "shield", "bandana", "ribbon", "hat", "biretta", "circlet", "cap", "helm",
             "sunglasses", "geek_glasses", "flu_mask", "hood", "muffler", "manteau", "sandals", "shoes", "boots", "clip", "rosary",
-            "ring", "earring", "brooch",
+            "ring", "earring", "brooch", "phracon", "emveretarcon",
         ],
     ),
 ];
@@ -502,6 +526,19 @@ pub fn catalogue() -> &'static [Entry] {
                 desc,
             });
         }
+        for c in cards::CARDS {
+            v.push(Entry {
+                id: c.id,
+                name: c.name,
+                kind: Kind::Card(c.fits),
+                price: c.price(),
+                classes: ALL_CLASSES,
+                bonus: Bonus::default(),
+                weapon: None,
+                rarity: c.rarity,
+                desc: c.describe(),
+            });
+        }
         v
     });
     &ALL
@@ -622,6 +659,9 @@ pub fn parse_key(key: &str) -> Option<(&'static Entry, Attrs)> {
 fn instance(id: &str, attrs: Attrs) -> Option<(&'static Entry, Attrs)> {
     let e = find(id)?;
     let attrs = attrs.canonical()?;
+    if !attrs.cards.is_empty() && cards::check(e, &attrs.cards).is_some() {
+        return None;
+    }
     (attrs.is_plain() || e.slot().is_some()).then_some((e, attrs))
 }
 
@@ -675,6 +715,15 @@ pub enum ItemError {
     NotEquipment,
     CannotUnequip,
     NotUsable,
+    NotRefinable,
+    MaxRefine,
+    NoOre,
+    /// A carded item cannot be sold (the cards would be lost).
+    HasCards,
+    /// The card cannot go there (cards.rs).
+    Card(CardError),
+    /// The item has no such card to take out.
+    NoSuchCard,
 }
 
 impl ItemError {
@@ -690,6 +739,16 @@ impl ItemError {
             ItemError::NotEquipment => "not_equipment",
             ItemError::CannotUnequip => "cannot_unequip",
             ItemError::NotUsable => "not_usable",
+            ItemError::NotRefinable => "not_refinable",
+            ItemError::MaxRefine => "max_refine",
+            ItemError::NoOre => "no_ore",
+            ItemError::HasCards => "has_cards",
+            ItemError::Card(CardError::NotACard) => "not_a_card",
+            ItemError::Card(CardError::WrongSlot) => "wrong_card_slot",
+            ItemError::Card(CardError::NoSocket) => "no_socket",
+            ItemError::Card(CardError::Twice) => "card_twice",
+            ItemError::Card(CardError::Conflict) => "card_conflict",
+            ItemError::NoSuchCard => "no_such_card",
         }
     }
 
@@ -705,6 +764,16 @@ impl ItemError {
             ItemError::NotEquipment => "That cannot be worn.",
             ItemError::CannotUnequip => "You need a weapon to fight with.",
             ItemError::NotUsable => "That cannot be used.",
+            ItemError::NotRefinable => "A smith cannot refine that.",
+            ItemError::MaxRefine => "It is already +10.",
+            ItemError::NoOre => "You need the ore for that refine.",
+            ItemError::HasCards => "Take the cards out first.",
+            ItemError::Card(CardError::NotACard) => "That is not a card.",
+            ItemError::Card(CardError::WrongSlot) => "That card does not fit this item.",
+            ItemError::Card(CardError::NoSocket) => "No free socket.",
+            ItemError::Card(CardError::Twice) => "That card is already in it.",
+            ItemError::Card(CardError::Conflict) => "Only one element per weapon.",
+            ItemError::NoSuchCard => "That card is not in it.",
         }
     }
 }
@@ -719,8 +788,11 @@ pub struct Gear {
     pub sp: i32,
     /// Bonus per [`Save`] (Body, Reflex, Mind).
     pub saves: [i32; 3],
-    /// Enchantments of the magic items worn (magic.rs), summed.
+    /// Enchantments of the magic items worn (magic.rs) and the cards'
+    /// plain bonuses, summed.
     pub mods: Mods,
+    /// The cards' effects beyond mods (cards.rs), summed and capped.
+    pub procs: Procs,
 }
 
 impl Class {
@@ -771,8 +843,19 @@ impl Bag {
         // Rows from before instance keys (or hand-edited ones) may hold the
         // same instance more than once: they merge into one stack, capped
         // at MAX_STACK.
+        // Cards that no longer fit (a rebalance of slots, hand edits) come
+        // out into the bag instead of taking the item with them.
+        let mut loose: Vec<String> = Vec::new();
         for s in items {
-            let Some((e, attrs)) = instance(&s.id, s.attrs) else { continue };
+            let Some((e, attrs)) = instance(&s.id, s.attrs.clone()).or_else(|| {
+                let kept = instance(&s.id, Attrs { cards: Vec::new(), ..s.attrs.clone() })?;
+                for _ in 0..s.count.min(MAX_STACK) {
+                    loose.extend(s.attrs.cards.iter().filter(|c| cards::card(c).is_some()).cloned());
+                }
+                Some(kept)
+            }) else {
+                continue;
+            };
             if s.count == 0 {
                 continue;
             }
@@ -782,7 +865,15 @@ impl Bag {
                 None => {}
             }
         }
-        for (i, k) in equip.into_iter().enumerate() {
+        for (i, mut k) in equip.into_iter().enumerate() {
+            if parse_key(&k).is_none()
+                && let Some(open) = k.find('[')
+                && parse_key(&k[..open]).is_some()
+            {
+                let inner = k[open..].trim_start_matches('[').trim_end_matches(']').to_string();
+                loose.extend(inner.split(',').filter(|c| cards::card(c).is_some()).map(String::from));
+                k.truncate(open);
+            }
             let fits = parse_key(&k)
                 .and_then(|(e, _)| e.slot())
                 .is_some_and(|s| s == Slot::ALL[i] || (s == Slot::Accessory1 && i == Slot::Accessory2 as usize));
@@ -792,6 +883,9 @@ impl Bag {
         }
         if bag.equip[Slot::Weapon as usize].is_empty() {
             bag.equip[Slot::Weapon as usize] = Weapon::held(class, weapon).id.into();
+        }
+        for c in loose {
+            let _ = bag.add(&c, 1);
         }
         bag
     }
@@ -856,7 +950,10 @@ impl Bag {
     /// Sells `n` of the instance `id` from the bag (not what is worn) at
     /// half the catalogue price.
     pub fn sell(&mut self, id: &str, n: u32) -> Result<u64, ItemError> {
-        let (e, _) = parse_key(id).ok_or(ItemError::Unknown)?;
+        let (e, attrs) = parse_key(id).ok_or(ItemError::Unknown)?;
+        if !attrs.cards.is_empty() {
+            return Err(ItemError::HasCards);
+        }
         let n = n.max(1);
         self.take(id, n)?;
         let gain = sell_price(e.price) as u64 * n as u64;
@@ -922,6 +1019,107 @@ impl Bag {
         Ok(())
     }
 
+    /// One refine attempt on the instance `key`, worn in `slot` or (`None`)
+    /// one off its bag stack. `roll` is the smith's d100 (1..=100): at or
+    /// under the step's chance it works. Takes the ore and the fee either
+    /// way; a failure loses levels by the step's die, rolled from `slip`
+    /// (1..=`refine::SLIP_ROLL`, refine.rs). All or nothing.
+    pub fn refine(&mut self, key: &str, slot: Option<Slot>, roll: u32, slip: u32) -> Result<Refined, ItemError> {
+        let (e, mut attrs) = parse_key(key).ok_or(ItemError::Unknown)?;
+        match slot {
+            Some(s) if self.equip[s as usize] != key => return Err(ItemError::NotInBag),
+            None if self.count(key) == 0 => return Err(ItemError::NotInBag),
+            _ => {}
+        }
+        if !refine::refinable(e) {
+            return Err(ItemError::NotRefinable);
+        }
+        let step = refine::step(e, attrs.refine).ok_or(ItemError::MaxRefine)?;
+        if self.count(step.ore) == 0 {
+            return Err(ItemError::NoOre);
+        }
+        if self.zeny < step.fee as u64 {
+            return Err(ItemError::NoZeny);
+        }
+        let mut next = self.clone();
+        next.take(step.ore, 1)?;
+        next.zeny -= step.fee as u64;
+        let ok = roll <= step.chance;
+        let fell = if ok { 0 } else { refine::slip_levels(attrs.refine, slip) };
+        attrs.refine = if ok { step.to } else { attrs.refine.saturating_sub(fell) };
+        let now = self::key(e.id, &attrs);
+        match slot {
+            Some(s) => next.equip[s as usize] = now.clone(),
+            None => {
+                next.take(key, 1)?;
+                next.add(&now, 1)?;
+            }
+        }
+        *self = next;
+        Ok(Refined { key: now, ok, refine: attrs.refine, slip: fell })
+    }
+
+    /// The instance `key` is worn in `slot` or (`None`) in the bag.
+    fn holds(&self, key: &str, slot: Option<Slot>) -> Result<(), ItemError> {
+        match slot {
+            Some(s) if self.equip[s as usize] != key => Err(ItemError::NotInBag),
+            None if self.count(key) == 0 => Err(ItemError::NotInBag),
+            _ => Ok(()),
+        }
+    }
+
+    /// One copy of `key` (worn in `slot`, or off its bag stack) becomes `now`.
+    fn replace(&mut self, key: &str, slot: Option<Slot>, now: &str) -> Result<(), ItemError> {
+        match slot {
+            Some(s) => self.equip[s as usize] = now.into(),
+            None => {
+                self.take(key, 1)?;
+                self.add(now, 1)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Sockets `card` (one off its bag stack) into the instance `key`,
+    /// worn in `slot` or (`None`) one off its bag stack; returns the
+    /// item's new key. Free, in town; nothing is ever destroyed.
+    pub fn socket(&mut self, key: &str, slot: Option<Slot>, card: &str) -> Result<String, ItemError> {
+        let (e, mut attrs) = parse_key(key).ok_or(ItemError::Unknown)?;
+        self.holds(key, slot)?;
+        if cards::card(card).is_none() {
+            return Err(ItemError::Card(CardError::NotACard));
+        }
+        if self.count(card) == 0 {
+            return Err(ItemError::NotInBag);
+        }
+        attrs.cards.push(card.into());
+        attrs.cards.sort_unstable();
+        if let Some(err) = cards::check(e, &attrs.cards) {
+            return Err(ItemError::Card(err));
+        }
+        let now = self::key(e.id, &attrs);
+        let mut next = self.clone();
+        next.take(card, 1)?;
+        next.replace(key, slot, &now)?;
+        *self = next;
+        Ok(now)
+    }
+
+    /// Takes `card` out of the instance `key` (worn in `slot`, or one off
+    /// its bag stack) back into the bag; returns the item's new key.
+    pub fn unsocket(&mut self, key: &str, slot: Option<Slot>, card: &str) -> Result<String, ItemError> {
+        let (e, mut attrs) = parse_key(key).ok_or(ItemError::Unknown)?;
+        self.holds(key, slot)?;
+        let i = attrs.cards.iter().position(|c| c == card).ok_or(ItemError::NoSuchCard)?;
+        attrs.cards.remove(i);
+        let now = self::key(e.id, &attrs);
+        let mut next = self.clone();
+        next.replace(key, slot, &now)?;
+        next.add(card, 1)?;
+        *self = next;
+        Ok(now)
+    }
+
     /// Worn weapon's catalogue id (the slot holds its instance key).
     pub fn weapon(&self) -> &str {
         base_id(&self.equip[Slot::Weapon as usize])
@@ -933,9 +1131,18 @@ impl Bag {
         let d = class.defence();
         // Unarmoured: 10 + defence.
         let mut body = 10 + d;
-        let mut g = Gear { ac: 0, hp: 0, sp: 0, saves: [0; 3], mods: Mods::NONE };
+        let mut g = Gear { ac: 0, hp: 0, sp: 0, saves: [0; 3], mods: Mods::NONE, procs: Procs::NONE };
+        let mut sum = CardSum::default();
+        let mut worn: Vec<&str> = Vec::new();
         for k in &self.equip {
             let Some(e) = find(base_id(k)).filter(|e| e.usable_by(class)) else { continue };
+            let attrs = parse_key(k).map(|(_, a)| a).unwrap_or_default();
+            let r = refine::bonus(e, attrs.refine);
+            sum.wear(&attrs.cards, attrs.refine);
+            worn.extend(attrs.cards.iter().filter_map(|c| cards::card(c)).map(|c| c.id));
+            g.ac += r.ac;
+            g.hp += r.hp;
+            g.mods.damage_flat += r.damage;
             if let Kind::Armour(w, base) = e.kind {
                 body = base as i32
                     + match w {
@@ -959,6 +1166,11 @@ impl Bag {
                 g.mods.add(&m.mods);
             }
         }
+        sum.finish(worn.iter().copied());
+        g.hp += sum.hp;
+        g.sp += sum.sp;
+        g.mods.add(&sum.mods);
+        g.procs = sum.procs;
         g.ac += body;
         g
     }
@@ -1099,18 +1311,19 @@ mod tests {
 
     #[test]
     fn instance_keys_are_canonical() {
-        let refined = Attrs { refine: 7, cards: vec!["b_card".into(), "a_card".into()] };
+        let refined = Attrs { refine: 7, cards: vec!["hornet_card".into(), "drops_card".into()] };
         let k = key("sword", &refined.clone().canonical().unwrap());
-        assert_eq!(k, "sword+7[a_card,b_card]");
+        assert_eq!(k, "sword+7[drops_card,hornet_card]");
         let (e, a) = parse_key(&k).unwrap();
         assert_eq!((e.id, a.refine, a.cards.len()), ("sword", 7, 2));
         assert_eq!(parse_key("sword").map(|(e, a)| (e.id, a.is_plain())), Some(("sword", true)));
         assert_eq!(base_id(&k), "sword");
         // One spelling per instance; attributes only on equipment.
-        for bad in ["sword+0", "sword+07", "sword+11", "sword[b_card,a_card]", "sword+7[]", "sword+7[A]", "red_potion+1", "nope+1", "sword[a,b,c,d,e]"] {
+        for bad in ["sword+0", "sword+07", "sword+11", "sword[hornet_card,drops_card]", "sword[poring_card]", "sword[drops_card,drops_card]", "sword+7[]", "sword+7[A]", "red_potion+1", "nope+1", "sword[a,b,c,d,e]"] {
             assert!(parse_key(bad).is_none(), "{bad}");
         }
-        assert!(parse_key("sword[a,b,c,d]").is_some());
+        assert!(parse_key("sword[a,b,c,d]").is_none(), "only real cards");
+        assert!(parse_key("katana[drops_card,hornet_card,skeleton_card,tarou_card]").is_some(), "four sockets");
     }
 
     /// Same id and same attributes: one stack with a count; anything that
@@ -1122,9 +1335,9 @@ mod tests {
         b.add("sword", 1).unwrap();
         b.add("sword+3", 1).unwrap();
         b.add("sword+3", 1).unwrap();
-        b.add("sword+3[x_card]", 1).unwrap();
+        b.add("sword+3[tarou_card]", 1).unwrap();
         assert_eq!(b.items.len(), 3);
-        assert_eq!((b.count("sword"), b.count("sword+3"), b.count("sword+3[x_card]"), b.count("sword+4")), (3, 2, 1, 0));
+        assert_eq!((b.count("sword"), b.count("sword+3"), b.count("sword+3[tarou_card]"), b.count("sword+4")), (3, 2, 1, 0));
         assert_eq!(b.add("sword+3[X]", 1), Err(ItemError::Unknown));
         b.take("sword+3", 2).unwrap();
         assert_eq!((b.items.len(), b.count("sword")), (2, 3));
@@ -1144,11 +1357,14 @@ mod tests {
         assert_eq!(b.equip(Class::Swordsman, "helm+5", None), Ok(Slot::UpperHead));
         assert_eq!((b.count("helm"), b.count("helm+5")), (3, 1));
         assert_eq!(b.equip[Slot::UpperHead as usize], "helm+5");
+        // A +5 helm: the plain helm's numbers and the refine's 15 HP.
         assert_eq!(b.gear(Class::Swordsman), {
             let mut plain = Bag::starting(Class::Swordsman, "");
             plain.add("helm", 1).unwrap();
             plain.equip(Class::Swordsman, "helm", None).unwrap();
-            plain.gear(Class::Swordsman)
+            let mut g = plain.gear(Class::Swordsman);
+            g.hp += 15;
+            g
         });
         // Swapping to a plain helm returns the +5 to its stack.
         b.equip(Class::Swordsman, "helm", None).unwrap();
@@ -1166,12 +1382,12 @@ mod tests {
     #[test]
     fn stored_instances_round_trip_and_duplicates_merge() {
         let mut b = Bag::starting(Class::Swordsman, "");
-        b.add("helm+5[a_card]", 2).unwrap();
+        b.add("helm+5[vocal_card]", 2).unwrap();
         b.add("helm", 1).unwrap();
-        b.equip(Class::Swordsman, "helm+5[a_card]", None).unwrap();
+        b.equip(Class::Swordsman, "helm+5[vocal_card]", None).unwrap();
         let json = serde_json::to_string(&b.items).unwrap();
         assert!(json.contains(r#"{"id":"helm","n":1}"#), "plain rows keep the old form: {json}");
-        assert!(json.contains(r#""a":{"r":5,"c":["a_card"]}"#), "{json}");
+        assert!(json.contains(r#""a":{"r":5,"c":["vocal_card"]}"#), "{json}");
         let back = load_json(Class::Swordsman, &json, &serde_json::to_string(&b.equip).unwrap(), b.zeny as i64, "");
         assert_eq!(back, b);
         let old = r#"[{"id":"red_potion","n":2},{"id":"helm","n":1},{"id":"red_potion","n":3},{"id":"helm","n":1,"a":{"r":2}},{"id":"helm","n":4,"a":{}},{"id":"helm","n":1,"a":{"r":2,"c":[]}},{"id":"red_potion","n":29999}]"#;
@@ -1180,9 +1396,9 @@ mod tests {
         assert_eq!((merged.count("red_potion"), merged.count("helm"), merged.count("helm+2")), (MAX_STACK, 5, 2));
         // Cards in another order are the same instance; attributes on a
         // potion are dropped as a bad row.
-        let cards = r#"[{"id":"helm","n":1,"a":{"c":["b_card","a_card"]}},{"id":"helm","n":1,"a":{"c":["a_card","b_card"]}},{"id":"red_potion","n":1,"a":{"r":1}}]"#;
+        let cards = r#"[{"id":"jacket","n":1,"a":{"c":["willow_card","fabre_card"]}},{"id":"jacket","n":1,"a":{"c":["fabre_card","willow_card"]}},{"id":"red_potion","n":1,"a":{"r":1}}]"#;
         let merged = load_json(Class::Swordsman, cards, &serde_json::to_string(&b.equip).unwrap(), 0, "");
-        assert_eq!((merged.items.len(), merged.count("helm[a_card,b_card]")), (1, 2));
+        assert_eq!((merged.items.len(), merged.count("jacket[fabre_card,willow_card]")), (1, 2));
     }
 
     #[test]

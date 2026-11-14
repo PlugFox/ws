@@ -243,6 +243,7 @@ impl HubInstance {
         let now = self.tick;
         let mut msgs: Vec<ServerMsg> = Vec::new();
         self.volley_step(map, &mut msgs);
+        self.wisp_step(map, &mut msgs);
 
         // Bursts.
         self.bonuses.live.retain(|b| {
@@ -262,7 +263,11 @@ impl HubInstance {
                 p.map == map
                     && !p.link_dead
                     && p.fighter.as_ref().is_some_and(Fighter::is_up)
-                    && (p.x - b.x).powi(2) + (p.y - b.y).powi(2) <= PICK_RADIUS * PICK_RADIUS
+                    && {
+                        // The Poring's card reaches farther.
+                        let r = PICK_RADIUS * (1.0 + p.fighter.as_ref().map_or(0, |f| f.procs().magnet) as f32 / 100.0);
+                        (p.x - b.x).powi(2) + (p.y - b.y).powi(2) <= r * r
+                    }
             });
             match who {
                 Some(i) => {
@@ -491,7 +496,7 @@ impl HubInstance {
     /// at skill level `slv` with dice of character level `power`. The
     /// cast goes out like the player's own (`msgs`), with no wind-up and
     /// no cooldown, so the client only plays it.
-    fn bonus_cast(&mut self, idx: usize, skill: u16, slv: u8, power: u32, aimed: Aimed, msgs: &mut Vec<ServerMsg>) {
+    pub(super) fn bonus_cast(&mut self, idx: usize, skill: u16, slv: u8, power: u32, aimed: Aimed, msgs: &mut Vec<ServerMsg>) {
         let book = Arc::clone(&self.skills);
         let def = book.get(skill);
         let hz = self.config.tick_hz as f32;
@@ -513,6 +518,40 @@ impl HubInstance {
         // The skills of this tick already ran: it lands on the next one.
         let cx = Landing { def, skill, slv, now: self.tick + 1, hz, zone, power: Some(power) };
         land(&cx, &mut self.players[idx], aimed, horde, walk, &mut self.dice, &mut self.lives);
+    }
+
+    /// The Horong's card: a wisp casts Fire Bolt at the nearest monster
+    /// within reach, every few seconds, free (cards.rs).
+    fn wisp_step(&mut self, map: MapIdx, msgs: &mut Vec<ServerMsg>) {
+        const REACH: f32 = 5.0;
+        let Some(horde) = self.horde.as_ref() else { return };
+        let mut due: Vec<(usize, u16, f32, f32)> = Vec::new();
+        for (i, p) in self.players.iter().enumerate() {
+            let Some(f) = p.fighter.as_ref() else { continue };
+            if p.map != map || f.procs().wisp == 0 || f.cards.wisp_cd > 0 || !f.is_up() {
+                continue;
+            }
+            if let Some((s, _)) = horde.nearest_foe(p.x, p.y, REACH) {
+                due.push((i, s, horde.store().x[s as usize], horde.store().y[s as usize]));
+            }
+        }
+        if due.is_empty() {
+            return;
+        }
+        let Some((skill, def)) = self.skills.find("fire_bolt").filter(|(_, d)| d.ready()) else { return };
+        let slv = def.max_level.min(3);
+        let hz = self.config.tick_hz as f32;
+        for (i, s, x, y) in due {
+            let level = self.players[i].fighter.as_ref().map_or(1, |f| f.level);
+            let (px, py) = (self.players[i].x, self.players[i].y);
+            let tag = (s, self.horde.as_ref().map_or(0, |h| h.store().generation[s as usize]));
+            let dir = super::aim::norm(x - px, y - py).unwrap_or((1.0, 0.0));
+            let aimed = Aimed { x, y, ox: px, oy: py, dir, ally: None, monster: Some(tag) };
+            if let Some(f) = self.players[i].fighter.as_mut() {
+                f.cards.wisp_cd = (f.procs().wisp as f32 * hz) as u32;
+            }
+            self.bonus_cast(i, skill, slv, level, aimed, msgs);
+        }
     }
 
     /// Releases the spiral arrows that are due. A player who went down or

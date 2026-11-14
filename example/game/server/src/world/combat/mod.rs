@@ -7,6 +7,7 @@
 
 pub mod affixes;
 pub mod buffs;
+pub mod cards;
 pub mod class;
 pub mod combo;
 pub mod conditions;
@@ -15,6 +16,7 @@ pub mod exp;
 pub mod items;
 pub mod loot;
 pub mod magic;
+pub mod refine;
 pub mod monster;
 pub mod profile;
 pub mod rules;
@@ -26,7 +28,7 @@ pub use class::{Class, Save};
 pub use combo::{Combo, Rank};
 pub use conditions::{Condition, Status, CONDITIONS};
 pub use dice::{Dice, Rng};
-pub use items::{Bag, Gear};
+pub use items::{Bag, Gear, Slot};
 pub use exp::{exp_to_next, kill_value, level_diff_percent, share_kill};
 pub use monster::{Archetype, MonsterBlock, Size};
 pub use rules::{AttackOutcome, Damage, DamageType, Element, Affinity};

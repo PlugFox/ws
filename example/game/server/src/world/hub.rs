@@ -25,6 +25,8 @@ pub type MapIdx = u8;
 mod affix;
 #[cfg(test)]
 mod affix_tests;
+#[cfg(test)]
+mod card_tests;
 mod aim;
 mod area;
 mod bonus;
@@ -366,6 +368,9 @@ pub enum HubEvent {
     /// Internal: the player stands at a merchant that may take this
     /// order; the socket task applies it to the character's bag.
     Shop(crate::world::trade::ShopOrder),
+    /// Internal: the player stands at a smith; the socket task applies the
+    /// attempt (`Bag::refine`) with the smith's d100 `roll`.
+    Refine { item: String, slot: Option<crate::world::combat::Slot>, roll: u32, slip: u32 },
     /// Internal: the player drank `item` on a mission (one fewer).
     ItemUsed { item: String },
     /// Internal: zeny earned on a mission (kills, the clear bonus).
@@ -373,6 +378,9 @@ pub enum HubEvent {
     /// Internal: items monsters dropped for the player (merged stacks);
     /// the socket task puts them in the bag.
     Loot { items: Vec<(&'static str, u32)> },
+    /// Internal, test hook (`GAME_DEV=1`, `/give sword+8`): one copy of
+    /// the instance `key` into the bag.
+    DevGive { key: String },
     /// Internal: a player trade changed the bag (already stored); the
     /// socket task sends the new `inventory`.
     BagChanged,
@@ -431,6 +439,8 @@ pub struct HubInstance {
     monster_buf: BytesMut,
     /// Dice of this instance's combat.
     dice: combat::Rng,
+    /// Test hook (`GAME_DEV=1`, `/rig`): the next refine's d100 and slip.
+    rigged_refine: Option<(u32, u32)>,
     /// Wave count at the last combat step (the dead return on a new wave).
     last_wave: u32,
     /// Fighters of players who left this stage (user id): coming back
@@ -489,6 +499,8 @@ pub const STYLIST: &str = "stylist";
 pub const SKILL_MASTER: &str = "skill_master";
 /// NPC kind of a merchant (`shop` names its goods, `combat::items::SHOPS`).
 pub const SHOP: &str = "shop";
+/// NPC kind of a smith who refines weapons and armour (`refine`).
+pub const REFINER: &str = "refiner";
 
 /// Whether talking to an NPC of this kind lists the missions.
 pub fn gives_missions(kind: &str) -> bool {
@@ -576,6 +588,7 @@ impl HubInstance {
             tick: 0,
             horde: None,
             dice: combat::Rng::new(rand::random()),
+            rigged_refine: None,
             last_wave: 0,
             departed: Vec::new(),
             skills: Arc::new(SkillBook::default()),
@@ -957,8 +970,8 @@ impl HubInstance {
         let map = self.world.map(p.map);
         let reply = match map.manifest.npcs.iter().find(|n| n.id == npc_id) {
             None => hub_error("no_such_npc", format!("no NPC {npc_id} on {}", map.id())),
-            // GAME_DEV: merchants and mission givers answer from anywhere (e2e: `?shop=kafra`).
-            Some(n) if !n.in_reach(p.x, p.y) && !((n.kind == SHOP || gives_missions(&n.kind)) && self.at_merchant(n, p.x, p.y)) => {
+            // GAME_DEV: merchants, smiths and mission givers answer from anywhere (e2e: `?shop=kafra`).
+            Some(n) if !n.in_reach(p.x, p.y) && !((n.kind == SHOP || n.kind == REFINER || gives_missions(&n.kind)) && self.at_merchant(n, p.x, p.y)) => {
                 hub_error("npc_too_far", format!("walk closer to {}", n.name))
             }
             Some(n) if n.kind == SHOP => ServerMsg::Shop {
@@ -1130,12 +1143,35 @@ impl HubInstance {
             return;
         }
         // Test hook (`GAME_DEV=1`): `/give <item id>` puts one in the
-        // speaker's bag (the e2e magic items; anywhere, as loot).
+        // speaker's bag (the e2e magic items; anywhere, as loot);
+        // `/give <instance key>` a refined copy (`sword+8`), `/give zeny
+        // <n>` money (the e2e smith).
         if self.config.missions_anywhere
             && let Some(id) = text.strip_prefix("/give ")
-            && let Some(e) = crate::world::combat::items::find(id.trim())
         {
-            out.push((user_id, HubEvent::Loot { items: vec![(e.id, 1)] }));
+            let id = id.trim();
+            if let Some(e) = crate::world::combat::items::find(id) {
+                out.push((user_id, HubEvent::Loot { items: vec![(e.id, 1)] }));
+                return;
+            }
+            if let Some(n) = id.strip_prefix("zeny ").and_then(|n| n.trim().parse::<u64>().ok()) {
+                out.push((user_id, HubEvent::Zeny { amount: n }));
+                return;
+            }
+            if crate::world::combat::items::parse_key(id).is_some() {
+                out.push((user_id, HubEvent::DevGive { key: id.to_string() }));
+                return;
+            }
+        }
+        // Test hook (`GAME_DEV=1`): `/rig <d100> <slip>` fixes this
+        // instance's next refine roll (the e2e smith's failure).
+        if self.config.missions_anywhere
+            && let Some(args) = text.strip_prefix("/rig ")
+        {
+            let mut n = args.split_whitespace().filter_map(|v| v.parse::<u32>().ok());
+            if let (Some(roll), Some(slip)) = (n.next(), n.next()) {
+                self.rigged_refine = Some((roll.clamp(1, 100), slip.clamp(1, crate::world::combat::refine::SLIP_ROLL)));
+            }
             return;
         }
         // Test hook (`GAME_DEV=1`): `/spawn <monster id>` puts a monster of
@@ -1215,7 +1251,7 @@ impl HubInstance {
                     if (dx != 0.0 || dy != 0.0) && !f.mods.cloak {
                         f.unhide();
                     }
-                    step * f.mods.pace() * f.status.speed() * if f.curses.intersects(ModFlags::SLOW) { modifiers::SLOW_PACE } else { 1.0 }
+                    step * f.mods.pace() * f.card_pace() * f.status.speed() * if f.curses.intersects(ModFlags::SLOW) { modifiers::SLOW_PACE } else { 1.0 }
                 }
                 None => step * (1.0 + p.ride),
             };
@@ -1543,6 +1579,17 @@ pub(crate) mod test_support {
             kind: KAFRA.into(),
             shop: String::new(),
             x: 5,
+            y: 1,
+            facing: 0,
+            interact_radius: 1.5,
+        });
+        town.manifest.npcs.push(crate::world::map::NpcDef {
+            id: "smith".into(),
+            sprite: "4_m_02".into(),
+            name: "Smith".into(),
+            kind: REFINER.into(),
+            shop: String::new(),
+            x: 8,
             y: 1,
             facing: 0,
             interact_radius: 1.5,
