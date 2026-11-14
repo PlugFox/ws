@@ -430,6 +430,17 @@ pub async fn refresh(
         ));
     }
 
+    // A session unused for longer than the refresh lifetime has ended
+    // (`REFRESH_TOKEN_TTL_SECS`, sliding: every rotation renews it).
+    let idle = chrono::Utc::now() - session_record.last_seen_at;
+    if idle.to_std().is_ok_and(|d| d > state.config.refresh_token_ttl) {
+        let _ = SessionRepo::revoke_session(&state.pool, &session_id, "expired").await;
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Your session has expired. Please sign in again.", "code": "SESSION_EXPIRED" })),
+        ));
+    }
+
     // Check if token matches the current active refresh token
     let current = RefreshToken::verify_hash(&session_record.refresh_hash, &presented_hash);
     if current {

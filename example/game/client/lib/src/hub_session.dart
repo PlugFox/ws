@@ -11,6 +11,7 @@ import 'package:game_client/src/changelog.dart';
 import 'package:game_client/src/leaderboard.dart';
 import 'package:game_client/src/online.dart';
 import 'package:game_client/src/classes.dart';
+import 'package:game_client/src/click_move.dart';
 import 'package:game_client/src/engine.dart';
 import 'package:game_client/src/feedback.dart';
 import 'package:game_client/src/input.dart';
@@ -95,12 +96,19 @@ final class _Mob {
   /// Wall-clock seconds: attack / flinch animations play until then; a
   /// killed monster plays its death where it stood before it goes.
   double attackUntil = 0;
+
+  /// Faces its target while the attack plays (a crowd push may move it).
+  int attackFacing = 4;
   double hitUntil = 0;
   double? dieAt;
   int sentAction = -1;
 
   /// [MobStatus] bits.
   int status = 0;
+
+  /// Burrowed as last drawn, and when its digging is next heard.
+  bool burrowed = false;
+  double digAt = 0;
 
   /// Engine row flags and animation speed of the conditions.
   int get statusFlags => statusRowFlags(status);
@@ -138,7 +146,8 @@ int statusRowFlags(int status) =>
     (status & MobStatus.blinded != 0 ? Row.flagBlinded : 0) |
     (status & MobStatus.burning != 0 ? Row.flagBurning : 0) |
     (status & MobStatus.poisoned != 0 ? Row.flagPoisoned : 0) |
-    (status & MobStatus.taunted != 0 ? Row.flagTaunted : 0);
+    (status & MobStatus.taunted != 0 ? Row.flagTaunted : 0) |
+    (status & MobStatus.burrowed != 0 ? Row.flagBurrowed : 0);
 
 final class _Peer {
   _Peer(this.name, this.archetype, this.look);
@@ -157,6 +166,9 @@ final class _Peer {
 
   /// Their connection dropped (`player_link`): still on the stage, marked.
   bool linkDead = false;
+
+  /// On a Peco Peco (`player_mount`): drawn with the mounted body.
+  bool riding = false;
 
   /// Town pets (`pet:<sprite>`) are drawn with a location sprite, no look.
   String? get petSprite => archetype.startsWith('pet:') ? archetype.substring(4) : null;
@@ -230,8 +242,12 @@ final class HubSession {
   final _itemDefs = <String, ItemDef>{};
   String? _shopNpc;
 
-  /// Current lobby (`LobbyState`), or null.
+  /// The account's party (`LobbyState`), or null.
   LobbyInfo? _lobby;
+
+  /// When we last asked to form or join a party (a mission pick, a code,
+  /// an invitation): the party that forms then opens the Party window.
+  double _partyAsked = 0;
   String _missionName = '';
 
   /// The town greeting listed the keys already (once per visit).
@@ -256,6 +272,13 @@ final class HubSession {
   MissionBrief? _brief;
   List<MissionInfo> _offer = const [];
   String _offerFrom = '';
+
+  /// The mission ladder of the last mission giver (`MISSION_LIST`): the
+  /// expedition window's cards.
+  List<MissionCard> _ladder = const [];
+
+  /// The expedition window is open (a late `MISSION_LIST` redraws it).
+  bool _missionsShown = false;
   int _tickHz = 20;
   String _mapId = '';
   String _mapName = '';
@@ -276,6 +299,12 @@ final class HubSession {
   final _attackUntil = <int, double>{};
   final _attackFacing = <int, int>{};
 
+  /// Skill wind-ups (wall-clock end of the cast pose) and the end of the
+  /// combat stance after a swing or a cast; the character faces
+  /// [_attackFacing] until then while it stands.
+  final _castUntil = <int, double>{};
+  final _stanceUntil = <int, double>{};
+
   /// Own state from the vitals: 0 up, 1 downed, 2 dead.
   int get _myState => _vitals[_me]?.state ?? 0;
 
@@ -286,6 +315,10 @@ final class HubSession {
 
   /// Stage monsters by pool slot, and the kind table from `stage_joined`.
   final _mobs = <int, _Mob>{};
+
+  /// Affixed monsters by slot (server `MONSTER_AFFIXES`), kept until that
+  /// monster dies; a spawn of the same generation shows them.
+  final _affixes = <int, MonsterAffix>{};
   var _monsterKinds = const <String>[];
 
   /// Tick of the last monster section applied; null until a keyframe
@@ -312,6 +345,23 @@ final class HubSession {
   int _autoCast = 0;
   int _stopSends = 0;
 
+  /// Settings → Manual aiming: the mouse picks the monster and places
+  /// ground skills (a gamepad or touch keeps automatic targeting).
+  bool _manualAim = false;
+
+  /// `CAST_PREFS` as last sent on this connection (`(manual, auto)`).
+  (bool, int)? _sentCastPrefs;
+
+  /// Sends `CAST_PREFS` when it changed: manual aiming counts only while
+  /// the aim comes from the mouse.
+  void _syncCastPrefs() {
+    final input = _input.state;
+    final prefs = (_manualAim && !input.hasAim && !_input.touchOn, _autoCast);
+    if (prefs == _sentCastPrefs) return;
+    _sentCastPrefs = prefs;
+    _ws.push(ClientMsg.castPrefs(manualAim: prefs.$1, auto: prefs.$2)).ignore();
+  }
+
   /// Own skills (`skills` message) and the last pointer position (aim).
   Skills? _skills;
   (double, double)? _pointer;
@@ -324,6 +374,18 @@ final class HubSession {
 
   /// Entities sitting (players, townsfolk), from `pose` messages.
   final _sitting = <int>{};
+
+  /// The own character rides (`player_mount`), [_rideSpeed] percent faster;
+  /// [_statusPace] is what conditions leave of the pace (slowed, held).
+  bool _riding = false;
+  int _rideSpeed = 0;
+  double _statusPace = 1;
+
+  /// A gamepad / touch press of the mount slot was down last tick (edges).
+  bool _mountHeld = false;
+
+  /// When the current map was entered (`_now`): mount puffs only after it.
+  double _mapSince = 0;
 
   /// Light radius of the town map in cells (manifest `lightRadius`; 0 = none).
   double _townLight = 0;
@@ -397,9 +459,11 @@ final class HubSession {
     _ws = WebSocketClient.binary(
       options: WebSocketOptions(
         request: (url, attempt) async {
-          // Several failures in a row: maybe the token is the problem (the
-          // browser hides the 401), so renew it outright.
-          final token = await api.freshToken(force: attempt >= 3);
+          // A failed attempt may be a refused token (the browser hides
+          // the 401): the first retry renews it outright, and so does
+          // every fourth after (a renewal rotates the refresh token, so not
+          // on every attempt while the server is away).
+          final token = await api.freshToken(force: attempt == 1 || (attempt > 0 && attempt % 4 == 0));
           return WebSocketRequest(url.replace(queryParameters: {'token': token}));
         },
         reconnect: WebSocketReconnect(
@@ -443,9 +507,18 @@ final class HubSession {
         _hoverDirty = true;
       }).toJS,
     );
+    listen(web.window, 'pointerup', _onMouseUp.toJS);
     listen(web.window, 'keydown', _onKeyDown.toJS);
     listen(web.window, 'keyup', _onKeyUp.toJS);
-    listen(web.window, 'blur', ((web.Event _) => _keys.clear()).toJS);
+    listen(
+      web.window,
+      'blur',
+      ((web.Event _) {
+        _keys.clear();
+        // A button released outside the window never says so.
+        _steerHeld = _walker.steering = false;
+      }).toJS,
+    );
     listen(web.document.querySelector('canvas')! as web.HTMLCanvasElement, 'click', _onClick.toJS);
     // The player menu: right-click (a click, not a camera drag), long
     // press on touch (also the joystick zone's `contextmenu`).
@@ -484,10 +557,34 @@ final class HubSession {
               if (m.removeAt == null)
                 {'kind': m.kind < _monsterKinds.length ? _monsterKinds[m.kind] : '', 'x': m.x / 64, 'y': m.y / 64},
           ],
+          // Click to move: the walk under way and where it ends; the NPCs.
+          'walking': _walker.goal?.name,
+          'walkEnd': ?switch (_walker.end) {
+            (final x, final y) => [x, y],
+            null => null,
+          },
+          'npcs': [
+            for (final n in _npcs) {'id': n.id, 'name': n.name, 'x': n.x, 'y': n.y},
+          ],
         });
       }).toJS,
     );
+    // The ground cell under a client point (`[x, y]` or null): lets a
+    // scripted test find where to click.
+    globalContext.setProperty(
+      'gameGroundAt'.toJS,
+      ((JSNumber x, JSNumber y) => switch (view.pickGround(x.toDartDouble, y.toDartDouble)) {
+        (final gx, final gy) => [gx.toJS, gy.toJS].toJS,
+        null => null,
+      }).toJS,
+    );
     _frame(0);
+  }
+
+  /// [_send] for a frame that may form or join a party (see [_partyAsked]).
+  void _askParty(Uint8List frame) {
+    _partyAsked = _now();
+    _send(frame);
   }
 
   void _send(Uint8List frame) {
@@ -604,6 +701,8 @@ final class HubSession {
     switch (msg) {
       case Connected(:final serverVersion):
         this.serverVersion = serverVersion;
+        // A new connection knows nothing of how we cast yet.
+        _sentCastPrefs = null;
       case null || HubChannels():
         break;
       case final FeedbackResult r:
@@ -662,6 +761,24 @@ final class HubSession {
         );
       case BossShout(:final entityId, :final name, :final text, :final style):
         view.bossShout(entityId.toDouble(), name, text, style);
+      case final AffixDefs d:
+        view.setAffixDefs(jsonEncode(d.toJson()));
+      case MonsterAffixes(:final monsters):
+        for (final a in monsters) {
+          _affixes[a.slot] = a;
+          final m = _mobs[a.slot];
+          if (m != null && m.generation == a.generation && m.dieAt == null) _showAffixes(m);
+        }
+      case AffixEvents(:final events):
+        for (final e in events) {
+          view.affixEvent(e.entity.toDouble(), e.name, e.x, e.y);
+        }
+      case MonsterHp(:final bars):
+        // The bars under elites and bosses; the engine keeps each until
+        // its plate shows (or the monster is gone: NaN).
+        for (final (id, hp) in bars) {
+          view.setHealth(id.toDouble(), hp == 0 ? double.nan : hp / 255);
+        }
       case final BossBar b:
         view.setBossBar(jsonEncode(b.toJson()));
         // The newest encounter is the boss mark on the minimap.
@@ -685,6 +802,7 @@ final class HubSession {
         view.setBoss('');
         view.setBossBar('');
         _bossId = null;
+        _affixes.clear();
         view.setBuffs('[]');
         view.setCombo(0, 0, 0, 0);
         _combo = 0;
@@ -729,10 +847,15 @@ final class HubSession {
         view.showTrade('');
         _renderInventory();
       case LobbyState(:final lobby):
+        // The party is the account's: it comes back on every sign-in and
+        // after every mission. Only a party we just asked for opens the
+        // window; the rest updates the tab quietly.
+        final news = _lobby?.lobbyId != lobby.lobbyId && _now() - _partyAsked < 30;
+        if (news) _partyAsked = 0;
         _lobby = lobby;
         _missionName = lobby.mission.name;
         _sendPendingMods();
-        _renderLobby();
+        if (!_inStage) _renderLobby(quiet: !news);
         _renderModifiers();
       case LobbyLeft(:final reason):
         _lobby = null;
@@ -743,10 +866,10 @@ final class HubSession {
         switch (reason) {
           case 'kicked':
             view.toast('You were removed from the party.');
+          case 'expired':
+            view.toast('You were away too long and left the party.');
           case 'replaced':
             view.toast('Your party moved to another tab.');
-          case 'launched':
-            view.toast('$_missionName is starting!');
         }
       // The server restarted while we were away: the session it has for
       // us has no character. Select ours again and go on.
@@ -775,15 +898,11 @@ final class HubSession {
       case LobbyError(:final message) || HubError(:final message):
         view.toast(message);
       case final Inventory inv:
-        final before = _inventory;
         _inventory = inv;
         // Gear changed the derived numbers (armour class, weapon).
         if (inv.statsJson.isNotEmpty) {
           final fresh = jsonDecode(inv.statsJson);
           if (fresh is Map<String, Object?>) _stats = {..._stats, ...fresh};
-        }
-        if (_shopNpc != null && before != null && before.zeny != inv.zeny) {
-          view.shopNote(inv.zeny < before.zeny ? 'Thank you!' : 'Sold. Thank you!');
         }
         _renderInventory();
         _renderStatus();
@@ -812,11 +931,15 @@ final class HubSession {
         view.closeDialog();
         _shopNpc = npc;
         view.showShop(jsonEncode({'npc': npc, 'name': name, 'items': items}));
+      case ShopDone(:final spent, :final earned):
+        view.shopDone(spent, earned);
       case ItemUsed(:final item):
         final d = _itemDefs[item];
         if (d != null) view.toast('${d.name}: ${d.desc.split('\n').first.replaceAll('**', '')}');
       case PlayerGear(:final entityId, :final weapon):
         _setWeapon(entityId, weapon);
+      case PlayerHeadgear(:final entityId, :final items):
+        view.setHeadgear(entityId.toDouble(), items.join(','));
       case Loot(:final entityId, :final x, :final y, :final item, :final count, :final rare):
         view.showLoot(entityId.toDouble(), x, y, item, count, rare);
         if (rare) {
@@ -832,9 +955,11 @@ final class HubSession {
       case BonusSpawn(:final id, :final bonus, :final x, :final y, :final lifeMs):
         // A pickup bubble on the stage (and its minimap mark).
         view.showBonus(id.toDouble(), bonus, x, y, lifeMs);
+        _bonusAt[id] = (x, y);
       case BonusGone(:final id, :final entityId):
         // Taken by [entityId] (its burst and name over them) or burst.
         view.takeBonus(id.toDouble(), entityId.toDouble());
+        _bonusAt.remove(id);
       case PlayerLook(:final entityId, :final look):
         _onPlayerLook(entityId, look);
       case final MapEnter enter:
@@ -863,11 +988,16 @@ final class HubSession {
         } else {
           _sitting.remove(entityId);
         }
+      case final PlayerMount m:
+        _onMount(m);
       case FlagPing(:final entityId, :final flag, :final x, :final y):
         view.showFlag(entityId.toDouble(), flag, x, y, entityId == _me ? _myName : (_peers[entityId]?.name ?? ''));
       case MissionBriefing(:final brief):
         _brief = brief;
         view.setMissionBrief(jsonEncode(brief.toJson()));
+      case MissionList(:final missions):
+        _ladder = missions;
+        if (_missionsShown) _showMissions(null);
       case final ModifierDefs d:
         _modDefs = d;
         view.setModifierDefs(
@@ -895,6 +1025,15 @@ final class HubSession {
         // The overtime fog: the engine closes the circle on its own.
         view.setPoisonFog(jsonEncode({...fog.toJson(), 'warn': fog.begun}));
         if (fog.begun) view.toast('A poison fog is closing in! Stay inside the circle.');
+      case EnvLight(:final radius):
+        // The run's light changed (a darkness or storm event, a lit
+        // brazier); the own light upgrades still add to it.
+        _baseLight = radius;
+        if (_inStage) view.setLightRadius(_baseLight + (_vitals[_me]?.light ?? 0));
+      case final EnvEvent e:
+        _onEnvEvent(e);
+      case EnvShake(:final intensity, :final durationMs):
+        if (_inStage) view.shakeCamera(intensity / 255, durationMs);
       case FogExposure(:final secs, :final deathSecs, :final fatal):
         view.setFogExposure(secs, deathSecs);
         if (fatal) view.toast('The poison fog has claimed you.');
@@ -975,6 +1114,7 @@ final class HubSession {
           if (m != null) view.removeEntity(m.id);
           m = _mobs[slot] = _Mob(slot, s.mobGenerations[i], s.mobKinds[i])..status = status < 0 ? 0 : status;
           m.set(s.mobXs[i], s.mobYs[i], s.mobVxs[i], s.mobVys[i], s.tick);
+          if (_affixes[slot]?.generation == m.generation) _showAffixes(m);
         case MobOp.move when m != null && m.removeAt == null:
           if (m.dieAt == null) m.set(s.mobXs[i], s.mobYs[i], s.mobVxs[i], s.mobVys[i], s.tick);
           if (status >= 0) m.status = status;
@@ -1015,12 +1155,17 @@ final class HubSession {
     if (v.level > 0) _peers[v.entityId]?.tier = tierOfLevel(v.level);
     if (v.entityId == _me) {
       if (_inStage && (before?.light ?? 0) != v.light) view.setLightRadius(_baseLight + v.light);
-      // Predict what the server does: held or rooted stand, slowed walk at half.
-      _predictor?.pace = v.status & (MobStatus.held | MobStatus.rooted) != 0
+      // Predict what the server does: held or rooted stand, slowed walk at
+      // half; feared, the server steers (it runs from the scare): no
+      // prediction, the corrections carry the player.
+      final wasFeared = (before?.status ?? 0) & MobStatus.feared != 0;
+      if (v.status & MobStatus.feared != 0 && !wasFeared) view.toast('You are terrified! You flee and cannot fight.');
+      _statusPace = v.status & (MobStatus.held | MobStatus.rooted | MobStatus.feared) != 0
           ? 0
           : v.status & MobStatus.slowed != 0
           ? 0.5
           : 1;
+      _applyPace();
       if (wasUp && v.state == 1) view.toast('You are down! Stand by an ally to be revived.');
       _renderStatus();
     }
@@ -1028,6 +1173,8 @@ final class HubSession {
 
   void _applyHealth(PlayerVitals v) {
     view.setHealth(v.entityId.toDouble(), v.maxHp > 0 ? v.hp / v.maxHp : double.nan);
+    // Every fighter on the map is in the party: their mana under the HP.
+    view.setMana(v.entityId.toDouble(), v.maxSp > 0 ? v.sp / v.maxSp : double.nan);
   }
 
   void _onCombat(Combat c) {
@@ -1044,9 +1191,10 @@ final class HubSession {
       if (mob != null) {
         mob
           ..attackUntil = now + 0.5
-          ..facing = s.facing;
+          ..attackFacing = s.facing;
       } else {
         _attackUntil[s.entityId] = now + 0.45;
+        _stanceUntil[s.entityId] = now + 0.45 + 4;
         _attackFacing[s.entityId] = s.facing;
         _tracks[s.entityId]?.resetSent();
       }
@@ -1059,6 +1207,9 @@ final class HubSession {
       if (mob == null) continue;
       if (h.isKill) {
         if (mob.dieAt == null) view.unitSound(h.target.toDouble(), 'die');
+        // Its stars go with it (the plate fades, the death blast is the
+        // server's telegraph).
+        if (mob.dieAt == null && _affixes.remove(mob.slot) != null) view.setAffixes(mob.id, 0, 0, '');
         mob.dieAt ??= now;
       } else if (!h.isMiss) {
         view.unitSound(h.target.toDouble(), 'hit');
@@ -1084,12 +1235,24 @@ final class HubSession {
     if ((_vitals[id]?.state ?? 0) != 0) return Act.die;
     if (moving) return Act.walk;
     if (_sitting.contains(id)) return Act.sit;
-    final until = _attackUntil[id] ?? 0;
-    // With a weapon: the swing of its family, then the combat stance for a
-    // while (RO draws weapons only in those), then the plain stand.
-    if (now < until) return weaponFamily(id) == 'dagger' ? Act.attack3 : Act.attack2;
-    if (_inStage && now < until + 4) return Act.ready;
+    // A skill's wind-up pose, then (as after a swing) the combat stance.
+    if (now < (_castUntil[id] ?? 0)) return Act.cast;
+    // With a weapon: the swing (the engine picks the one its class and
+    // family draw the weapon in), then the combat stance for a while (RO
+    // draws weapons only in those), then the plain stand.
+    if (now < (_attackUntil[id] ?? 0)) return Act.attack2;
+    if (_inStage && now < (_stanceUntil[id] ?? 0)) return Act.ready;
     return Act.idle;
+  }
+
+  /// Facing of a character: where it walks while it moves; standing, the
+  /// target of its last swing or cast while it keeps the pose or the
+  /// combat stance (else the stance would turn back to the last step).
+  int _poseFacing(int id, bool moving, int facing, double now) {
+    final f = _attackFacing[id];
+    if (moving || f == null) return facing;
+    final hold = math.max(_castUntil[id] ?? 0, _inStage ? _stanceUntil[id] ?? 0 : _attackUntil[id] ?? 0);
+    return now < hold ? f : facing;
   }
 
   /// Basic Info and the orbs: live vitals on a mission; in town, full
@@ -1140,12 +1303,22 @@ final class HubSession {
   }
 
   /// Class title at a level (tiers at 30 and 60, see COMBAT.md).
+  /// ` 3 d`, ` 5 h`, ` 12 min` (nothing under a minute): how long a party
+  /// member has been offline.
+  static String _ago(int secs) => switch (secs) {
+    >= 86400 => ' ${secs ~/ 86400} d',
+    >= 3600 => ' ${secs ~/ 3600} h',
+    >= 60 => ' ${secs ~/ 60} min',
+    _ => '',
+  };
+
   static String _title(String archetype, int level) {
     const titles = {
       'swordsman': ['Swordsman', 'Crusader', 'Paladin'],
       'mage': ['Mage', 'Wizard', 'High Wizard'],
       'archer': ['Archer', 'Hunter', 'Sniper'],
       'acolyte': ['Acolyte', 'Priest', 'High Priest'],
+      'thief': ['Thief', 'Assassin', 'Assassin Cross'],
     };
     final t = titles[archetype];
     if (t == null) return archetype;
@@ -1173,6 +1346,7 @@ final class HubSession {
           town: town,
           mission: _missionName,
           brief: _brief?.map == map.id ? _brief : null,
+          missionTips: _ladder.where((c) => c.map == map.id).firstOrNull?.tips ?? const [],
           modifiers: mods,
         ),
       }),
@@ -1205,6 +1379,8 @@ final class HubSession {
     _mapName = map.name;
     final x = msg.x, y = msg.y;
     _cancelWalk();
+    _bonusAt.clear();
+    _portals = const [];
     view.showPlayerMenu('');
     _hoverDirty = true;
     view.closeDialog();
@@ -1245,8 +1421,16 @@ final class HubSession {
     } else {
       p.reset(grid, x, y);
     }
+    _applyPace();
+    _mapSince = _now();
     _npcs = [
       for (final (i, n) in ((manifest['npcs'] as List?) ?? const []).indexed) _Npc(i, n as Map<String, Object?>),
+    ];
+    // Portal triggers (`[x, y, r]`, cells): click targets.
+    _portals = [
+      for (final pt in (manifest['portals'] as List?) ?? const [])
+        if ((pt as Map)['trigger'] case [final num px, final num py, final num r])
+          (px.toDouble() + 0.5, py.toDouble() + 0.5, r.toDouble()),
     ];
     // NPCs never move: one row each per map, then the GPU owns them.
     for (final npc in _npcs) {
@@ -1291,6 +1475,11 @@ final class HubSession {
     view.playBgm(bgm == null ? null : '$assetsBase/client/$bgm');
     _loading = false;
     view.endLoading();
+    if (_devShop case final shop?) {
+      _devShop = null;
+      _devNpc = shop;
+      _send(ClientMsg.npcInteract(shop));
+    }
     if (_inStage) {
       _renderStagePanel();
       view.toast('$_mapName: the mission has begun. Walk to the exit or use the panel to return.');
@@ -1480,105 +1669,245 @@ final class HubSession {
     return (at('clientX'), at('clientY'));
   }
 
+  /// A click that reached the canvas. The mouse acts on its press
+  /// ([_onMouseDown]); this is a touch tap (the canvas's own, or the
+  /// joystick zone's short tap): an NPC always (tap to talk), the rest with
+  /// Settings → Tap to move.
   void _onClick(web.MouseEvent e) {
-    // The click that ends a long press (the player menu) is not a tap.
-    if (_now() < _suppressClickUntil) return;
+    // The click that ends a long press (the player menu) is not a tap,
+    // nor the one that follows a mouse press.
+    if (_now() < _suppressClickUntil || _now() - _mouseDownAt < 1) return;
     final (x, y) = _clientXY(e);
-    final id = view.pickEntity(x, y);
-    if (id.isNaN || id >= 0) return;
-    final npc = _npcs.where((n) => n.entityId == id).firstOrNull;
-    if (npc == null) return;
-    final p = _predictor;
-    if (p != null && npc.inReach(p.x, p.y)) {
-      _cancelWalk();
-      _send(ClientMsg.npcInteract(npc.id));
-    } else {
-      _walkTo(npc);
-    }
+    _clickWorld(x, y, everything: _tapMove);
   }
 
   // ------------------------------------------------- click to walk, hover
 
-  /// Click to walk: the NPC walked to, the way there (cell centres) and
-  /// the progress watch (closest distance so far, and when it last shrank).
-  _Npc? _walkNpc;
-  List<(double, double)> _walkPath = const [];
-  int _walkStep = 0;
-  double _walkBest = double.infinity;
-  double _walkBestAt = 0;
+  /// Click (tap) to move (COMBAT.md §4.2): the walk under way, if any, and
+  /// the left button held on the ground (the walk follows the pointer).
+  final _walker = Walker();
+  bool _steerHeld = false;
+  double _steerAt = 0;
+  double _mouseDownAt = -10;
+
+  /// Settings → Click to move (mouse, on by default) and Tap to move
+  /// (touch, off by default: the joystick is the touch default and a
+  /// missed skill button would walk the hero out of its stance).
+  bool _clickMove = true;
+  bool _tapMove = false;
+
+  /// Live pickup bubbles (id → cell) and the portals of the map (centre,
+  /// radius): click targets.
+  final _bonusAt = <int, (double, double)>{};
+  var _portals = const <(double, double, double)>[];
+
+  /// Basic attack reach of the held weapon (cells, the server's `stats`).
+  double get _weaponReach {
+    final w = _stats['weapon'];
+    return ((w is Map ? w['reach'] : null) as num?)?.toDouble() ?? 2.5;
+  }
+
+  /// Left button on the canvas (mouse): the same as a tap, and on the
+  /// ground holding it steers.
+  void _onMouseDown(web.PointerEvent e) {
+    if (e.button != 0 || e.ctrlKey || e.metaKey) return;
+    _mouseDownAt = _now();
+    final (x, y) = _clientXY(e);
+    if (_clickWorld(x, y, everything: _clickMove) == WalkGoal.ground) {
+      _steerHeld = true;
+      _walker.steering = true;
+      _steerAt = _now();
+      _hoverDirty = true;
+    }
+  }
+
+  /// Left button released anywhere: the walk goes on to the last point.
+  void _onMouseUp(web.PointerEvent e) {
+    if (e.pointerType != 'mouse' || e.button != 0 || !_steerHeld) return;
+    _steerHeld = false;
+    _walker.steering = false;
+    _hoverDirty = true;
+    final end = _walker.end;
+    if (_walker.active && end != null) view.markMove(end.$1, end.$2, 0);
+  }
+
+  /// A click or tap on the world at client (x, y): talk to the NPC under
+  /// it (walking there first); with [everything] also walk into weapon
+  /// reach of a monster, into a pickup bubble or a portal, or to the
+  /// ground. Returns what it walks to (null: nothing).
+  WalkGoal? _clickWorld(double x, double y, {required bool everything}) {
+    final p = _predictor;
+    if (p == null || _loading || _offline || _myState != 0 || view.dialogOpen()) return null;
+    final id = view.pickEntity(x, y);
+    final npc = id.isNaN || id >= 0 ? null : _npcs.where((n) => n.entityId == id).firstOrNull;
+    if (npc != null) {
+      if (npc.inReach(p.x, p.y)) {
+        _cancelWalk();
+        _send(ClientMsg.npcInteract(npc.id));
+      } else {
+        _walkTo(npc);
+      }
+      return WalkGoal.npc;
+    }
+    if (!everything) return null;
+    final mob = !id.isNaN && id >= monsterEntityBase ? _mobs[id.toInt() - monsterEntityBase] : null;
+    if (mob != null && mob.dieAt == null && mob.removeAt == null) {
+      final (mx, my) = _mobAt(mob);
+      // Centre to centre, so the reach to its edge (the server's rule) holds
+      // for any body; a little inside it so a step back does not undo it.
+      final reach = math.max(1.0, _weaponReach - 0.3);
+      return _walkGoal(WalkGoal.monster, mx, my, reach: reach, target: (mob.slot, mob.generation)) ? WalkGoal.monster : null;
+    }
+    final bonus = view.pickBonus(x, y);
+    final at = bonus.isNaN ? null : _bonusAt[bonus.toInt()];
+    if (at != null) {
+      // The server takes it within 1.2 cells.
+      return _walkGoal(WalkGoal.bonus, at.$1, at.$2, reach: 0.8, target: bonus.toInt()) ? WalkGoal.bonus : null;
+    }
+    final g = view.pickGround(x, y);
+    if (g == null) return null;
+    final portal = portalAt(_portals, g.$1, g.$2);
+    if (portal != null) {
+      final (px, py, r) = portal;
+      if (!_walkGoal(WalkGoal.portal, px, py, reach: math.max(0.5, r - 0.75))) return null;
+      view.markMove(px, py, 0);
+      return WalkGoal.portal;
+    }
+    return _walkGoal(WalkGoal.ground, g.$1, g.$2) ? WalkGoal.ground : null;
+  }
+
+  /// Starts a walk; marks where a ground walk ends (tinted when it stops
+  /// short of the click). False when there is no way at all.
+  bool _walkGoal(WalkGoal goal, double tx, double ty, {double reach = 0, Object? target}) {
+    final p = _predictor!;
+    final end = _walker.start(p.grid, p.x, p.y, goal, tx, ty, reach: reach, target: target, now: _now());
+    if (end == null) {
+      if (goal != WalkGoal.ground) view.toast('No way there from here.');
+      return false;
+    }
+    _steerHeld = false;
+    _sitting.remove(_me);
+    if (goal == WalkGoal.ground) {
+      final short = (end.$1 - tx).abs() > 0.75 || (end.$2 - ty).abs() > 0.75;
+      view.markMove(end.$1, end.$2, short ? 1 : 0);
+    }
+    return true;
+  }
 
   /// Walks to [npc] (a clicked NPC out of reach) and talks on arrival.
   void _walkTo(_Npc npc) {
     final p = _predictor;
     if (p == null || _loading || _myState != 0) return;
     // A step inside the radius, so rounding never leaves us just outside.
-    final path = p.grid.findPath(p.x, p.y, npc.x, npc.y, math.max(0.5, npc.radius - 0.35));
-    if (path == null) {
+    final reach = math.max(0.5, npc.radius - 0.35);
+    if (_walker.start(p.grid, p.x, p.y, WalkGoal.npc, npc.x, npc.y, reach: reach, target: npc, now: _now()) == null) {
       view.toast('No way to ${npc.name} from here.');
       return;
     }
-    _walkNpc = npc;
-    _walkPath = path;
-    _walkStep = 0;
-    _walkBest = double.infinity;
-    _walkBestAt = _now();
+    _steerHeld = false;
     _sitting.remove(_me);
   }
 
   void _cancelWalk() {
-    _walkNpc = null;
-    _walkPath = const [];
+    _walker.stop();
+    _steerHeld = false;
+    view.markMove(double.nan, double.nan, 0);
   }
 
-  /// This tick's world direction along the way; talks on arrival, gives
-  /// up when stuck (no closer for 1.5 s).
+  /// A monster's cell now (its record dead-reckoned to the render clock).
+  (double, double) _mobAt(_Mob m) {
+    final u = (_clock.renderTick(_now()) - m.stamp).clamp(-Reckoning.back, Reckoning.horizon);
+    return (
+      m.x / Reckoning.posOne + m.vx / Reckoning.velOne * u,
+      m.y / Reckoning.posOne + m.vy / Reckoning.velOne * u,
+    );
+  }
+
+  /// This tick's world direction of the click-to-move walk: follows the
+  /// pointer while the button is held, a monster while it lives; talks to
+  /// an NPC on arrival, gives up when stuck.
   (double, double) _walkDir(LocalPredictor p) {
-    final npc = _walkNpc!;
-    if (npc.inReach(p.x, p.y)) {
-      _cancelWalk();
-      if (!view.dialogOpen()) _send(ClientMsg.npcInteract(npc.id));
-      return (0, 0);
-    }
+    final w = _walker;
     final now = _now();
-    final dx = npc.x - p.x, dy = npc.y - p.y;
-    final dist = math.sqrt(dx * dx + dy * dy);
-    if (dist < _walkBest - 0.25) {
-      _walkBest = dist;
-      _walkBestAt = now;
-    } else if (now - _walkBestAt > 1.5) {
-      _cancelWalk();
-      view.toast('Could not reach ${npc.name}.');
-      return (0, 0);
+    switch (w.goal) {
+      case WalkGoal.ground when _steerHeld && now - _steerAt >= 0.12:
+        _steerAt = now;
+        final ptr = _pointer;
+        final g = ptr == null ? null : view.pickGround(ptr.$1, ptr.$2);
+        if (g != null) w.retarget(p.grid, p.x, p.y, g.$1, g.$2, now: now);
+      case WalkGoal.monster:
+        final (slot, gen) = w.target! as (int, int);
+        final m = _mobs[slot];
+        if (m == null || m.generation != gen || m.dieAt != null || m.removeAt != null) {
+          _cancelWalk();
+          return (0, 0);
+        }
+        if (now - _steerAt >= 0.3) {
+          _steerAt = now;
+          final (mx, my) = _mobAt(m);
+          w.retarget(p.grid, p.x, p.y, mx, my, now: now, slack: 1);
+        }
+      case WalkGoal.bonus when !_bonusAt.containsKey(w.target):
+        _cancelWalk();
+        return (0, 0);
+      default:
+        break;
     }
-    while (_walkStep < _walkPath.length) {
-      final (wx, wy) = _walkPath[_walkStep];
-      if ((wx - p.x).abs() < 0.35 && (wy - p.y).abs() < 0.35 && _walkStep < _walkPath.length - 1) {
-        _walkStep++;
-        continue;
-      }
-      final ex = wx - p.x, ey = wy - p.y;
-      final len = math.sqrt(ex * ex + ey * ey);
-      if (len < 0.05) break;
-      return quantizeDir(ex / len, ey / len);
+    final npc = w.target is _Npc ? w.target! as _Npc : null;
+    final status = w.next(p.x, p.y, now, stepLen: p.rules.step * p.pace);
+    switch (status) {
+      case WalkStatus.walking:
+        return w.dx == 0 && w.dy == 0 ? (0, 0) : quantizeDir(w.dx, w.dy);
+      case WalkStatus.arrived:
+        if (npc != null && !view.dialogOpen()) _send(ClientMsg.npcInteract(npc.id));
+      // Held up inside the talk radius (short of the margin aimed for):
+      // close enough to talk.
+      case WalkStatus.stuck when npc != null && npc.inReach(p.x, p.y):
+        if (!view.dialogOpen()) _send(ClientMsg.npcInteract(npc.id));
+      case WalkStatus.stuck:
+        view.toast(npc != null ? 'Could not reach ${npc.name}.' : 'Could not get there.');
+      case WalkStatus.idle:
+        break;
     }
-    // At the last point but not in reach (it moved?): head straight in.
-    return dist < 1e-6 ? (0, 0) : quantizeDir(dx / dist, dy / dist);
+    return (0, 0);
   }
 
   /// The entity under the mouse changed since the last frame: light up
-  /// NPCs (a hand cursor: click to talk) and players (right-click menu).
+  /// NPCs (click to talk) and players (right-click menu), and pick the
+  /// world cursor: talk over an NPC, attack over a living monster, pick
+  /// over a pickup bubble.
   bool _hoverDirty = false;
   double _hoverId = double.nan;
+  String _hoverCursor = '';
 
   void _updateHover() {
     if (!_hoverDirty) return;
     _hoverDirty = false;
     final ptr = _pointer;
     var id = double.nan;
+    var cursor = '';
     if (ptr != null && !_input.touchOn && !_loading) {
       final hit = view.pickEntity(ptr.$1, ptr.$2);
       if (!hit.isNaN && (hit < 0 ? _npcs.any((n) => n.entityId == hit) : _isPlayer(hit.toInt()))) id = hit;
+      if (!id.isNaN && id < 0) {
+        cursor = 'talk';
+      } else if (!hit.isNaN && hit >= monsterEntityBase && _mobs[hit.toInt() - monsterEntityBase]?.dieAt == null) {
+        cursor = 'attack';
+      } else if (!view.pickBonus(ptr.$1, ptr.$2).isNaN) {
+        cursor = 'pick';
+      } else if (_clickMove || _steerHeld) {
+        // Click to move: the walking cursor over open ground, the door
+        // over a portal.
+        final g = view.pickGround(ptr.$1, ptr.$2);
+        final grid = _predictor?.grid;
+        if (g != null && portalAt(_portals, g.$1, g.$2) != null) {
+          cursor = 'portal';
+        } else if (_steerHeld || (g != null && (grid?.isWalkable(g.$1, g.$2) ?? false))) {
+          cursor = 'walk';
+        }
+      }
     }
+    if (cursor != _hoverCursor) view.setCursor(_hoverCursor = cursor);
     if (id == _hoverId || (id.isNaN && _hoverId.isNaN)) return;
     _hoverId = id;
     view.setHover(id, !id.isNaN && id < 0);
@@ -1606,6 +1935,7 @@ final class HubSession {
         _rightDown = (x, y, _now());
         _lastMouseRight = _now();
       }
+      _onMouseDown(e);
       return;
     }
     _cancelHold();
@@ -1753,7 +2083,7 @@ final class HubSession {
           {
             'id': 'party:accept:${inv.from}',
             'label': 'Join the party',
-            'detail': 'Wait in their lobby for ${inv.mission}.',
+            'detail': 'Team up: the leader starts the missions.',
           },
           {'id': 'party:decline:${inv.from}', 'label': 'Decline', 'detail': 'Stay where you are; ${inv.name} is told.'},
         ],
@@ -1796,7 +2126,25 @@ final class HubSession {
     view.setOnline(_inStage || s == null || s.down ? 0 : s.online);
   }
 
+  /// A map event of the run (server `hub/env.rs`): a toast as it warns,
+  /// begins and ends. Its hazards come as lasting ground (`BossZones`).
+  void _onEnvEvent(EnvEvent e) {
+    if (!_inStage) return;
+    view.setEnvironmentEvent(
+      jsonEncode({'phase': e.phase, 'id': e.id, 'name': e.name, 'startMs': e.startMs, 'durationMs': e.durationMs}),
+    );
+    switch (e.phase) {
+      case EnvEvent.warning:
+        view.toast(e.text.isNotEmpty ? e.text : '${e.name} is coming!');
+      case EnvEvent.begins:
+        view.toast('${e.name}!');
+      case EnvEvent.ends:
+        view.toast('The ${e.name.toLowerCase()} is over.');
+    }
+  }
+
   void _onNpcDialog(NpcDialog msg) {
+    if (msg.npc != _devNpc) _devNpc = null;
     if (msg.kind == 'stylist') {
       view.closeDialog();
       _stylist = msg.npc;
@@ -1838,29 +2186,28 @@ final class HubSession {
         if (cutinUrl != null) 'cutin': cutinUrl,
         'text': [
           npc?.text ?? (isBoard ? '' : 'Hello there.'),
-          if (isBoard && inLobby) 'You are in a party: its leader starts its mission. Leave it to pick another.',
-          if (isBoard && !inLobby) 'Missions: go alone or in parties of up to four.',
+          if (isBoard && inLobby && _leading) 'You lead a party: pick its mission and start whenever you like.',
+          if (isBoard && inLobby && !_leading) 'You are in a party: its leader picks and starts its missions.',
+          if (isBoard && !inLobby && missions.isNotEmpty)
+            'Missions: go alone or in parties of up to ${missions.map((m) => m.maxPlayers).reduce(math.max)}.',
         ].where((t) => t.isNotEmpty).join('\n'),
         if (isLog)
           'sections': [
             for (final c in changelog) {'title': c.title, 'date': c.date, 'items': c.items},
           ],
         'options': [
-          if (isBoard && !inLobby)
-            for (final m in missions)
-              {
-                'id': 'missions:${m.id}',
-                'label': m.name,
-                'detail': '${m.description} See the location, its monsters and their drops, then start alone or find a party.',
+          // Every mission is picked in the expedition window (list, page,
+          // modifiers, start); a party member sees the leader's pick there.
+          if (isBoard && missions.isNotEmpty)
+            {
+              'id': 'missions:',
+              'label': 'Choose an expedition',
+              'detail': switch ((inLobby, _leading)) {
+                (false, _) => _expeditionsLine(missions),
+                (true, true) => "Pick your party's next expedition and start whenever you like.",
+                _ => "See where your party is headed: its leader picks and starts.",
               },
-          // In a party: its mission, to start from the window (the leader).
-          if (isBoard && inLobby)
-            for (final m in missions.where((m) => m.id == _lobby?.mission.id))
-              {
-                'id': 'missions:${m.id}',
-                'label': m.name,
-                'detail': _leading ? "Your party's mission: start it once everyone is ready." : "Your party's mission: the leader starts it.",
-              },
+            },
           if (isKafra)
             {'id': 'restyle', 'label': 'Hair and dyes', 'detail': 'A new hair style, hair dye or clothes dye.'},
           if (isMaster)
@@ -1894,24 +2241,79 @@ final class HubSession {
     );
   }
 
-  /// The mission window for the last mission giver's offer (the briefs
-  /// come with the dialog: `MissionBriefing`), or for the party's mission
-  /// (its modifiers) when no giver was asked.
+  /// One line for the Kafra's "Choose an expedition": how many, which levels.
+  String _expeditionsLine(List<MissionInfo> offer) {
+    final open = _ladder.where((c) => !c.soon).toList();
+    if (_ladder.length > 1 && open.isNotEmpty) {
+      final lo = open.map((c) => c.band.min).reduce(math.min), hi = open.map((c) => c.band.max).reduce(math.max);
+      final soon = _ladder.length - open.length;
+      return '${open.length} expedition${open.length == 1 ? '' : 's'} open, Lv $lo–$hi${soon > 0 ? ', $soon more coming soon' : ''}. '
+          'Go alone or in parties of up to ${open.map((c) => c.maxPlayers).reduce(math.max)}.';
+    }
+    return 'Pick where to fight, see its monsters and loot, then go alone or in parties of up to '
+        '${offer.map((m) => m.maxPlayers).reduce(math.max)}.';
+  }
+
+  /// The expedition window for the last mission giver's offer (the cards
+  /// come with the dialog: `MissionList`, then the briefs: `MissionBriefing`),
+  /// or for the party's mission (its modifiers) when no giver was asked.
   void _showMissions(String? selected) {
     final lobby = _lobby;
     final offer = _offer.isNotEmpty ? _offer : [?lobby?.mission];
     if (offer.isEmpty) return;
+    final cards = {for (final c in _ladder) c.id: c};
+    // The ladder in its order (coming-soon ones too) when a giver offered
+    // it; else the offer, with its card where there is one.
+    final ids = _offer.isNotEmpty && _ladder.isNotEmpty ? [for (final c in _ladder) c.id] : [for (final m in offer) m.id];
+    final infos = {for (final m in offer) m.id: m};
+    _missionsShown = true;
     view.showMissions(
       jsonEncode({
         'name': _offer.isNotEmpty ? _offerFrom : 'Party',
         'missions': [
-          for (final m in offer) {'id': m.id, 'name': m.name, 'description': m.description, 'maxPlayers': m.maxPlayers},
+          for (final id in ids)
+            if (cards[id] case final c?)
+              _cardJson(c)
+            else if (infos[id] case final m?)
+              {'id': m.id, 'name': m.name, 'description': m.description, 'maxPlayers': m.maxPlayers, 'map': m.map},
         ],
         'inLobby': lobby != null,
         'selected': ?selected,
+        'level': _progress?.level ?? _skills?.level ?? _myLevel,
+        // Who a run would take: the under-level warning goes by them all
+        // (server `LevelBand::fit`: only when everyone is under the band).
+        'levels': _goingLevels,
       }),
     );
   }
+
+  /// Levels of who a start takes: the party's members in town, else the player.
+  List<int> get _goingLevels {
+    final me = _progress?.level ?? _skills?.level ?? _myLevel;
+    final lobby = _lobby;
+    if (lobby == null) return [me];
+    final going = [for (final m in lobby.members) if (m.online && !m.away) m.entityId == _me ? me : m.level];
+    return going.isEmpty ? [me] : going;
+  }
+
+  /// A mission card as the expedition window takes it (`MissionEntry`).
+  static Map<String, Object?> _cardJson(MissionCard c) => {
+    'id': c.id,
+    'name': c.name,
+    'description': c.story.isNotEmpty ? c.story : c.description,
+    'maxPlayers': c.maxPlayers,
+    'map': c.map,
+    'art': c.art,
+    'levels': [c.band.min, c.band.max],
+    'recommended': c.band.recommended,
+    'terrain': c.terrain,
+    'timeLimit': c.timeLimitSecs,
+    'soon': c.soon,
+    if (c.reason.isNotEmpty) 'reason': c.reason,
+    'bosses': [for (final b in c.bosses) {'id': '', 'name': b}],
+    'tags': [for (final t in c.tags) {'label': t}],
+    if (c.rewards.isNotEmpty) 'rewards': c.rewards,
+  };
 
   bool get _leading => _lobby?.members.any((m) => m.entityId == _me && m.leader) ?? false;
 
@@ -1933,8 +2335,8 @@ final class HubSession {
           'mission': lobby.mission.id,
           'leader': _leading,
           'state': ?_lobbyMods?.toJson(),
-          // Who the leader's Start waits for (the server's ready check).
-          'waiting': [for (final m in lobby.members) if (!m.leader && !m.ready) m.name],
+          // Who a start now leaves behind (offline or on a mission).
+          'behind': [for (final m in lobby.members) if (!m.online || m.away) m.name],
         },
       }),
     );
@@ -2072,8 +2474,10 @@ final class HubSession {
     return '${parts.join(' · ')} ($key)';
   }
 
-  /// Party lobby panel: members with ready state, ready/start/leave.
-  void _renderLobby() {
+  /// Party panel: the members (their current character, or the last one
+  /// while offline), where they are, start/leave. `quiet`: update the tab
+  /// without opening the window.
+  void _renderLobby({bool quiet = true}) {
     final lobby = _lobby;
     _renderMarks();
     if (lobby == null) return;
@@ -2081,11 +2485,11 @@ final class HubSession {
     final mission = lobby.mission;
     final me = members.where((m) => m.entityId == _me).firstOrNull;
     final leader = me?.leader ?? false;
-    final othersReady = members.where((m) => !m.leader).every((m) => m.ready);
-    final ready = me?.ready ?? false;
+    final behind = members.where((m) => !m.online || m.away).length;
     view.showPanel(
       jsonEncode({
         'id': 'lobby',
+        'quiet': quiet,
         'title': 'Party · ${mission.name}',
         'subtitle': [
           '${lobby.public ? 'Public' : 'Private'} party · code ${lobby.code} · ${members.length}/${mission.maxPlayers}',
@@ -2097,17 +2501,27 @@ final class HubSession {
             {
               'id': '${m.entityId}',
               'text': m.name,
-              'detail': m.entityId == _me ? '(you)' : null,
-              'tag': m.leader ? 'leader' : (m.ready ? 'ready' : 'not ready'),
-              'tagKind': m.leader ? 'lead' : (m.ready ? 'ok' : 'wait'),
+              'detail': [
+                '${_title(m.archetype, m.level)} · Lv ${m.level}',
+                if (m.entityId == _me) '(you)',
+              ].join(' '),
+              'tag': [
+                if (m.leader) 'leader',
+                if (!m.online) 'offline${_ago(m.offlineSecs)}' else if (m.away) 'on a mission' else if (!m.leader) 'in town',
+              ].join(' · '),
+              'tagKind': !m.online ? null : (m.leader ? 'lead' : (m.away ? 'wait' : 'ok')),
               if (leader && m.entityId != _me) 'action': {'id': 'kick', 'label': 'Kick'},
             },
         ],
         'actions': [
+          // No ready check: the leader starts at any time with whoever is
+          // in town.
           if (leader)
-            {'id': 'start', 'label': othersReady ? 'Start' : 'Waiting…', 'primary': true, 'disabled': !othersReady}
-          else
-            {'id': ready ? 'unready' : 'ready', 'label': ready ? 'Not ready' : 'Ready', 'primary': !ready},
+            {
+              'id': 'start',
+              'label': behind == 0 ? 'Start' : 'Start (${members.length - behind}/${members.length})',
+              'primary': true,
+            },
           {'id': 'modifiers', 'label': leader ? 'Modifiers…' : 'Modifiers'},
           {'id': 'leave', 'label': 'Leave'},
         ],
@@ -2174,22 +2588,34 @@ final class HubSession {
 
   /// `?mission=<id>` (e2e runs): picks a private mission on the first town
   /// join. Only a server with `GAME_DEV=1` accepts it away from the board.
+  /// `?shop=<npc>` talks to a merchant the same way.
   void _devMission() {
     if (_devMissionSent) return;
     _devMissionSent = true;
     final mission = Uri.base.queryParameters['mission'];
-    if (mission != null && mission.isNotEmpty) _send(ClientMsg.missionSelect(mission, public: false));
+    if (mission != null && mission.isNotEmpty) _askParty(ClientMsg.missionSelect(mission, public: false));
+    // `?shop=<npc>`: opens that merchant (a `GAME_DEV` server opens it from
+    // anywhere) once the map has loaded: arriving closes any open dialog.
+    final shop = Uri.base.queryParameters['shop'];
+    if (shop != null && shop.isNotEmpty) _devShop = shop;
   }
 
   bool _devMissionSent = false;
+  String? _devShop;
+
+  /// The NPC `?shop=` opened from afar (GAME_DEV): its dialog is not closed
+  /// for being out of reach.
+  String? _devNpc;
 
   void _onPanelAction(String panel, String action, String? row) {
     switch ((panel, action)) {
-      case ('lobby', 'ready'):
-        _send(ClientMsg.lobbyReady(true));
-      case ('lobby', 'unready'):
-        _send(ClientMsg.lobbyReady(false));
       case ('lobby', 'start'):
+        // A soft warning, never a lock (server `LevelBand::fit`).
+        final id = _lobby?.mission.id;
+        final band = _ladder.where((c) => c.id == id).firstOrNull?.band ?? (_brief?.mission == id ? _brief?.band : null);
+        if (band != null && _goingLevels.every((l) => l < band.min)) {
+          view.toast('Heads up: everyone going is under Lv ${band.min}, the floor of this mission. It will be a hard run.');
+        }
         _send(ClientMsg.lobbyStart());
       case ('lobby', 'leave'):
         _send(ClientMsg.lobbyLeave());
@@ -2235,7 +2661,8 @@ final class HubSession {
         }
         if (option.startsWith('missions:')) {
           view.closeDialog();
-          _showMissions(option.substring(9));
+          final id = option.substring(9);
+          _showMissions(id.isEmpty ? null : id);
           return;
         }
         if (option.startsWith('feedback:')) {
@@ -2255,11 +2682,11 @@ final class HubSession {
           final from = int.tryParse(parts.last);
           _inviteFrom = null;
           view.closeDialog();
-          if (from != null) _send(ClientMsg.partyAnswer(from, accept: parts[1] == 'accept'));
+          if (from != null) _askParty(ClientMsg.partyAnswer(from, accept: parts[1] == 'accept'));
           return;
         }
         if (option == 'code') {
-          _send(ClientMsg.lobbyJoin('${e['value']}'));
+          _askParty(ClientMsg.lobbyJoin('${e['value']}'));
         } else if (option == 'restyle') {
           final dialog = '${e['dialog']}';
           view.closeDialog();
@@ -2272,13 +2699,15 @@ final class HubSession {
           view.toast('Your skills are forgotten: the points are yours to spend again (K).');
         } else if (option.startsWith('public:') || option.startsWith('private:')) {
           final i = option.indexOf(':');
-          _send(ClientMsg.missionSelect(option.substring(i + 1), public: option.startsWith('public:')));
+          _askParty(ClientMsg.missionSelect(option.substring(i + 1), public: option.startsWith('public:')));
         }
         view.closeDialog();
+      case 'missions_close':
+        _missionsShown = false;
       case 'mission_select':
         final tier = (e['tier'] as num?)?.toInt() ?? 0, mask = (e['mask'] as num?)?.toInt() ?? 0;
         _pendingMods = tier == 0 && mask == 0 ? null : (tier, mask);
-        _send(ClientMsg.missionSelect(e['mission']! as String, public: e['public'] == true));
+        _askParty(ClientMsg.missionSelect(e['mission']! as String, public: e['public'] == true));
       case 'mission_start':
         // Quick start: alone it launches at once, a leader starts the
         // party's run; the server checks the giver, the party and the levels.
@@ -2297,7 +2726,7 @@ final class HubSession {
         _send(ClientMsg.lobbyModifiers((e['tier'] as num?)?.toInt() ?? 0, (e['mask'] as num?)?.toInt() ?? 0));
       case 'party_code':
         final code = '${e['code'] ?? ''}'.trim();
-        if (code.isNotEmpty) _send(ClientMsg.lobbyJoin(code));
+        if (code.isNotEmpty) _askParty(ClientMsg.lobbyJoin(code));
       case 'panel_action':
         _onPanelAction(e['panel']! as String, e['action']! as String, e['row'] as String?);
       case 'setting' when e['id'] == 'account':
@@ -2355,7 +2784,7 @@ final class HubSession {
         final target = (e['target'] as num?)?.toInt();
         switch (e['action']) {
           case 'party_invite' when target != null:
-            _send(ClientMsg.partyInvite(target));
+            _askParty(ClientMsg.partyInvite(target));
             view.toast('Invited ${_peers[target]?.name ?? 'them'} to your party.');
           case 'party_kick' when target != null:
             _send(ClientMsg.lobbyKick(target));
@@ -2378,6 +2807,12 @@ final class HubSession {
       case 'shop_buy' || 'shop_sell':
         final npc = e['npc']! as String, item = e['item']! as String, n = (e['count']! as num).toInt();
         _send(e['type'] == 'shop_buy' ? ClientMsg.shopBuy(npc, item, n) : ClientMsg.shopSell(npc, item, n));
+      case 'shop_deal':
+        List<({String id, int count})> lines(Object? l) => [
+          for (final x in (l as List<Object?>? ?? const []).cast<Map<String, Object?>>())
+            (id: x['id']! as String, count: (x['count']! as num).toInt()),
+        ];
+        _send(ClientMsg.shopDeal(e['npc']! as String, lines(e['buy']), lines(e['sell'])));
       case 'shop_close':
         _shopNpc = null;
       case 'quick_potion':
@@ -2568,6 +3003,7 @@ final class HubSession {
 
   void _onCast(Cast c) {
     final own = c.caster == _me;
+    _castPose(c);
     view.castSkill(
       jsonEncode({
         'caster': c.caster,
@@ -2581,6 +3017,36 @@ final class HubSession {
         'areas': [for (final a in c.areas) a.toJson()],
       }),
     );
+  }
+
+  /// A cast turns its caster to the aimed point: a character holds the
+  /// wind-up pose (at least a moment for instant skills), a monster
+  /// strikes toward it. An empty skill (a called-off wind-up) ends the pose.
+  void _castPose(Cast c) {
+    final now = _now();
+    final id = c.caster;
+    if (id >= monsterEntityBase) {
+      final mob = _mobs[id - monsterEntityBase];
+      if (mob == null || c.skill.isEmpty) return;
+      final dx = c.x - mob.x / Reckoning.posOne, dy = c.y - mob.y / Reckoning.posOne;
+      if (dx * dx + dy * dy > 0.04) mob.attackFacing = facingOf(dx, dy);
+      mob.attackUntil = now + 0.5;
+      return;
+    }
+    if (c.skill.isEmpty) {
+      _castUntil.remove(id);
+      _tracks[id]?.resetSent();
+      return;
+    }
+    final p = _predictor;
+    final t = _tracks[id];
+    final (x, y) = id == _me && p != null ? (p.x, p.y) : t != null ? (t.x1, t.y1) : (c.x, c.y);
+    final dx = c.x - x, dy = c.y - y;
+    if (dx * dx + dy * dy > 0.04) _attackFacing[id] = facingOf(dx, dy);
+    final until = now + math.max(c.castMs, 400) / 1000;
+    _castUntil[id] = until;
+    _stanceUntil[id] = until + 4;
+    t?.resetSent();
   }
 
   /// Skill slots held or tapped this tick (bit i = slot i); only on a
@@ -2598,8 +3064,62 @@ final class HubSession {
     final t = _binds.travel;
     if (t != null && down(t.code) && t.heldIn(pressed)) bits |= 1 << travelSlot;
     // Gamepad / touch presses, and auto-cast slots every tick (the server
-    // ignores what it cannot honour: cooldown, SP, no target).
-    return bits | _input.state.slots | autoCastSlots(_autoCast, _skills?.hotbar ?? const []);
+    // ignores what it cannot honour: cooldown, SP, no target). The mount
+    // slot is no cast ([_mountPress]).
+    return (bits | _input.state.slots | autoCastSlots(_autoCast, _skills?.hotbar ?? const [])) & ~_mountMask();
+  }
+
+  /// Hotbar slots holding the mount skill (bit i = slot i).
+  int _mountMask() {
+    final hotbar = _skills?.hotbar ?? const <String>[];
+    var mask = 0;
+    for (var i = 0; i < hotbar.length && i < Bindings.count; i++) {
+      if (hotbar[i] == mountSkill) mask |= 1 << i;
+    }
+    return mask;
+  }
+
+  /// A press of the mount slot (its key, or a gamepad / touch press) gets
+  /// on or off the Peco Peco, in town and on missions (`mount_req`; the
+  /// server answers with `player_mount`).
+  void _mountPress() {
+    final mask = _mountMask();
+    if (mask == 0 || _myState != 0 || view.dialogOpen()) {
+      _mountHeld = false;
+      return;
+    }
+    final pressed = {..._keys, ..._tapped};
+    var tapped = false;
+    for (var i = 0; i < Bindings.count; i++) {
+      final k = _binds.slots[i];
+      if (mask & (1 << i) != 0 && k != null && _tapped.contains(k.code) && k.heldIn(pressed)) tapped = true;
+    }
+    final held = _input.state.slots & mask != 0;
+    if (tapped || (held && !_mountHeld)) _send(ClientMsg.mount(on: !_riding));
+    _mountHeld = held;
+  }
+
+  /// Someone got on or off a Peco Peco: the body follows (`_spriteFor`
+  /// reads it every frame); a puff and a whoosh unless it is the arrival
+  /// roll call.
+  void _onMount(PlayerMount m) {
+    final id = m.entityId;
+    final was = id == _me ? _riding : (_peers[id]?.riding ?? false);
+    if (id == _me) {
+      _riding = m.riding;
+      _rideSpeed = m.speed;
+      _applyPace();
+    } else {
+      _peers[id]?.riding = m.riding;
+    }
+    if (was == m.riding || !_tracks.containsKey(id) || _now() - _mapSince < 1) return;
+    view.unitSound(id.toDouble(), 'mount');
+    if (id == _me) view.toast(m.riding ? 'You ride your Peco Peco: +${m.speed}% movement.' : 'You get off your Peco Peco.');
+  }
+
+  /// What the local prediction walks at: the conditions' pace, riding faster.
+  void _applyPace() {
+    _predictor?.pace = _statusPace * (_riding ? 1 + _rideSpeed / 100 : 1);
   }
 
   void _toggleAutoCast(int slot) {
@@ -2714,6 +3234,9 @@ final class HubSession {
     _frameCap = (_settings['frameCap'] as num?)?.toInt() ?? 0;
     _clock.bias = ((_settings['interpBiasMs'] as num?) ?? 0) / 1000;
     _autoCast = (_settings['autoCast'] as num?)?.toInt() ?? 0;
+    _manualAim = _settings['manualAim'] == true;
+    _clickMove = _settings['clickMove'] != false;
+    _tapMove = _settings['tapMove'] == true;
     _binds = Bindings(_settings);
     view
       ..setAutoCast(_autoCast)
@@ -2729,6 +3252,14 @@ final class HubSession {
         _clock.bias = (value! as num) / 1000;
       case 'touchControls':
         view.setTouchControls((value! as num).toInt());
+      case 'manualAim':
+        _manualAim = value == true;
+      case 'clickMove':
+        _clickMove = value == true;
+        if (!_clickMove) _cancelWalk();
+        _hoverDirty = true;
+      case 'tapMove':
+        _tapMove = value == true;
       case final String k when k.startsWith('bind.') || k.startsWith('emote.'):
         _binds = Bindings(_settings);
         _renderSkills();
@@ -2822,6 +3353,8 @@ final class HubSession {
             'title': 'Moving and talking',
             'items': [
               'WASD or the arrows: walk (the camera turns with the right mouse button; double right-click faces north)',
+              if (_clickMove)
+                'Left click: walk there (hold to steer) · on a monster: into weapon reach · on loot or a portal: into it',
               '${k(b.interact, 'F')} or ${k(b.interact2, 'Space')}: talk to the nearest NPC · click an NPC',
               '${k(b.travel, 'Space')} on missions: your travel skill (Back Slide, Blink, Charge…)',
               '${k(b.sit, 'C')}: sit down / stand up in town',
@@ -3054,6 +3587,30 @@ final class HubSession {
             ],
             'hint': 'Below half health the screen greys out and veins creep in from the corners.',
           },
+          {
+            'id': 'cursorStyle',
+            'label': 'Mouse cursor',
+            'type': 'select',
+            'value': e['cursorStyle'],
+            'options': [
+              {'value': 0, 'label': 'System'},
+              {'value': 1, 'label': 'Classic'},
+              {'value': 2, 'label': 'Gilded'},
+            ],
+            'hint': "The game's own pointer: a sword over monsters, a speech bubble over NPCs, a grab over loot. System keeps your usual one.",
+          },
+          {
+            'id': 'cursorSize',
+            'label': 'Cursor size',
+            'type': 'select',
+            'value': e['cursorSize'],
+            'options': [
+              {'value': 0, 'label': 'Small'},
+              {'value': 1, 'label': 'Normal'},
+              {'value': 2, 'label': 'Large'},
+            ],
+            'hint': 'Small is the classic pixel size; Normal and Large scale it up.',
+          },
           {'id': 'h.sound', 'label': 'Sound', 'type': 'heading'},
           {
             'id': 'muted',
@@ -3100,6 +3657,34 @@ final class HubSession {
               {'value': 1, 'label': 'On'},
               {'value': 0, 'label': 'Off'},
             ],
+          },
+          {
+            'id': 'manualAim',
+            'label': 'Manual aiming',
+            'type': 'toggle',
+            'value': _manualAim,
+            'hint':
+                'Skills aimed at a monster take the one nearest the mouse pointer, ground skills land on it. '
+                'Off: they pick their own target. Auto-cast slots, gamepad and touch always aim by themselves.',
+          },
+          {
+            'id': 'clickMove',
+            'label': 'Click to move',
+            'type': 'toggle',
+            'value': _clickMove,
+            'hint':
+                'Left click the ground to walk there around obstacles, hold the button to steer. '
+                'A click on a monster walks into weapon reach, on loot or a portal walks into it. '
+                'Keys and the gamepad take over at once. Off: clicks only talk to NPCs.',
+          },
+          {
+            'id': 'tapMove',
+            'label': 'Tap to move',
+            'type': 'toggle',
+            'value': _tapMove,
+            'hint':
+                'Touch: tap the ground, a monster, loot or a portal to walk there, alongside the joystick. '
+                'Off: taps only talk to NPCs (a missed skill button never moves you).',
           },
         ],
       }),
@@ -3200,10 +3785,21 @@ final class HubSession {
     }
     // Downed or fallen: the server ignores movement; do not predict any.
     var (dx, dy) = _myState == 0 ? _inputDir() : (0.0, 0.0);
-    // Click to walk: any steering of our own (or going down) stops it.
-    if (_walkNpc != null) {
-      if (dx != 0 || dy != 0 || _myState != 0 || _inStage) {
+    // Skills are for missions: in town the bar is only set up, never cast
+    // (but for the mount, anywhere).
+    _mountPress();
+    final slots = _inStage ? _heldSlots() : 0;
+    _tapped.clear();
+    // Click to move: steering of our own (keys, stick, joystick) or going
+    // down stops it at once. A skill press stands for the cast (casting is
+    // rooted): a one-off walk ends, a held button walks on after it. Auto-
+    // cast slots and the travel key (it goes where the hero walks) do not.
+    if (_walker.active) {
+      final cast = slots & ~(autoCastSlots(_autoCast, _skills?.hotbar ?? const []) | 1 << travelSlot);
+      if (dx != 0 || dy != 0 || _myState != 0) {
         _cancelWalk();
+      } else if (cast != 0) {
+        if (!_steerHeld) _cancelWalk();
       } else if (!view.dialogOpen()) {
         (dx, dy) = _walkDir(p);
       }
@@ -3211,13 +3807,11 @@ final class HubSession {
     final moving = dx != 0 || dy != 0;
     // Walking stands up (the server does the same).
     if (moving && _me != null) _sitting.remove(_me);
-    // Skills are for missions: in town the bar is only set up, never cast.
-    final slots = _inStage ? _heldSlots() : 0;
-    _tapped.clear();
     if (moving || slots != 0) _stopSends = 3;
     if (moving || slots != 0 || _stopSends > 0) {
       if (!moving && slots == 0) _stopSends--;
       final (ax, ay) = slots != 0 ? _aim() : (0, 0);
+      if (slots != 0) _syncCastPrefs();
       final seq = p.step(dx, dy);
       _ws.push(encodeInput(seq, dx, dy, aimX: ax, aimY: ay, slots: slots)).ignore();
     } else {
@@ -3287,7 +3881,7 @@ final class HubSession {
       x1: mx,
       y1: my,
       t1: 0,
-      facing: !p.moving && now < (_attackUntil[me] ?? 0) ? _attackFacing[me]! : p.facing,
+      facing: _poseFacing(me, p.moving, p.facing, now),
       sprite: _spriteFor(me, _myArchetype, _myLook, tier: _tierOf(me)),
       action: _charAction(me, p.moving, now),
       flags: Row.flagFocus | Row.flagHigh | statusRowFlags(_vitals[me]?.status ?? 0),
@@ -3322,6 +3916,7 @@ final class HubSession {
         }
       }
       final action = _charAction(t.id, t.moving, now);
+      final facing = _poseFacing(t.id, t.moving, t.facing, now);
       final peer = _peers[t.id];
       final pet = peer?.petSprite;
       final sprite = pet != null
@@ -3329,7 +3924,7 @@ final class HubSession {
           : _spriteFor(t.id, peer?.archetype ?? 'novice', peer?.look, tier: _tierOf(t.id));
       final still = t.x0 == t.x1 && t.y0 == t.y1;
       final flags = Row.flagHigh | (fog ? Row.flagFade : 0) | statusRowFlags(_vitals[t.id]?.status ?? 0);
-      if (t.sentFacing == t.facing && t.sentAction == action && t.sentSprite == sprite && _sentFlags[t.id] == flags) {
+      if (t.sentFacing == facing && t.sentAction == action && t.sentSprite == sprite && _sentFlags[t.id] == flags) {
         if (still ? (t.sentX == t.x1 && t.sentY == t.y1) : (t.sentTick0 == t.tick0 && t.sentTick1 == t.tick1)) {
           continue;
         }
@@ -3342,7 +3937,7 @@ final class HubSession {
         x1: t.x1,
         y1: t.y1,
         t1: still ? _sec(t.tick0) : _sec(t.tick1),
-        facing: t.facing,
+        facing: facing,
         sprite: sprite,
         action: action,
         flags: flags,
@@ -3351,7 +3946,7 @@ final class HubSession {
       t
         ..sentTick0 = t.tick0
         ..sentTick1 = t.tick1
-        ..sentFacing = t.facing
+        ..sentFacing = facing
         ..sentAction = action
         ..sentSprite = sprite
         ..sentX = still ? t.x1 : double.nan
@@ -3383,6 +3978,16 @@ final class HubSession {
           : m.moving
           ? Act.walk
           : Act.idle;
+      // Diving and surfacing are heard; a mound on the move digs.
+      final under = m.status & MobStatus.burrowed != 0 && dieAt == null;
+      if (under != m.burrowed) {
+        m.burrowed = under;
+        m.digAt = now + 0.9;
+        view.unitSound(m.id, under ? 'burrow' : 'emerge');
+      } else if (under && m.moving && now >= m.digAt) {
+        m.digAt = now + 1.1;
+        view.unitSound(m.id, 'dig');
+      }
       if (!m.dirty && action == m.sentAction) continue;
       m.sentAction = action;
       final sprite = _mobSprite(m.kind);
@@ -3418,7 +4023,7 @@ final class HubSession {
         x1: moving ? px + vx * ahead : px,
         y1: moving ? py + vy * ahead : py,
         t1: _sec(moving ? m.stamp + ahead : m.stamp),
-        facing: m.facing,
+        facing: now < m.attackUntil ? m.attackFacing : m.facing,
         sprite: sprite,
         action: action,
         speed: m.animSpeed,
@@ -3435,7 +4040,7 @@ final class HubSession {
       if (npc.inReach(p.x, p.y)) _nearNpc = npc;
     }
     // An NPC's dialog closes when its NPC is out of reach (menus stay).
-    if (_nearNpc == null && _npcDialog && view.dialogOpen() && !_settingsOpen) {
+    if (_nearNpc == null && _npcDialog && view.dialogOpen() && !_settingsOpen && _devNpc == null) {
       view.closeDialog();
       _npcDialog = false;
     }
@@ -3463,7 +4068,7 @@ final class HubSession {
   /// `<archetype>_m|_f` when the atlas has it, else the novice placeholder.
   int _spriteFor(int id, String archetype, Look? look, {int tier = 1}) {
     final gender = look?.gender ?? (id.isEven ? 0 : 1);
-    final job = bodyJob(archetype, tier);
+    final job = riderJob(archetype, tier, riding: id == _me ? _riding : (_peers[id]?.riding ?? false));
     final body = _spriteCache['$_mapId:body:$job:$gender'] ??= view.bodySpriteIndex(gender, job);
     if (body >= 0) return body;
     final g = gender == 0 ? 'm' : 'f';
@@ -3472,6 +4077,15 @@ final class HubSession {
       final s = view.spriteIndex('${archetype}_$g');
       return s >= 0 ? s : view.spriteIndex('novice_$g');
     }();
+  }
+
+  /// A monster's stars on its plate, auras and boss bar (engine `affixes.ts`).
+  void _showAffixes(_Mob m) {
+    final a = _affixes[m.slot];
+    if (a == null) return;
+    final id = m.kind < _monsterKinds.length ? _monsterKinds[m.kind] : '';
+    final name = _brief?.monsters.where((b) => b.id == id).firstOrNull?.name ?? id;
+    view.setAffixes(m.id, a.bits, a.state, name);
   }
 
   /// Sprite of a monster kind in the current location atlas (-1 when the

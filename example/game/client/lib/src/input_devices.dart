@@ -121,8 +121,13 @@ final class GameInput {
     // of the page while nothing is pressed, for the guide).
     String at(int i) => i < hotbar.length ? hotbar[i] : '';
     var reach = 0.0;
+    // The pressed skill (the first one): the guide shows its areas.
+    var skill = '';
     for (var i = 0; i < 10; i++) {
-      if (f.slots & (1 << i) != 0 && at(i).isNotEmpty) reach = math.max(reach, view.skillReach(at(i)));
+      if (f.slots & (1 << i) != 0 && at(i).isNotEmpty) {
+        reach = math.max(reach, view.skillReach(at(i)));
+        if (skill.isEmpty) skill = at(i);
+      }
     }
     if (reach == 0) {
       final page = buttons.length > Pad.lb && buttons[Pad.lb] ? 5 : 0;
@@ -134,7 +139,7 @@ final class GameInput {
     final (wx, wy) = screenToWorld(f.aimX, f.aimY, view.cameraYaw());
     final len = math.sqrt(wx * wx + wy * wy);
     // Cells are 0.5 m.
-    view.setAimGuide(wx / len * reach * 2, wy / len * reach * 2, reach * 2);
+    view.setAimGuide(wx / len * reach * 2, wy / len * reach * 2, reach * 2, skill);
     _guide = true;
     if (f.slots != 0) {
       final (x, y) = aimUnits(wx, wy, reach);

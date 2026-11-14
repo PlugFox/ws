@@ -163,14 +163,20 @@ pub async fn create_app_with_skills(
         let _reaper = dir.spawn_reaper(Duration::from_secs(10));
         dir
     });
-    let lobbies = hub.as_ref().map(|_| {
-        let mut stages = StageDirectory::new(stages, config.stages.clone()).with_skills(Arc::clone(&skills));
-        if let Some(m) = monsters {
-            stages = stages.with_monsters(m);
+    let lobbies = match hub.as_ref() {
+        Some(_) => {
+            let mut stages = StageDirectory::new(stages, config.stages.clone()).with_skills(Arc::clone(&skills));
+            if let Some(m) = monsters {
+                stages = stages.with_monsters(m);
+            }
+            let _reaper = stages.spawn_reaper(Duration::from_secs(5));
+            // Parties belong to accounts and are kept in the database.
+            let lobbies = LobbyDirectory::persistent(stages, pool.clone()).await?;
+            let _party_reaper = lobbies.spawn_reaper(Duration::from_secs(30));
+            Some(lobbies)
         }
-        let _reaper = stages.spawn_reaper(Duration::from_secs(5));
-        LobbyDirectory::new(stages)
-    });
+        None => None,
+    };
 
     let mut state = AppState::new(
         config,

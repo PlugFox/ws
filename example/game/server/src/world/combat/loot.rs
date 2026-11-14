@@ -69,14 +69,15 @@ pub fn roll(table: &[Drop], rng: &mut Rng, mut give: impl FnMut(&Drop, u32)) {
 }
 
 /// [`roll`] with every chance scaled by `permille` / 1000 (mission
-/// modifiers that add monsters make each kill worth less): exact, rates
-/// under one are not rounded up.
+/// modifiers that add monsters make each kill worth less, Steal makes the
+/// thief's worth more): exact, rates under one are not rounded up, and a
+/// chance never goes past 100%.
 pub fn roll_scaled(table: &[Drop], permille: u32, rng: &mut Rng, mut give: impl FnMut(&Drop, u32)) {
-    if permille >= 1000 {
+    if permille == 1000 {
         return roll(table, rng, give);
     }
     for d in table {
-        if rng.die(ALWAYS * 1000) > d.rate * permille {
+        if rng.die(ALWAYS * 1000) > (d.rate.saturating_mul(permille)).min(ALWAYS * 1000) {
             continue;
         }
         let n = if d.max > d.min { d.min + rng.die(d.max - d.min + 1) - 1 } else { d.min };
@@ -85,9 +86,10 @@ pub fn roll_scaled(table: &[Drop], permille: u32, rng: &mut Rng, mut give: impl 
 }
 
 /// `amount × permille / 1000`, rounded up or down at random so the mean is
-/// exact (a 2-zeny kill at 667 ‰ pays 1 or 2, 1.33 on average).
+/// exact (a 2-zeny kill at 667 ‰ pays 1 or 2, 1.33 on average; above
+/// 1000 ‰ it pays more: an affixed monster's bonus).
 pub fn scale_amount(amount: u64, permille: u32, rng: &mut Rng) -> u64 {
-    if permille >= 1000 {
+    if permille == 1000 {
         return amount;
     }
     let scaled = amount * permille as u64;
@@ -151,5 +153,20 @@ mod tests {
         assert!((1.9..2.1).contains(&avg), "herb count {avg}");
         let z = counts[3] as f32 / got[3] as f32;
         assert!((14.7..15.3).contains(&z), "zeny {z}");
+    }
+
+    /// Steal raises the odds past the table (1400 ‰), never past a sure drop.
+    #[test]
+    fn raised_odds_scale_up_and_cap_at_always() {
+        let t = table();
+        let mut rng = Rng::new(3);
+        let mut got = [0u32; 4];
+        for _ in 0..20_000 {
+            roll_scaled(&t, 1400, &mut rng, |d, _| got[t.iter().position(|r| r == d).unwrap()] += 1);
+        }
+        // 12% × 1.4 = 16.8%, 50% × 1.4 = 70%; the zeny row stays at 100%.
+        assert!((3_100..3_650).contains(&got[0]), "jellopy {}", got[0]);
+        assert!((13_600..14_400).contains(&got[1]), "herbs {}", got[1]);
+        assert_eq!(got[3], 20_000);
     }
 }

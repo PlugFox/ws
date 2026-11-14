@@ -11,6 +11,7 @@ void main() {
     expect([1, 2, 3].map((t) => bodyJob('mage', t)), ['mage', 'wizard', 'high_wizard']);
     expect([1, 2, 3].map((t) => bodyJob('archer', t)), ['archer', 'hunter', 'sniper']);
     expect([1, 2, 3].map((t) => bodyJob('acolyte', t)), ['acolyte', 'priest', 'high_priest']);
+    expect([1, 2, 3].map((t) => bodyJob('thief', t)), ['thief', 'assassin', 'assassin_cross']);
   });
 
   test('tier defaults to 1 and is clamped; unknown classes are novices', () {
@@ -18,6 +19,7 @@ void main() {
     expect(bodyJob('mage', 0), 'mage');
     expect(bodyJob('mage', 9), 'high_wizard');
     expect(bodyJob('novice', 2), 'novice');
-    expect(bodyJob('thief'), 'novice');
+    expect(bodyJob('merchant'), 'novice');
+    expect(lockedBodies.containsKey('thief'), isFalse, reason: 'the Thief line is playable');
   });
 }

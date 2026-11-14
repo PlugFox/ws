@@ -25,6 +25,9 @@ pub enum WeaponKind {
     Staff,
     /// Priest books: swung like a light club.
     Book,
+    /// Assassin punch blades, one on each fist: two-handed, quick, and
+    /// they crit a step earlier (19–20).
+    Katar,
 }
 
 /// Physical damage subtype (5e), for monster traits later (skeletons and
@@ -65,32 +68,41 @@ pub struct Weapon {
 }
 
 impl WeaponKind {
-    /// Basic attack shape and speed of the family.
+    /// Basic attack shape and speed of the family. Melee `range` is the gap
+    /// from the player's centre to the target's edge (`Horde::nearest_to`):
+    /// the body is 0.4 cells, so a sword's 2.75 leaves ~1.2 m of blade, a
+    /// swing that reads as contact rather than a hit across the room.
     const fn profile(self) -> (Reach, u32, Option<Physical>) {
         use Physical::*;
         match self {
-            WeaponKind::Dagger => (Reach::Melee { range: 3.0, arc_cos: 0.7 }, 700, Some(Piercing)),
-            WeaponKind::Sword => (Reach::Melee { range: 4.0, arc_cos: 0.5 }, 900, Some(Slashing)),
+            WeaponKind::Dagger => (Reach::Melee { range: 2.25, arc_cos: 0.7 }, 700, Some(Piercing)),
+            WeaponKind::Sword => (Reach::Melee { range: 2.75, arc_cos: 0.5 }, 900, Some(Slashing)),
             // Two-handers sweep wide and slow.
-            WeaponKind::TwoHandSword => (Reach::Melee { range: 4.5, arc_cos: 0.0 }, 1200, Some(Slashing)),
+            WeaponKind::TwoHandSword => (Reach::Melee { range: 3.25, arc_cos: 0.0 }, 1200, Some(Slashing)),
             // Reach weapon: long and narrow.
-            WeaponKind::Spear => (Reach::Melee { range: 6.0, arc_cos: 0.85 }, 1000, Some(Piercing)),
-            WeaponKind::Axe => (Reach::Melee { range: 4.0, arc_cos: 0.5 }, 1000, Some(Slashing)),
-            WeaponKind::TwoHandAxe => (Reach::Melee { range: 4.5, arc_cos: 0.0 }, 1300, Some(Slashing)),
-            WeaponKind::Mace => (Reach::Melee { range: 4.0, arc_cos: 0.5 }, 1000, Some(Bludgeoning)),
+            WeaponKind::Spear => (Reach::Melee { range: 4.5, arc_cos: 0.85 }, 1000, Some(Piercing)),
+            WeaponKind::Axe => (Reach::Melee { range: 2.75, arc_cos: 0.5 }, 1000, Some(Slashing)),
+            WeaponKind::TwoHandAxe => (Reach::Melee { range: 3.25, arc_cos: 0.0 }, 1300, Some(Slashing)),
+            WeaponKind::Mace => (Reach::Melee { range: 2.75, arc_cos: 0.5 }, 1000, Some(Bludgeoning)),
             WeaponKind::Bow => (Reach::Ranged { range: 32.0, splash: 1.2 }, 1000, Some(Piercing)),
-            WeaponKind::Staff => (Reach::Melee { range: 4.0, arc_cos: 0.5 }, 1200, Some(Bludgeoning)),
-            WeaponKind::Book => (Reach::Melee { range: 3.5, arc_cos: 0.6 }, 1100, Some(Bludgeoning)),
+            WeaponKind::Staff => (Reach::Melee { range: 2.75, arc_cos: 0.5 }, 1200, Some(Bludgeoning)),
+            WeaponKind::Book => (Reach::Melee { range: 2.5, arc_cos: 0.6 }, 1100, Some(Bludgeoning)),
+            WeaponKind::Katar => (Reach::Melee { range: 2.25, arc_cos: 0.6 }, 800, Some(Piercing)),
         }
+    }
+
+    /// Critical range the family adds (katars: 19–20).
+    pub const fn crit(self) -> u32 {
+        matches!(self, WeaponKind::Katar) as u32
     }
 
     /// Needs both hands: no shield with it.
     pub const fn two_handed(self) -> bool {
-        matches!(self, WeaponKind::TwoHandSword | WeaponKind::TwoHandAxe | WeaponKind::Bow)
+        matches!(self, WeaponKind::TwoHandSword | WeaponKind::TwoHandAxe | WeaponKind::Bow | WeaponKind::Katar)
     }
 
     /// Every family, in catalogue order.
-    pub const ALL: [WeaponKind; 10] = [
+    pub const ALL: [WeaponKind; 11] = [
         WeaponKind::Dagger,
         WeaponKind::Sword,
         WeaponKind::TwoHandSword,
@@ -101,6 +113,7 @@ impl WeaponKind {
         WeaponKind::Bow,
         WeaponKind::Staff,
         WeaponKind::Book,
+        WeaponKind::Katar,
     ];
 
     /// Wire id (the client's weapon-layer family names).
@@ -116,6 +129,7 @@ impl WeaponKind {
             WeaponKind::Bow => "bow",
             WeaponKind::Staff => "staff",
             WeaponKind::Book => "book",
+            WeaponKind::Katar => "katar",
         }
     }
 
@@ -132,6 +146,7 @@ impl WeaponKind {
             WeaponKind::Bow => "Bow",
             WeaponKind::Staff => "Staff (spell focus)",
             WeaponKind::Book => "Book (holy focus)",
+            WeaponKind::Katar => "Katar",
         }
     }
 }
@@ -155,6 +170,10 @@ impl Class {
             Class::Archer => matches!(kind, Dagger | Bow),
             Class::Mage => matches!(kind, Dagger | Staff),
             Class::Acolyte => matches!(kind, Mace | Staff | Book),
+            // Daggers and short swords; katars from the start (RO keeps them
+            // for the Assassin; here the Thief body shows a dagger instead).
+            // Dual wielding is not modelled: one weapon slot.
+            Class::Thief => matches!(kind, Dagger | Sword | Katar),
         }
     }
 
@@ -165,6 +184,7 @@ impl Class {
             Class::Archer => "bow",
             Class::Mage => "rod",
             Class::Acolyte => "rod",
+            Class::Thief => "knife",
         }
     }
 }
@@ -198,6 +218,9 @@ pub const WEAPONS: &[Weapon] = &[
     w("wand", "Wand", WeaponKind::Staff, 2, 1, 6, 2500),
     w("staff", "Staff", WeaponKind::Staff, 3, 1, 8, 9000),
     w("bible", "Bible", WeaponKind::Book, 2, 1, 6, 2800),
+    w("jur", "Jur", WeaponKind::Katar, 1, 1, 6, 1500),
+    w("katar", "Katar", WeaponKind::Katar, 2, 1, 6, 4500),
+    w("jamadhar", "Jamadhar", WeaponKind::Katar, 3, 1, 8, 12000),
 ];
 
 impl Weapon {
@@ -249,6 +272,22 @@ mod tests {
         }
     }
 
+    /// Melee reads as contact: past the 0.4-cell body, a hand weapon reaches
+    /// at most ~1.2 m (2.75 cells from the centre), a two-hander 1.6 m and
+    /// only the spear further; bows keep their range.
+    #[test]
+    fn melee_reach_reads_as_contact() {
+        for w in WEAPONS {
+            match (w.kind, w.reach) {
+                (WeaponKind::Bow, Reach::Ranged { range, .. }) => assert_eq!(range, 32.0),
+                (WeaponKind::Spear, Reach::Melee { range, .. }) => assert!(range <= 4.5, "{}", w.id),
+                (k, Reach::Melee { range, .. }) if k.two_handed() => assert!(range <= 3.25, "{}", w.id),
+                (_, Reach::Melee { range, .. }) => assert!((2.0..=2.75).contains(&range), "{}: {range}", w.id),
+                _ => panic!("{} has the wrong kind of reach", w.id),
+            }
+        }
+    }
+
     #[test]
     fn held_falls_back_to_the_starting_weapon() {
         assert_eq!(Weapon::held(Class::Swordsman, "katana").id, "katana");
@@ -268,5 +307,17 @@ mod tests {
         assert!(matches!(staff.reach, Reach::Melee { .. }), "no ranged basic attack without a bow");
         assert!(WEAPONS.iter().all(|w| matches!(w.reach, Reach::Melee { .. }) == (w.kind != WeaponKind::Bow)));
         assert_eq!(staff.to_hit(1), 2 + 3 + 2);
+    }
+
+    #[test]
+    fn thieves_hold_daggers_swords_and_katars() {
+        assert_eq!(Weapon::held(Class::Thief, "").id, "knife");
+        assert_eq!(Weapon::held(Class::Thief, "katar").id, "katar");
+        assert_eq!(Weapon::held(Class::Thief, "falchion").id, "falchion");
+        assert_eq!(Weapon::held(Class::Thief, "bow").id, "knife", "no bows");
+        assert_eq!(Weapon::held(Class::Swordsman, "jur").id, "sword", "katars are the thief's");
+        let katar = Weapon::find("jamadhar").unwrap();
+        assert!(katar.kind.two_handed() && katar.interval_ms < Weapon::find("sword").unwrap().interval_ms);
+        assert_eq!((katar.kind.crit(), WeaponKind::Dagger.crit()), (1, 0));
     }
 }

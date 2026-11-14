@@ -4,7 +4,8 @@ use crate::session::registry::TownSpot;
 use crate::world::stage::Resumable;
 use crate::world::combat::items::{ItemError, Slot};
 use crate::world::combat::{Bag, Class, Loadout};
-use crate::world::protocol::ItemDef;
+use crate::world::protocol::{CastPrefs, ItemDef};
+use crate::world::trade::{ShopOrder, MAX_ORDER_COUNT};
 use crate::world::map::LocationKind;
 use crate::world::protocol::ClientDecodeError;
 use crate::world::chat::{self, ChatLimiter};
@@ -101,6 +102,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
         chat: ChatLimiter::default(),
         friend_tx,
         superseded: false,
+        cast_prefs: CastPrefs::default(),
     };
 
     // Send welcome / connected frame
@@ -207,11 +209,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
         }
     }
 
-    // On disconnect, leave lobby and instance and flush dirty character state
+    // On disconnect, go offline in the party (it stays the account's),
+    // leave the instance and flush dirty character state
     info!("Cleaning up WebSocket session for user {}", user_id);
     if let Some(lobbies) = &state.lobbies {
-        lobbies.leave(user_id, conn.conn_id, "disconnected");
-        lobbies.forget_invites(user_id);
+        lobbies.detach(user_id, conn.conn_id);
     }
     conn.drop_link().await;
     state.friends.gone(user_id, conn.conn_id).await;
@@ -278,6 +280,9 @@ struct Conn {
     friend_tx: mpsc::Sender<crate::world::friends::FriendEvent>,
     /// A newer socket re-attached to this one's stage slot: close.
     superseded: bool,
+    /// Manual aiming and auto-cast slots (`CAST_PREFS`), handed to the
+    /// instance with every input.
+    cast_prefs: CastPrefs,
 }
 
 /// A remembered town spot is used by a reconnect within this long.
@@ -420,9 +425,10 @@ impl Conn {
         match self.resumable().await {
             Some(r) if accept => {
                 let (tx, rx) = mpsc::channel(OUTBOX_CAPACITY);
-                match lobbies.stages().rejoin(r.stage_id, profile, self.session_id(), tx, self.next_epoch) {
+                match lobbies.stages().rejoin(r.stage_id, profile.clone(), self.session_id(), tx, self.next_epoch) {
                     Ok(commands) => {
                         self.link = Some(Link { place: Place::Stage { stage_id: r.stage_id }, commands, events: rx });
+                        self.attach_party(&profile, true);
                         return out;
                     }
                     Err(e) => {
@@ -464,13 +470,27 @@ impl Conn {
         let (tx, rx) = mpsc::channel(OUTBOX_CAPACITY);
         let mut result =
             dir.join_at(profile.clone(), self.session_id(), channel.or(self.last_channel), tx, arrival.clone(), self.next_epoch);
-        if hinted && matches!(result, Err(JoinError::NoSuchChannel(_) | JoinError::ChannelFull(_))) {
+        let out = if hinted && matches!(result, Err(JoinError::NoSuchChannel(_) | JoinError::ChannelFull(_))) {
             self.last_channel = None;
             let (tx, rx2) = mpsc::channel(OUTBOX_CAPACITY);
-            result = dir.join_at(profile, self.session_id(), None, tx, arrival, self.next_epoch);
-            return self.adopt_hub(result, rx2);
+            result = dir.join_at(profile.clone(), self.session_id(), None, tx, arrival, self.next_epoch);
+            self.adopt_hub(result, rx2)
+        } else {
+            self.adopt_hub(result, rx)
+        };
+        // In town with this character: the account's party sees them back.
+        if self.in_hub() {
+            self.attach_party(&profile, false);
         }
-        self.adopt_hub(result, rx)
+        out
+    }
+
+    /// This socket is in the world with `profile`'s character (`in_stage`:
+    /// on a mission): online in the account's party, if it has one.
+    fn attach_party(&self, profile: &PlayerProfile, in_stage: bool) {
+        if let Some(lobbies) = &self.state.lobbies {
+            lobbies.attach(profile, self.session_id(), self.lobby_tx.clone(), in_stage);
+        }
     }
 
     fn adopt_hub(&mut self, result: Result<HubTicket, JoinError>, rx: mpsc::Receiver<HubEvent>) -> Vec<Out> {
@@ -557,20 +577,31 @@ impl Conn {
                 }
                 // A mission giver: what each mission spawns and drops, from
                 // the catalogue the stages spawn from (the mission window).
+                // The mission list first (cards: open or coming soon), then
+                // each one's brief from its roster catalogue.
                 if let ServerMsg::NpcDialog { missions, .. } = &msg
-                    && let Some(catalog) = self.state.lobbies.as_ref().and_then(|l| l.stages().monsters())
+                    && !missions.is_empty()
+                    && let Some(stages) = self.state.lobbies.as_ref().map(|l| l.stages())
                 {
-                    let briefs = missions.iter().map(|m| Out::Msg(ServerMsg::MissionInfo { brief: crate::world::missions::brief(m, &m.waves, catalog) }));
+                    let list = Out::Msg(ServerMsg::MissionList { missions: stages.cards() });
+                    let briefs: Vec<Out> = missions
+                        .iter()
+                        .filter_map(|m| stages.roster(m).map(|c| Out::Msg(ServerMsg::MissionInfo { brief: crate::world::missions::brief(m, &m.waves, &c) })))
+                        .collect();
                     // The mission modifier table (the window's Modifiers section).
-                    let mods = (!missions.is_empty()).then(|| Out::Msg(crate::world::modifiers::defs_msg()));
-                    return std::iter::once(Out::Msg(msg.clone())).chain(briefs).chain(mods).collect();
+                    let mods = Out::Msg(crate::world::modifiers::defs_msg());
+                    return [Out::Msg(msg.clone()), list].into_iter().chain(briefs).chain([mods]).collect();
                 }
                 vec![Out::Msg(msg)]
             }
-            Some(HubEvent::Trade { item, count, sell }) => {
-                let mut out = self
-                    .change_bag(|_, bag| if sell { bag.sell(&item, count).map(|_| ()) } else { bag.buy(&item, count, &[item.as_str()]).map(|_| ()) })
-                    .await;
+            Some(HubEvent::Shop(order)) => {
+                // All or nothing (`ShopOrder::apply`); the receipt follows
+                // the new inventory.
+                let mut receipt = None;
+                let mut out = self.change_bag(|_, bag| order.apply(bag).map(|r| receipt = Some(r))).await;
+                if let Some(r) = receipt {
+                    out.push(Out::Msg(ServerMsg::ShopDone { spent: r.spent, earned: r.earned }));
+                }
                 // The hub checks player trades against its copy of the bag.
                 out.extend(self.share_bag().await);
                 out
@@ -683,7 +714,13 @@ impl Conn {
             LobbyEvent::Msg(msg) => vec![Out::Msg(msg)],
             LobbyEvent::Launch(ticket) => {
                 let Some(lobbies) = self.state.lobbies.clone() else { return Vec::new() };
-                let mut out = vec![Out::Msg(ServerMsg::LobbyLeft { reason: "launched".into() })];
+                // The party stays the account's: no `lobby_left` here.
+                let mut out = Vec::new();
+                if matches!(self.link, Some(Link { place: Place::Stage { .. }, .. })) {
+                    // Already on a mission (a start raced our stage entry).
+                    lobbies.stages().abandon(ticket.stage_id, self.user_id());
+                    return out;
+                }
                 let Some(profile) = self.profile().await else {
                     lobbies.stages().abandon(ticket.stage_id, self.user_id());
                     out.push(hub_error("no_character", "no character selected"));
@@ -727,12 +764,20 @@ impl Conn {
             ClientMsg::Input { seq, dx, dy, aim, slots } => {
                 if let Some(link) = &self.link {
                     // Inputs are latest-wins; dropping one under backpressure is fine.
-                    let _ = link.commands.try_send(HubCommand::Input { user_id, seq, dx, dy, aim, slots });
+                    let prefs = self.cast_prefs;
+                    let _ = link.commands.try_send(HubCommand::Input { user_id, seq, dx, dy, aim, slots, prefs });
                 }
+                Vec::new()
+            }
+            ClientMsg::CastPrefs(prefs) => {
+                self.cast_prefs = prefs;
                 Vec::new()
             }
             ClientMsg::SkillLearn { skill } => self.change_loadout(SkillChange::Learn(skill)).await,
             ClientMsg::SkillSlot { slot, skill } => self.change_loadout(SkillChange::Slot(slot, skill)).await,
+            // Riding is part of the loadout: the hub re-equips the fighter
+            // and tells the map (`player_mount`).
+            ClientMsg::Mount { on } => self.change_loadout(SkillChange::Mount(on)).await,
             ClientMsg::SkillReset => {
                 if matches!(self.link, Some(Link { place: Place::Stage { .. }, .. })) {
                     return vec![hub_error("not_in_hub", "skills are reset in town")];
@@ -765,8 +810,14 @@ impl Conn {
                 self.forward(HubCommand::Chat { user_id, text })
             }
             ClientMsg::NpcInteract { npc } => self.forward(HubCommand::Interact { user_id, npc }),
-            ClientMsg::ShopBuy { npc, item, count } => self.forward(HubCommand::Trade { user_id, npc, item, count, sell: false }),
-            ClientMsg::ShopSell { npc, item, count } => self.forward(HubCommand::Trade { user_id, npc, item, count, sell: true }),
+            // One-item orders (older clients); the shop window sends its cart.
+            ClientMsg::ShopBuy { npc, item, count } => {
+                self.forward(HubCommand::Shop { user_id, npc, order: ShopOrder { buy: vec![(item, count.clamp(1, MAX_ORDER_COUNT))], sell: Vec::new() } })
+            }
+            ClientMsg::ShopSell { npc, item, count } => {
+                self.forward(HubCommand::Shop { user_id, npc, order: ShopOrder { buy: Vec::new(), sell: vec![(item, count.clamp(1, MAX_ORDER_COUNT))] } })
+            }
+            ClientMsg::ShopDeal { npc, order } => self.forward(HubCommand::Shop { user_id, npc, order }),
             ClientMsg::ItemUse { item } => self.forward(HubCommand::UseItem { user_id, item }),
             ClientMsg::Friend { op } => self.on_friend(op).await,
             ClientMsg::Feedback { draft } => self.on_feedback(draft),
@@ -812,9 +863,10 @@ impl Conn {
                 None => vec![hub_error("hub_unavailable", "hub maps are not loaded")],
             },
             ClientMsg::HubLeave => {
+                // Back to the character slots: offline in the party, which
+                // the next character of the account picks up.
                 if let Some(lobbies) = &self.state.lobbies {
-                    lobbies.leave(user_id, session_id, "left");
-                    lobbies.forget_invites(user_id);
+                    lobbies.detach(user_id, session_id);
                 }
                 if self.link.is_some() {
                     self.leave_link();
@@ -845,11 +897,8 @@ impl Conn {
                 };
                 lobby_result(lobbies.join_code(profile, session_id, &code, self.lobby_tx.clone()).map(|_| ()))
             }
-            ClientMsg::LobbyReady { ready } => match &self.state.lobbies {
-                Some(l) => lobby_result(l.set_ready(user_id, session_id, ready)),
-                None => vec![Out::Msg(LobbyError::NotInLobby.to_msg())],
-            },
             ClientMsg::LobbyStart => match &self.state.lobbies {
+                Some(_) if !self.in_hub() => vec![lobby_error("not_in_hub", "missions are started from the hub")],
                 Some(l) => lobby_result(l.start(user_id, session_id).map(|_| ())),
                 None => vec![Out::Msg(LobbyError::NotInLobby.to_msg())],
             },
@@ -914,6 +963,8 @@ enum SkillChange {
     Learn(String),
     Slot(u8, String),
     Reset,
+    /// Mount (true) or get off: needs a learned mount skill.
+    Mount(bool),
 }
 
 impl Conn {
@@ -937,6 +988,10 @@ impl Conn {
                 SkillChange::Reset => {
                     l = Loadout::default();
                     Ok(())
+                }
+                SkillChange::Mount(on) => {
+                    l.mounted = on;
+                    if on && !book.rides(&l) { Err(crate::world::combat::skills::LearnError::NotLearned) } else { Ok(()) }
                 }
             };
             if let Err(e) = result {

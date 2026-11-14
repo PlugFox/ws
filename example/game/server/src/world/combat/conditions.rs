@@ -32,10 +32,13 @@ pub enum Condition {
     /// Hunts and strikes whoever taunted it (Provoke), not the nearest;
     /// −2 AC and disadvantage on attacks against anyone else.
     Taunted,
+    /// Terrified (a ghost's wail): it flees from what scared it and can
+    /// neither attack nor cast (players; COMBAT.md, Payon Caves).
+    Feared,
 }
 
 /// Conditions a monster can carry (timers per slot).
-pub const CONDITIONS: usize = 10;
+pub const CONDITIONS: usize = 11;
 
 impl Condition {
     pub const ALL: [Condition; CONDITIONS] = [
@@ -49,6 +52,7 @@ impl Condition {
         Condition::Poisoned,
         Condition::Mired,
         Condition::Taunted,
+        Condition::Feared,
     ];
 
     /// The skill table's names.
@@ -64,6 +68,7 @@ impl Condition {
             "poisoned" => Condition::Poisoned,
             "mired" => Condition::Mired,
             "taunted" => Condition::Taunted,
+            "feared" => Condition::Feared,
             _ => return None,
         })
     }
@@ -78,7 +83,7 @@ impl Condition {
         match self {
             Condition::Slowed | Condition::Frozen | Condition::Rooted | Condition::Mired => Save::Reflex,
             Condition::Stunned | Condition::Petrified | Condition::Burning | Condition::Poisoned => Save::Body,
-            Condition::Blinded | Condition::Taunted => Save::Mind,
+            Condition::Blinded | Condition::Taunted | Condition::Feared => Save::Mind,
         }
     }
 }
@@ -101,6 +106,11 @@ impl Status {
     /// Frozen, stunned or petrified: no attacks, no steps.
     pub const fn held(self) -> bool {
         self.any(Self::HELD)
+    }
+
+    /// Held, or too terrified to fight: no attacks, no casts.
+    pub const fn helpless(self) -> bool {
+        self.any(Self::HELD | Condition::Feared.bit())
     }
 
     pub const fn can_move(self) -> bool {
@@ -195,5 +205,9 @@ mod tests {
         assert_eq!(Condition::from_id("petrified"), Some(Condition::Petrified));
         assert_eq!(Condition::from_id("bleeding"), None);
         assert!(Condition::ALL.iter().enumerate().all(|(i, c)| *c as usize == i));
+        let feared = s(&[Condition::Feared]);
+        assert!(feared.helpless() && !feared.held() && feared.can_move());
+        assert!(s(&[Condition::Stunned]).helpless() && !s(&[Condition::Slowed]).helpless());
+        assert_eq!((Condition::from_id("feared"), Condition::Feared.save()), (Some(Condition::Feared), Save::Mind));
     }
 }

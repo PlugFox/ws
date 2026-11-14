@@ -115,6 +115,7 @@ async fn start_with(stages: Vec<HubWorld>) -> (SocketAddr, AppState) {
         evil: false,
         drops: Vec::new(),
         hits: (0, 0),
+        missions: Vec::new(),
     };
     let monsters = MonsterCatalog::new(vec![poring]).unwrap();
     let (app, state) =
@@ -250,8 +251,10 @@ async fn join_requires_selected_character() {
 
     // A malformed known message is reported; unknown kinds and text frames
     // are not part of the protocol.
-    ws.send(Message::Binary(vec![kind::LOBBY_READY, 7].into())).await.unwrap();
+    ws.send(Message::Binary(vec![kind::LOBBY_JOIN, 7].into())).await.unwrap();
     assert_eq!(next_of!(&mut ws, HubError { code }).0, "bad_message");
+    // The retired ready flag is an unknown kind now: ignored.
+    ws.send(Message::Binary(vec![kind::LOBBY_READY, 1].into())).await.unwrap();
     ws.send(Message::Binary(vec![0x7F, 1, 2].into())).await.unwrap();
     ws.send(Message::Text("{\"type\":\"ping\"}".into())).await.unwrap();
     assert_eq!(next_of!(&mut ws, HubError { code }).0, "bad_message", "the unknown kind was ignored");
@@ -401,7 +404,7 @@ async fn binary_input_and_mission_board() {
 }
 
 #[tokio::test]
-async fn lobby_ready_check_stage_launch_and_return() {
+async fn party_start_stage_launch_and_return_keeps_the_party() {
     let (addr, state) = start_with(vec![synthetic_stage()]).await;
     let (ta, a_id) = player(addr, "erin", true).await;
     let (tb, b_id) = player(addr, "finn", true).await;
@@ -412,8 +415,8 @@ async fn lobby_ready_check_stage_launch_and_return() {
         next_of!(ws, MapEnter);
     }
 
-    // Lobby messages only from the hub, and missions only at a board.
-    send(&mut a, ClientMsg::LobbyReady { ready: true }).await;
+    // Lobby messages only in a party, and missions only at a board.
+    send(&mut a, ClientMsg::LobbyStart).await;
     assert_eq!(next_of!(&mut a, LobbyError { code }).0, "not_in_lobby");
 
     // Both pick the public mission: they land in one lobby, erin leads.
@@ -425,22 +428,12 @@ async fn lobby_ready_check_stage_launch_and_return() {
     assert_eq!(lobby.members[0].entity_id as u64, a_id);
     assert!(lobby.members[0].leader);
 
-    // Ready check: finn is not ready yet.
-    send(&mut a, ClientMsg::LobbyStart).await;
-    assert_eq!(next_of!(&mut a, LobbyError { code }).0, "not_ready");
-    send(&mut b, ClientMsg::LobbyReady { ready: true }).await;
-    loop {
-        let (l,) = next_of!(&mut a, LobbyState { lobby });
-        if l.members[1].ready {
-            break;
-        }
-    }
+    // No ready check: the leader starts when they like.
     send(&mut a, ClientMsg::LobbyStart).await;
 
     // Both move to the same stage; epochs keep rising across instances.
     let mut stage_ids = Vec::new();
     for ws in [&mut a, &mut b] {
-        assert_eq!(next_of!(ws, LobbyLeft { reason }).0, "launched");
         let (stage_id, mission, monsters, light_radius) =
             next_of!(ws, StageJoined { stage_id, mission, monsters, light_radius });
         assert_eq!(mission, "poring_island_survival");
@@ -495,10 +488,21 @@ async fn lobby_ready_check_stage_launch_and_return() {
     assert_eq!(next_of!(&mut a, MapEnter { map }).0.id, "town");
     assert_eq!(lobbies.stages().active(), 0, "the stage ended with its last player");
     assert_eq!(state.hub.as_ref().unwrap().channels()[0].population, 2);
+    // Still one party, both back in town and free to go again (a change
+    // of modifiers re-sends its state: the earlier ones went by above).
+    assert_eq!(lobbies.open_lobbies(), 1);
+    send(&mut a, ClientMsg::LobbyModifiers { tier: 1, mask: 0 }).await;
+    let ServerMsg::LobbyState { lobby: l } =
+        next_where(&mut a, "both in town", |m| matches!(m, ServerMsg::LobbyState { lobby } if lobby.members.iter().all(|m| m.online && !m.away))).await
+    else {
+        unreachable!()
+    };
+    assert_eq!(l.members.len(), 2);
+    assert!(l.members[0].leader && l.members[0].entity_id as u64 == a_id);
 }
 
 #[tokio::test]
-async fn private_lobby_by_code_and_disconnect_promotes() {
+async fn private_party_by_code_survives_a_drop_and_a_new_sign_in() {
     let (addr, state) = start_with(vec![synthetic_stage()]).await;
     let (ta, _) = player(addr, "gwen", true).await;
     let (tb, b_id) = player(addr, "hugo", true).await;
@@ -518,14 +522,40 @@ async fn private_lobby_by_code_and_disconnect_promotes() {
     send(&mut b, ClientMsg::LobbyJoin { code: lobby.code.to_lowercase() }).await;
     assert_eq!(next_of!(&mut b, LobbyState { lobby }).0.members.len(), 2);
 
-    // The leader's socket drops: hugo leads the lobby now.
+    // The leader's socket drops: still in the party, offline, still the
+    // leader (a reload does not cost the lead).
     a.close(None).await.unwrap();
+    drop(a);
     let (lobby,) = next_of!(&mut b, LobbyState { lobby });
-    assert_eq!(lobby.members.len(), 1);
-    assert_eq!((lobby.members[0].entity_id as u64, lobby.members[0].leader), (b_id, true));
+    assert_eq!(lobby.members.len(), 2);
+    assert!(lobby.members[0].leader && !lobby.members[0].online);
+    assert_eq!((lobby.members[1].entity_id as u64, lobby.members[1].online), (b_id, true));
+
+    // Signing in again (a new session) and entering the town: back online
+    // in the same party, without picking a mission again.
+    let http = reqwest::Client::new();
+    let login: Value = http
+        .post(format!("http://{addr}/api/auth/login"))
+        .json(&json!({ "username": "gwen", "password": "HubPassword123!" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = login["access_token"].as_str().unwrap().to_string();
+    let chars: Value = http.get(format!("http://{addr}/api/characters")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    let id = chars.as_array().or_else(|| chars["characters"].as_array()).unwrap()[0]["id"].as_u64().unwrap();
+    http.post(format!("http://{addr}/api/characters/{id}/select")).bearer_auth(&token).send().await.unwrap();
+    let mut a = connect(addr, &token).await;
+    send(&mut a, ClientMsg::HubJoin { channel: None }).await;
+    let (back,) = next_of!(&mut a, LobbyState { lobby });
+    assert_eq!((back.lobby_id, back.code.as_str()), (lobby.lobby_id, lobby.code.as_str()));
+    assert!(back.members.iter().all(|m| m.online));
+
     send(&mut b, ClientMsg::LobbyLeave).await;
     assert_eq!(next_of!(&mut b, LobbyLeft { reason }).0, "left");
-    assert_eq!(state.lobbies.as_ref().unwrap().open_lobbies(), 0);
+    assert_eq!(state.lobbies.as_ref().unwrap().open_lobbies(), 1, "gwen's party stays");
 }
 
 /// Two sockets with the same access token (a reconnect over a half-dead

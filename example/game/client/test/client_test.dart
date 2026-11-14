@@ -2,6 +2,7 @@ import 'dart:collection';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:game_client/src/classes.dart';
 import 'package:game_client/src/interpolation.dart';
 import 'package:game_client/src/prediction.dart';
 import 'package:game_client/src/protocol.dart';
@@ -80,6 +81,11 @@ void main() {
       expect(toHex(ClientMsg.missionStart('m1', tier: 2, mask: 65)), '63026d310241');
     });
 
+    test('cast prefs golden (protocol.rs `cast_prefs_match_the_dart_golden`)', () {
+      expect(toHex(ClientMsg.castPrefs(manualAim: true, auto: 0x8009)), '85010980');
+      expect(toHex(ClientMsg.castPrefs(manualAim: false, auto: 0)), '85000000');
+    });
+
     test('item goldens decode', () {
       final inv =
           ServerMsg.decode(
@@ -105,12 +111,29 @@ void main() {
       final used = ServerMsg.decode(hex('3d0a7265645f706f74696f6ee807'))! as ItemUsed;
       expect((used.item, used.cooldownMs), ('red_potion', 1000));
       final gear = ServerMsg.decode(hex('3eac0203626f77'))! as PlayerGear;
+      final hats = ServerMsg.decode(hex('8bac02020368617408666c755f6d61736b'))! as PlayerHeadgear;
+      expect(hats.entityId, 300);
+      expect(hats.items, ['hat', 'flu_mask']);
       expect((gear.entityId, gear.weapon), (300, 'bow'));
       final loot = ServerMsg.decode(hex('3f85808004a002d000056b6e6966650101'))! as Loot;
       expect(
         (loot.entityId, loot.x, loot.y, loot.item, loot.count, loot.rare, loot.isZeny),
         (0x800005, 10.5, 3.25, 'knife', 1, true, false),
       );
+    });
+
+    test('mission list golden decodes (protocol/mission.rs `MISSION_LIST`)', () {
+      final l = ServerMsg.decode(
+        hex(
+          '9201016d014d01640173016601500764756e67656f6e01610f121e0f238407080101420103666f6700017201017801',
+        ),
+      )! as MissionList;
+      final c = l.missions.single;
+      expect((c.id, c.name, c.description, c.story, c.map, c.place, c.terrain, c.art), ('m', 'M', 'd', 's', 'f', 'P', 'dungeon', 'a'));
+      expect((c.band.min, c.band.recommended, c.band.max, c.monsterLevels, c.timeLimitSecs, c.maxPlayers), (15, 18, 30, (15, 35), 900, 8));
+      expect([c.bosses, c.tags, c.tips], [['B'], ['fog'], <String>[]]);
+      expect(c.rewards, 'r');
+      expect((c.soon, c.reason, c.step), (true, 'x', 1));
     });
 
     test('combo golden decodes (protocol.rs `combo`)', () {
@@ -139,7 +162,7 @@ void main() {
       final b =
           (ServerMsg.decode(
                     hex(
-                      '6c016d0166840701145a010170015005737761726d05776174657205736d616c6c00010a0515060c01056170706c65ac020102',
+                      '6c016d0166840701145a010170015005737761726d05776174657205736d616c6c00010a0515060c01056170706c65ac02010201030fbc0501047469646504546964650278a4030f28',
                     ),
                   )!
                   as MissionBriefing)
@@ -165,7 +188,26 @@ void main() {
       );
       expect(m.drops.single, (item: 'apple', rate: 300, min: 1, max: 2));
       expect(b.toJson()['levels'], [1, 20]);
+      // Mission platform fields (trailing).
+      expect((b.band, b.lightPermille), ((min: 1, recommended: 3, max: 15), 700));
+      final ev = b.events.single;
+      expect((ev.id, ev.name, ev.warnSecs, ev.durationSecs), ('tide', 'Tide', 15, 40));
+      expect(ev.starts, [120, 420]);
+      expect(b.underLevel([1]), false);
+      // An older server's brief ends after the monsters.
+      final old = (ServerMsg.decode(hex('6c016d0166840701145a00'))! as MissionBriefing).brief;
+      expect((old.band.min, old.lightPermille, old.events.length), (1, 1000, 0));
       expect((ServerMsg.decode(hex('6d84c305'))! as StageClock).elapsedMs, 90500);
+    });
+
+    test('mission platform goldens decode (protocol/mission.rs `frames`)', () {
+      final l = ServerMsg.decode(hex('93000000e041dc0b'))! as EnvLight;
+      expect((l.radius, l.fadeMs), (28.0, 1500));
+      final e = ServerMsg.decode(hex('9301000474696465045469646503557021c0a907c0b802'))! as EnvEvent;
+      expect((e.phase, e.id, e.name, e.text, e.startMs, e.durationMs), (EnvEvent.warning, 'tide', 'Tide', 'Up!', 120000, 40000));
+      final k = ServerMsg.decode(hex('9302c8a006'))! as EnvShake;
+      expect((k.intensity, k.durationMs), (200, 800));
+      expect(() => ServerMsg.decode(hex('9309')), throwsA(isA<WireFormatError>()), reason: 'unknown op');
     });
 
     test('fog goldens decode (protocol.rs `fog`, `fog_exposure`)', () {
@@ -289,6 +331,17 @@ void main() {
       expect(() => ServerMsg.decode(hex('7403')), throwsA(isA<WireFormatError>()), reason: 'unknown op');
     });
 
+    test('shop goldens (protocol.rs `golden::shop`)', () {
+      expect(
+        toHex(
+          ClientMsg.shopDeal('tool', [(id: 'red_potion', count: 12)], [(id: 'jellopy', count: 300), (id: 'sword+7', count: 1)]),
+        ),
+        '8c04746f6f6c010a7265645f706f74696f6e0c02076a656c6c6f7079ac020773776f72642b3701',
+      );
+      final d = ServerMsg.decode(hex('8dd804e209'))! as ShopDone;
+      expect((d.spent, d.earned), (600, 1250));
+    });
+
     test('feedback goldens (protocol.rs `golden::feedback`)', () {
       expect(
         toHex(
@@ -322,6 +375,23 @@ void main() {
       expect(toHex(ClientMsg.stageResume(accept: false)), '5f00');
     });
 
+    test('monster hp golden (protocol.rs `monster_hp_matches_the_dart_golden`)', () {
+      final m = ServerMsg.decode(hex('a50287808004ffac82800400'))! as MonsterHp;
+      expect(m.bars, [(monsterEntityBase + 7, 255), (monsterEntityBase + 300, 0)]);
+      expect(() => ServerMsg.decode(hex('a50287808004ffac828004')), throwsA(isA<WireFormatError>()));
+    });
+
+    test('mount goldens (protocol.rs `mount_frames_match_the_dart_goldens`)', () {
+      final m = ServerMsg.decode(hex('90ac020119'))! as PlayerMount;
+      expect((m.entityId, m.mount, m.speed, m.riding), (300, PlayerMount.peco, 25, true));
+      expect(toHex(ClientMsg.mount(on: false)), '9100');
+      expect(toHex(ClientMsg.mount(on: true)), '9101');
+      expect(riderJob('swordsman', 2, riding: true), 'crusader_peco');
+      expect(riderJob('swordsman', 3, riding: true), 'paladin_peco');
+      expect(riderJob('swordsman', 1, riding: true), 'swordsman', reason: 'no mounted swordsman body');
+      expect(riderJob('swordsman', 2, riding: false), 'crusader');
+    });
+
     test('modifier goldens (protocol/modifiers.rs `goldens`)', () {
       final d = ServerMsg.decode(
         hex(
@@ -341,6 +411,21 @@ void main() {
       expect((r.tier, r.mask, r.risk, r.zeny, r.exp), (3, 2, 18, 300, 1500));
       expect(r.items, [('jellopy', 2)]);
       expect(toHex(ClientMsg.lobbyModifiers(3, 0x42)), '770342');
+    });
+
+    test('affix goldens (protocol/affixes.rs `goldens`)', () {
+      final m = ServerMsg.decode(hex('a00205021100ac02ff80800205'))! as MonsterAffixes;
+      expect(m.monsters.map((a) => (a.slot, a.generation, a.bits, a.state)), [(5, 2, 0x11, 0), (300, 255, 0x8000, 5)]);
+      expect((m.monsters[1].frenzied, m.monsters[1].minion, m.monsters[1].shieldBroken), (true, true, false));
+      final e = ServerMsg.decode(hex('a1018580800401a002d000'))! as AffixEvents;
+      expect((e.events.single.entity, e.events.single.name, e.events.single.x, e.events.single.y), (0x800005, 'blink', 10.5, 3.25));
+      final d = ServerMsg.decode(hex('a201066861737465640001480164ffd1ff0402054d6167696304526172654b321414'))! as AffixDefs;
+      expect(d.defs.map((x) => (x.id, x.bit, x.name, x.desc, x.color)), [('hasted', 0, 'H', 'd', 0x9fe8ff)]);
+      expect(d.ranks, ['Magic', 'Rare']);
+      expect((d.expPct, d.dropPct, d.extraPct, d.hpPct), (75, 50, 20, 20));
+      expect(d.toJson()['defs'], [
+        {'id': 'hasted', 'bit': 0, 'name': 'H', 'desc': 'd', 'color': 0x9fe8ff},
+      ]);
     });
 
     test('results goldens (protocol/results.rs `goldens`)', () {
@@ -432,17 +517,17 @@ void main() {
       final lobby =
           (ServerMsg.decode(
                     hex(
-                      '310105414232434416706f72696e675f69736c616e645f737572766976616c16506f72696e672049736c616e6420537572766976616c48486f6c64206f757420616761696e73742067726f77696e67207761766573206f6e20506f72696e672049736c616e6420756e74696c2074686520626f73732073686f77732075702e0a7072745f66696c6430380400010902426f066e6f7669636503',
+                      '310105414232434416706f72696e675f69736c616e645f737572766976616c16506f72696e672049736c616e6420537572766976616c48486f6c64206f757420616761696e73742067726f77696e67207761766573206f6e20506f72696e672049736c616e6420756e74696c2074686520626f73732073686f77732075702e0a7072745f66696c6430380800010902426f066e6f76696365060100',
                     ),
                   )!
                   as LobbyState)
               .lobby;
       expect(
         (lobby.lobbyId, lobby.code, lobby.public, lobby.mission.id, lobby.mission.maxPlayers),
-        (1, 'AB2CD', false, 'poring_island_survival', 4),
+        (1, 'AB2CD', false, 'poring_island_survival', 8),
       );
       final m = lobby.members.single;
-      expect((m.entityId, m.name, m.ready, m.leader), (9, 'Bo', true, true));
+      expect((m.entityId, m.name, m.leader, m.online, m.away, m.level, m.offlineSecs), (9, 'Bo', true, true, false, 1, 0));
 
       expect(
         (ServerMsg.decode(hex('32ff06637573746f6d'))! as LobbyLeft).reason,

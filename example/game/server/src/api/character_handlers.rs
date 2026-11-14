@@ -57,6 +57,9 @@ pub struct CharacterDto {
     pub unlocked_skills: serde_json::Value,
     pub inventory: serde_json::Value,
     pub last_location_id: String,
+    /// Display name of that location (its manifest's), for the slot cards;
+    /// empty when the server does not know the map.
+    pub last_location_name: String,
     pub look: LookDto,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -86,6 +89,7 @@ impl CharacterDto {
             level: i64::from(r.level),
             base_exp: r.base_exp,
             last_location_id: r.last_location_id,
+            last_location_name: String::new(),
             look,
             created_at: r.created_at,
         }
@@ -121,6 +125,11 @@ pub(crate) fn class_stats(archetype: &str, level: i64, bag: &Bag) -> serde_json:
             "damage": format!("{}d{}{:+}", dice.count, dice.sides, dice.bonus),
             "damage_type": kind.ro_element(),
             "interval_ms": held.interval_ms,
+            // Basic attack reach in cells (to the target's edge): how far
+            // click to move walks toward a clicked monster.
+            "reach": match held.reach {
+                combat::Reach::Melee { range, .. } | combat::Reach::Ranged { range, .. } => range,
+            },
         },
     })
 }
@@ -139,7 +148,14 @@ pub async fn list_characters(
             )
         })?;
 
-    let characters: Vec<CharacterDto> = records.into_iter().map(CharacterDto::of).collect();
+    let characters: Vec<CharacterDto> = records
+        .into_iter()
+        .map(|r| {
+            let mut c = CharacterDto::of(r);
+            c.last_location_name = state.place_name(&c.last_location_id).unwrap_or_default();
+            c
+        })
+        .collect();
 
     Ok((StatusCode::OK, Json(characters)).into_response())
 }
@@ -324,4 +340,20 @@ pub async fn select_character(
         })),
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The client walks a clicked monster into this reach (click to move).
+    #[test]
+    fn stats_carry_the_basic_attack_reach() {
+        let reach = |class: Class| {
+            let bag = Bag::starting(class, "");
+            class_stats(class.id(), 1, &bag)["weapon"]["reach"].as_f64().unwrap()
+        };
+        assert_eq!(reach(Class::Swordsman), 2.75, "a sword");
+        assert_eq!(reach(Class::Archer), 32.0, "a bow");
+    }
 }

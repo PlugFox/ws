@@ -282,3 +282,55 @@ async fn test_character_crud_and_dirty_flag_flushing() {
     let unlocked_skills: Vec<String> = serde_json::from_value(db_char.unlocked_skills.0.clone()).unwrap();
     assert!(unlocked_skills.contains(&"whirlwind".to_string()));
 }
+
+/// A session idle for longer than the refresh lifetime cannot be renewed
+/// (the lifetime slides: each rotation renews it); logging out revokes the
+/// refresh token at once.
+#[tokio::test]
+async fn idle_sessions_expire_and_logout_revokes_the_refresh_token() {
+    let (app, state) = setup_test_app().await;
+    let post = |uri: &str, body: Value, token: Option<&str>| {
+        let mut req = Request::builder().method("POST").uri(uri).header(header::CONTENT_TYPE, "application/json");
+        if let Some(t) = token {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        req.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()
+    };
+    let json_of = |resp: axum::response::Response| async move {
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice::<Value>(&bytes).unwrap()
+    };
+    let reg = app.clone().oneshot(post("/api/auth/register", json!({ "username": "idle_one", "password": "IdlePassword123!" }), None)).await.unwrap();
+    let reg = json_of(reg).await;
+    let refresh = reg["refresh_token"].as_str().unwrap().to_string();
+
+    // Used within the lifetime: renews.
+    let ok = app.clone().oneshot(post("/api/auth/refresh", json!({ "refresh_token": refresh }), None)).await.unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    let ok = json_of(ok).await;
+    let refresh = ok["refresh_token"].as_str().unwrap().to_string();
+
+    // Idle past it: refused, and the session is over.
+    let ttl = chrono::Duration::from_std(state.config.refresh_token_ttl).unwrap() + chrono::Duration::minutes(1);
+    sqlx::query("UPDATE sessions SET last_seen_at = now() - $1::interval")
+        .bind(format!("{} seconds", ttl.num_seconds()))
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let late = app.clone().oneshot(post("/api/auth/refresh", json!({ "refresh_token": refresh }), None)).await.unwrap();
+    assert_eq!(late.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(json_of(late).await["code"], "SESSION_EXPIRED");
+
+    // Log out: the refresh token is dead right away.
+    let login = app
+        .clone()
+        .oneshot(post("/api/auth/login", json!({ "username": "idle_one", "password": "IdlePassword123!" }), None))
+        .await
+        .unwrap();
+    let login = json_of(login).await;
+    let (access, refresh) = (login["access_token"].as_str().unwrap().to_string(), login["refresh_token"].as_str().unwrap().to_string());
+    let out = app.clone().oneshot(post("/api/auth/logout", json!({}), Some(&access))).await.unwrap();
+    assert_eq!(out.status(), StatusCode::OK);
+    let after = app.clone().oneshot(post("/api/auth/refresh", json!({ "refresh_token": refresh }), None)).await.unwrap();
+    assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+}

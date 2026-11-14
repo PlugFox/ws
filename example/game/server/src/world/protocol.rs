@@ -44,8 +44,11 @@
 //! 0x30 STAGE_JOINED    var stage_id, str mission, var tick_rate, var entity_id,
 //!                      var n, n × str monster kind, f32 light_radius
 //! 0x31 LOBBY_STATE     var lobby_id, str code, mission, bool public,
-//!                      var n, n × {var entity_id, str name, str archetype, u8 flags}
-//!                      (flags: 1 ready, 2 leader)
+//!                      var n, n × {var entity_id, str name, str archetype, u8 flags,
+//!                      var level, var offline_secs}
+//!                      (the party: the account's current or last character;
+//!                      flags: 2 leader, 4 online, 8 on a mission; bit 1 was
+//!                      the retired ready flag, always 0)
 //! 0x32 LOBBY_LEFT      code reason
 //! 0x33 LOBBY_ERROR     code, str message
 //! 0x37 EMOTE           var entity_id, u8 emote   (everyone on the entity's map,
@@ -72,6 +75,9 @@
 //! 0x3D ITEM_USED       str item, var cooldown_ms (the recipient drank it)
 //! 0x3E PLAYER_GEAR     var entity_id, str weapon (a player on the map
 //!                      changed weapon)
+//! 0x8B PLAYER_HEADGEAR var entity_id, var n, n × str item (the headgear a
+//!                      player on the map wears, any slot; on arrival for
+//!                      everyone there, and after each change)
 //! 0x3F LOOT            var entity_id (the monster), pos x, pos y, str item
 //!                      (`zeny` = zeny), var count, u8 flags (1 rare)
 //!                      (a kill dropped this for the recipient; already in
@@ -100,9 +106,16 @@
 //!                      var pack_min, var pack_max,
 //!                      var m, m × {str item, var rate (1/100 %), var min,
 //!                      var max}} (`missions::brief`: what a mission spawns
-//!                      and drops, from the live catalogue; after NPC_DIALOG
-//!                      of a mission giver, one per mission, and after
-//!                      STAGE_JOINED)
+//!                      and drops, from the mission's roster catalogue; after
+//!                      NPC_DIALOG of a mission giver, one per mission, and
+//!                      after STAGE_JOINED), then var band_min,
+//!                      var band_recommended, var band_max (player levels),
+//!                      var light_permille, var e, e × {str id, str name,
+//!                      var s, s × var start_secs, var warn_secs,
+//!                      var duration_secs} (the map's timed events)
+//! 0x92 MISSION_LIST, 0x93 ENVIRONMENT
+//!                      the mission ladder's cards and a run's live light
+//!                      and map events: see `protocol/mission.rs`
 //! 0x6D STAGE_CLOCK     var elapsed_ms (time into the run; on joining a
 //!                      stage and every few seconds, for the timeline)
 //! 0x6E FOG             u8 op: 0 the overtime poison fog rises (warn),
@@ -122,9 +135,18 @@
 //!                      a finished run's party statistics and the
 //!                      recipient's rewards, after STAGE_END: see
 //!                      `protocol/results.rs`
+//! 0x8D SHOP_DONE       var spent, var earned (a SHOP_DEAL went through;
+//!                      the new INVENTORY comes before it)
 //! 0x6A BOSS_CAST, 0x6B BOSS_ZONES, 0x6F BOSS_SHOUT, 0x72 BOSS_BAR
 //!                      scripted elite and boss fights (`hub::boss`): see
 //!                      `protocol/boss.rs` for their bodies
+//! 0xA0 MONSTER_AFFIXES, 0xA1 AFFIX_EVENT, 0xA2 AFFIX_DEFS
+//!                      monster affixes / stars (`combat::affixes`,
+//!                      `hub::affix`): see `protocol/affixes.rs`
+//! 0xA5 MONSTER_HP      var n, n × {var entity_id, u8 hp (1..=255 of its
+//!                      max, rounded up; 0 = gone)}: the bars under the
+//!                      stage's elites and bosses (`hub::plates`), on
+//!                      change and every few seconds, to everyone on the map
 //! 0x70 PARTY_INVITE    u8 op: 0 offer (to the invitee): var from (the
 //!                      inviter's entity id), str name, str mission (its
 //!                      name), var ttl_ms (answer within; then it lapses);
@@ -194,6 +216,11 @@
 //!                      i8 aim_x, i8 aim_y (from the player, 1/8 m; 0,0 = none),
 //!                      u16 slots (skill slots pressed; bit i = slot i)
 //!                      (the 9-byte form without aim and slots is accepted)
+//! 0x85 CAST_PREFS      u8 flags (bit 0: manual aiming, the pointer picks
+//!                      the monster and places ground skills), u16 auto
+//!                      (auto-cast slots, bit i = slot i: they only fire at
+//!                      a target that needs them). Kept by the connection,
+//!                      sent again on change
 //! 0x40 PING
 //! 0x41 HUB_JOIN        var channel + 1 (0 = server picks)
 //! 0x42 HUB_LEAVE
@@ -201,7 +228,7 @@
 //! 0x44 NPC_INTERACT    str npc
 //! 0x45 MISSION_SELECT  str mission, bool public
 //! 0x46 LOBBY_JOIN      str code
-//! 0x47 LOBBY_READY     bool ready
+//! 0x47 (retired: LOBBY_READY; the leader starts at any time; ignored)
 //! 0x48 LOBBY_START
 //! 0x49 LOBBY_LEAVE
 //! 0x4A LOBBY_KICK      var entity_id
@@ -218,6 +245,11 @@
 //!                      player; at most one per second)
 //! 0x54 SHOP_BUY        str npc, str item, var count (at a merchant)
 //! 0x55 SHOP_SELL       str npc, str item, var count (at a merchant)
+//! 0x8C SHOP_DEAL       str npc, var n, n × {str item, var count} (buy),
+//!                      var m, m × {str item, var count} (sell) (the shop
+//!                      window's cart, at a merchant, all or nothing:
+//!                      sales first; at most 20 lines a side, 1..=999
+//!                      each; answered by SHOP_DONE or HUB_ERROR)
 //! 0x56 EQUIP           str item, u8 slot (0xFF = its own slot; town only)
 //! 0x57 UNEQUIP         u8 slot (town only)
 //! 0x58 ITEM_USE        str item (a potion, on a mission)
@@ -262,18 +294,23 @@
 
 use super::horde::view::MonsterDelta;
 use super::map::{CameraConstraint, LocationKind, MapData};
-use super::missions::{self, DropBrief, MissionBrief, MissionInfo, MonsterBrief};
+use super::missions::{self, DropBrief, EventBrief, MissionBrief, MissionInfo, MonsterBrief};
+use super::trade::ShopOrder;
 use super::wire::{PutWire, Reader};
 use bytes::{BufMut, Bytes, BytesMut};
 use uuid::Uuid;
 
 pub use super::wire::{decode_pos, encode_pos};
 
+mod affixes;
 mod boss;
+mod mission;
 mod modifiers;
 mod results;
 pub use modifiers::{ModifierInfo, ModifierStep, RewardStep};
+pub use affixes::{affix_state, AffixEvent, AffixInfo, MonsterAffix};
 pub use boss::{cast_flags, zone_flags, BossBarInfo, BossZone};
+pub use mission::{hazard_ability, phase as env_phase};
 pub use results::{mark, seat_flags, RunBucket, RunMark, RunSeat};
 
 pub const SNAPSHOT_KIND: u8 = 0x01;
@@ -323,11 +360,16 @@ pub mod kind {
     pub const SHOP: u8 = 0x3C;
     pub const ITEM_USED: u8 = 0x3D;
     pub const PLAYER_GEAR: u8 = 0x3E;
+    pub const PLAYER_HEADGEAR: u8 = 0x8B;
+    pub const PLAYER_MOUNT: u8 = 0x90;
     pub const LOOT: u8 = 0x3F;
     pub const COMBO: u8 = 0x60;
     pub const REVIVE: u8 = 0x61;
     pub const BONUS: u8 = 0x68;
     pub const MISSION_INFO: u8 = 0x6C;
+    /// Mission platform (`protocol/mission.rs`).
+    pub const MISSION_LIST: u8 = 0x92;
+    pub const ENVIRONMENT: u8 = 0x93;
     pub const STAGE_CLOCK: u8 = 0x6D;
     pub const FOG: u8 = 0x6E;
     pub const BOSS_CAST: u8 = 0x6A;
@@ -347,6 +389,11 @@ pub mod kind {
     pub const MODIFIERS: u8 = 0x7C;
     pub const RUN_STATS: u8 = 0x81;
     pub const RUN_REWARDS: u8 = 0x82;
+    pub const SHOP_DONE: u8 = 0x8D;
+    pub const MONSTER_AFFIXES: u8 = 0xA0;
+    pub const AFFIX_EVENT: u8 = 0xA1;
+    pub const AFFIX_DEFS: u8 = 0xA2;
+    pub const MONSTER_HP: u8 = 0xA5;
 
     pub const PING: u8 = 0x40;
     pub const HUB_JOIN: u8 = 0x41;
@@ -355,6 +402,7 @@ pub mod kind {
     pub const NPC_INTERACT: u8 = 0x44;
     pub const MISSION_SELECT: u8 = 0x45;
     pub const LOBBY_JOIN: u8 = 0x46;
+    /// Retired (the ready check is gone): never sent, ignored as unknown.
     pub const LOBBY_READY: u8 = 0x47;
     pub const LOBBY_START: u8 = 0x48;
     pub const LOBBY_LEAVE: u8 = 0x49;
@@ -367,9 +415,11 @@ pub mod kind {
     pub const SKILL_SLOT: u8 = 0x50;
     pub const EMOTE_REQ: u8 = 0x51;
     pub const POSE_REQ: u8 = 0x52;
+    pub const MOUNT_REQ: u8 = 0x91;
     pub const FLAG_REQ: u8 = 0x53;
     pub const SHOP_BUY: u8 = 0x54;
     pub const SHOP_SELL: u8 = 0x55;
+    pub const SHOP_DEAL: u8 = 0x8C;
     pub const EQUIP: u8 = 0x56;
     pub const UNEQUIP: u8 = 0x57;
     pub const ITEM_USE: u8 = 0x58;
@@ -382,12 +432,19 @@ pub mod kind {
     pub const STAGE_RESUME: u8 = 0x5F;
     pub const LOBBY_MODIFIERS: u8 = 0x77;
     pub const MISSION_START: u8 = 0x63;
+    pub const CAST_PREFS: u8 = 0x85;
 }
 
 /// Highest valid emote id.
 pub const MAX_EMOTE: u8 = 127;
 /// Highest valid flag (ping marker) id.
 pub const MAX_FLAG: u8 = 9;
+/// [`ServerMsg::PlayerMount`] values.
+pub mod mount {
+    pub const NONE: u8 = 0;
+    /// A Peco Peco (Grand Peco): the Crusader's and Paladin's bird.
+    pub const PECO: u8 = 1;
+}
 /// [`ServerMsg::Pose`] values.
 pub mod pose {
     pub const STAND: u8 = 0;
@@ -556,11 +613,26 @@ impl PlayerInfo {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LobbyMemberInfo {
+    /// The member's current character (their last one while offline).
     pub entity_id: u32,
     pub name: String,
     pub archetype: String,
-    pub ready: bool,
     pub leader: bool,
+    /// A socket of theirs is in the world.
+    pub online: bool,
+    /// On a mission (the leader's start leaves them out).
+    pub away: bool,
+    pub level: u32,
+    /// Seconds since they went offline (0 while online).
+    pub offline_secs: u32,
+}
+
+/// [`LobbyMemberInfo`] flag bits on the wire (bit 1, the retired ready
+/// flag, stays unused).
+pub mod member_flags {
+    pub const LEADER: u8 = 2;
+    pub const ONLINE: u8 = 4;
+    pub const AWAY: u8 = 8;
 }
 
 /// Full lobby state, re-sent to every member on each change.
@@ -701,6 +773,17 @@ fn put_brief(b: &mut BytesMut, m: &MissionBrief) {
             b.put_var(d.max.into());
         });
     });
+    // Mission platform (trailing): the player band, the light, the events.
+    for v in [m.band.0, m.band.1, m.band.2, m.light_permille] {
+        b.put_var(v.into());
+    }
+    put_list(b, &m.events, |b, e| {
+        b.put_str(&e.id);
+        b.put_str(&e.name);
+        put_list(b, &e.starts, |b, s| b.put_var((*s).into()));
+        b.put_var(e.warn_secs.into());
+        b.put_var(e.duration_secs.into());
+    });
 }
 
 fn read_brief(r: &mut Reader<'_>) -> Option<MissionBrief> {
@@ -722,6 +805,17 @@ fn read_brief(r: &mut Reader<'_>) -> Option<MissionBrief> {
                 hp: (r.var32()?, r.var32()?),
                 pack: (r.var32()?, r.var32()?),
                 drops: read_list(r, |r| Some(DropBrief { item: r.str()?, rate: r.var32()?, min: r.var32()?, max: r.var32()? }))?,
+            })
+        })?,
+        band: (r.var32()?, r.var32()?, r.var32()?),
+        light_permille: r.var32()?,
+        events: read_list(r, |r| {
+            Some(EventBrief {
+                id: r.str()?,
+                name: r.str()?,
+                starts: read_list(r, |r| r.var32())?,
+                warn_secs: r.var32()?,
+                duration_secs: r.var32()?,
             })
         })?,
     })
@@ -791,6 +885,18 @@ pub mod look {
     pub const CURSE: u8 = 13;
     pub const POISON: u8 = 14;
     pub const DARK: u8 = 15;
+    /// Themed ground of locations (mission platform hazards, boss beats);
+    /// clients draw their own decal colour, default vfx.
+    pub const SAND: u8 = 16;
+    pub const SLUDGE: u8 = 17;
+    /// Moonlight petals.
+    pub const PETALS: u8 = 18;
+    /// A talisman's glyph.
+    pub const GLYPH: u8 = 19;
+    /// A golden glint.
+    pub const GOLD: u8 = 20;
+    /// Sludge ripples rolling out (something moving under the sewage).
+    pub const RIPPLE: u8 = 21;
 }
 
 /// Server → client control messages.
@@ -886,18 +992,24 @@ pub enum ServerMsg {
     },
     /// The recipient is in a lobby; sent on every change.
     LobbyState { lobby: LobbyInfo },
-    /// The recipient is no longer in a lobby: `left`, `kicked`, `launched`,
-    /// `disbanded`, `replaced`.
+    /// The recipient is no longer in a party: `left`, `kicked`, `expired`
+    /// (offline too long). A party outlives its missions, so `launched`
+    /// is no longer sent.
     LobbyLeft { reason: String },
     /// Lobby errors: `already_in_lobby`, `not_in_lobby`, `no_such_lobby`,
-    /// `lobby_full`, `not_leader`, `not_ready`, `stage_full`,
-    /// `mission_unavailable`, `not_in_hub`.
+    /// `lobby_full`, `not_leader`, `stage_full`, `mission_unavailable`,
+    /// `party_mission`, `not_in_hub` (`not_ready` is retired).
     LobbyError { code: String, message: String },
     /// An entity on the recipient's map (possibly the recipient) plays an
     /// emote.
     Emote { entity_id: u32, emote: u8 },
     /// An entity on the recipient's map sat down (1) or stood up (0).
     Pose { entity_id: u32, pose: u8 },
+    /// A player on the recipient's map rides `mount` ([`mount`]; `NONE`:
+    /// got off), `speed` percent faster in town (and from the mount in a
+    /// stage: what the rider's own client predicts with). Sent on arrival
+    /// for everyone riding there, the recipient included, then on changes.
+    PlayerMount { entity_id: u32, mount: u8, speed: u8 },
     /// A player on the recipient's map pinged a spot.
     Flag { entity_id: u32, flag: u8, x: f32, y: f32 },
     /// The recipient's belongings: zeny, bag stacks and the ten equipment
@@ -907,10 +1019,15 @@ pub enum ServerMsg {
     ItemDefs { items: Vec<ItemDef> },
     /// A merchant's goods (answer to `npc_interact` at a `shop` NPC).
     Shop { npc: String, name: String, items: Vec<String> },
+    /// The recipient's merchant order went through.
+    ShopDone { spent: u64, earned: u64 },
     /// The recipient drank `item`; the next potion waits `cooldown_ms`.
     ItemUsed { item: String, cooldown_ms: u32 },
     /// A player on the recipient's map now holds `weapon`.
     PlayerGear { entity_id: u32, weapon: String },
+    /// A player on the recipient's map wears `items` on the head (item
+    /// ids, '' slots left out).
+    PlayerHeadgear { entity_id: u32, items: Vec<String> },
     /// The monster `entity_id` (at `x`, `y`) dropped `count` of `item`
     /// (`zeny`: zeny) for the recipient; `rare` drops get a toast.
     Loot { entity_id: u32, x: f32, y: f32, item: String, count: u32, rare: bool },
@@ -928,6 +1045,14 @@ pub enum ServerMsg {
     BonusGone { id: u32, bonus: String, entity_id: u32 },
     /// What a mission spawns and drops (the mission window, the timeline).
     MissionInfo { brief: MissionBrief },
+    /// Every mission of the ladder as a card (`missions::card`).
+    MissionList { missions: Vec<missions::MissionCard> },
+    /// The run's base light radius changed (cells; `hub::env`).
+    EnvLight { radius: f32, fade_ms: u32 },
+    /// A map event warns, begins or ends ([`env_phase`]).
+    EnvEvent { phase: u8, id: String, name: String, text: String, start_ms: u32, duration_ms: u32 },
+    /// Shake the camera (`intensity` 1..=255 over `duration_ms`).
+    EnvShake { intensity: u8, duration_ms: u32 },
     /// Seconds into the run, in ms (the recipient's stage).
     StageClock { elapsed_ms: u32 },
     /// The overtime poison fog (`hub::fog`): its safe circle around
@@ -980,6 +1105,9 @@ pub enum ServerMsg {
     /// A player on the recipient's stage lost its connection (`online`
     /// false: link-dead, kept for the link grace) or got it back.
     PlayerLink { entity_id: u32, online: bool },
+    /// HP bytes of elites and bosses (`(entity_id, 1..=255)`, 0 = gone):
+    /// the bars under them.
+    MonsterHp { bars: Vec<(u32, u8)> },
     /// The selected character is link-dead in stage `stage_id` (mission
     /// display name `mission`) for `left_ms` more: answer `stage_resume`.
     Resumable { stage_id: u32, mission: String, left_ms: u32 },
@@ -994,6 +1122,12 @@ pub enum ServerMsg {
     RunStats { victory: bool, secs: u32, bucket_secs: u32, seats: Vec<RunSeat>, marks: Vec<RunMark> },
     /// The recipient's own take of a finished run: `seat` in `RunStats`.
     RunRewards { seat: u8, exp: u64, zeny: u64, clear_zeny: u64, mod_exp: u64, mod_zeny: u64, items: Vec<(String, u32)> },
+    /// Affixed monsters by `(slot, generation)` (upserts; `protocol/affixes.rs`).
+    MonsterAffixes { monsters: Vec<MonsterAffix> },
+    /// One-off moments of affix tricks (blinks, summons, splits, frenzy).
+    AffixEvents { events: Vec<AffixEvent> },
+    /// The affix table (`combat::affixes::defs_msg`) and the reward per star.
+    AffixDefs { defs: Vec<AffixInfo>, ranks: Vec<String>, exp_pct: u32, drop_pct: u32, extra_pct: u32, hp_pct: u32 },
 }
 
 /// The client blinks a pickup bonus over this last stretch of its life.
@@ -1010,6 +1144,8 @@ impl ServerMsg {
                 modifiers::encode(m, &mut b);
             }
             m @ (ServerMsg::RunStats { .. } | ServerMsg::RunRewards { .. }) => results::encode(m, &mut b),
+            m @ (ServerMsg::MonsterAffixes { .. } | ServerMsg::AffixEvents { .. } | ServerMsg::AffixDefs { .. }) => affixes::encode(m, &mut b),
+            m @ (ServerMsg::MissionList { .. } | ServerMsg::EnvLight { .. } | ServerMsg::EnvEvent { .. } | ServerMsg::EnvShake { .. }) => mission::encode(m, &mut b),
             ServerMsg::Connected { user_id, session_id, server_version } => {
                 b.put_u8(kind::CONNECTED);
                 b.put_var((*user_id).into());
@@ -1197,7 +1333,10 @@ impl ServerMsg {
                     b.put_var(m.entity_id.into());
                     b.put_str(&m.name);
                     b.put_str(&m.archetype);
-                    b.put_u8(u8::from(m.ready) | u8::from(m.leader) << 1);
+                    let flags = [(m.leader, member_flags::LEADER), (m.online, member_flags::ONLINE), (m.away, member_flags::AWAY)];
+                    b.put_u8(flags.iter().filter(|f| f.0).fold(0, |a, f| a | f.1));
+                    b.put_var(m.level.into());
+                    b.put_var(m.offline_secs.into());
                 });
             }
             ServerMsg::LobbyLeft { reason } => {
@@ -1219,10 +1358,23 @@ impl ServerMsg {
                 b.put_var((*entity_id).into());
                 b.put_u8(*pose);
             }
+            ServerMsg::PlayerMount { entity_id, mount, speed } => {
+                b.put_u8(kind::PLAYER_MOUNT);
+                b.put_var((*entity_id).into());
+                b.put_u8(*mount);
+                b.put_u8(*speed);
+            }
             ServerMsg::PlayerLink { entity_id, online } => {
                 b.put_u8(kind::PLAYER_LINK);
                 b.put_var((*entity_id).into());
                 b.put_bool(*online);
+            }
+            ServerMsg::MonsterHp { bars } => {
+                b.put_u8(kind::MONSTER_HP);
+                put_list(&mut b, bars, |b, &(id, hp)| {
+                    b.put_var(id.into());
+                    b.put_u8(hp);
+                });
             }
             ServerMsg::Resumable { stage_id, mission, left_ms } => {
                 b.put_u8(kind::RESUMABLE);
@@ -1259,6 +1411,11 @@ impl ServerMsg {
                 b.put_str(name);
                 put_list(&mut b, items, |b, i| b.put_str(i));
             }
+            ServerMsg::ShopDone { spent, earned } => {
+                b.put_u8(kind::SHOP_DONE);
+                b.put_var(*spent);
+                b.put_var(*earned);
+            }
             ServerMsg::ItemUsed { item, cooldown_ms } => {
                 b.put_u8(kind::ITEM_USED);
                 b.put_str(item);
@@ -1268,6 +1425,11 @@ impl ServerMsg {
                 b.put_u8(kind::PLAYER_GEAR);
                 b.put_var((*entity_id).into());
                 b.put_str(weapon);
+            }
+            ServerMsg::PlayerHeadgear { entity_id, items } => {
+                b.put_u8(kind::PLAYER_HEADGEAR);
+                b.put_var((*entity_id).into());
+                put_list(&mut b, items, |b, i| b.put_str(i));
             }
             ServerMsg::PartyInvite { from, name, mission, ttl_ms } => {
                 b.put_u8(kind::PARTY_INVITE);
@@ -1425,6 +1587,8 @@ impl ServerMsg {
             kind::BOSS_CAST | kind::BOSS_ZONES | kind::BOSS_SHOUT | kind::BOSS_BAR => boss::decode(k, &mut r)?,
             kind::MODIFIER_DEFS | kind::MODIFIERS => modifiers::decode(k, &mut r)?,
             kind::RUN_STATS | kind::RUN_REWARDS => results::decode(k, &mut r)?,
+            kind::MONSTER_AFFIXES | kind::AFFIX_EVENT | kind::AFFIX_DEFS => affixes::decode(k, &mut r)?,
+            kind::MISSION_LIST | kind::ENVIRONMENT => mission::decode(k, &mut r)?,
             kind::CONNECTED => ServerMsg::Connected {
                 user_id: r.var32()?,
                 session_id: Uuid::from_slice(r.bytes(16)?).ok()?,
@@ -1541,7 +1705,16 @@ impl ServerMsg {
                     public: r.bool()?,
                     members: read_list(&mut r, |r| {
                         let (entity_id, name, archetype, flags) = (r.var32()?, r.str()?, r.str()?, r.u8()?);
-                        Some(LobbyMemberInfo { entity_id, name, archetype, ready: flags & 1 != 0, leader: flags & 2 != 0 })
+                        Some(LobbyMemberInfo {
+                            entity_id,
+                            name,
+                            archetype,
+                            leader: flags & member_flags::LEADER != 0,
+                            online: flags & member_flags::ONLINE != 0,
+                            away: flags & member_flags::AWAY != 0,
+                            level: r.var32()?,
+                            offline_secs: r.var32()?,
+                        })
                     })?,
                 },
             },
@@ -1549,7 +1722,9 @@ impl ServerMsg {
             kind::LOBBY_ERROR => ServerMsg::LobbyError { code: r.code()?, message: r.str()? },
             kind::EMOTE => ServerMsg::Emote { entity_id: r.var32()?, emote: r.u8()? },
             kind::POSE => ServerMsg::Pose { entity_id: r.var32()?, pose: r.u8()? },
+            kind::PLAYER_MOUNT => ServerMsg::PlayerMount { entity_id: r.var32()?, mount: r.u8()?, speed: r.u8()? },
             kind::PLAYER_LINK => ServerMsg::PlayerLink { entity_id: r.var32()?, online: r.bool()? },
+            kind::MONSTER_HP => ServerMsg::MonsterHp { bars: read_list(&mut r, |r| Some((r.var32()?, r.u8()?)))? },
             kind::RESUMABLE => ServerMsg::Resumable { stage_id: r.var32()?, mission: r.str()?, left_ms: r.var32()? },
             kind::FLAG => ServerMsg::Flag { entity_id: r.var32()?, flag: r.u8()?, x: r.pos()?, y: r.pos()? },
             kind::INVENTORY => ServerMsg::Inventory {
@@ -1560,8 +1735,10 @@ impl ServerMsg {
             },
             kind::ITEM_DEFS => ServerMsg::ItemDefs { items: read_list(&mut r, ItemDef::read)? },
             kind::SHOP => ServerMsg::Shop { npc: r.str()?, name: r.str()?, items: read_list(&mut r, |r| r.str())? },
+            kind::SHOP_DONE => ServerMsg::ShopDone { spent: r.var()?, earned: r.var()? },
             kind::ITEM_USED => ServerMsg::ItemUsed { item: r.str()?, cooldown_ms: r.var32()? },
             kind::PLAYER_GEAR => ServerMsg::PlayerGear { entity_id: r.var32()?, weapon: r.str()? },
+            kind::PLAYER_HEADGEAR => ServerMsg::PlayerHeadgear { entity_id: r.var32()?, items: read_list(&mut r, |r| r.str())? },
             kind::PARTY_INVITE => match r.u8()? {
                 0 => ServerMsg::PartyInvite { from: r.var32()?, name: r.str()?, mission: r.str()?, ttl_ms: r.var32()? },
                 1 => ServerMsg::PartyAnswer { entity_id: r.var32()?, name: r.str()?, accepted: r.bool()? },
@@ -1632,6 +1809,16 @@ impl ServerMsg {
     }
 }
 
+/// How a player casts (`CAST_PREFS`): the connection keeps it and hands
+/// it to the instance with every input.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CastPrefs {
+    /// The pointer picks the monster and places ground skills.
+    pub manual_aim: bool,
+    /// Auto-cast slots (bit i = slot i).
+    pub auto: u16,
+}
+
 /// Client → server messages.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ClientMsg {
@@ -1646,6 +1833,8 @@ pub enum ClientMsg {
     /// `aim`: where the player points, relative to them, in 1/8 m (0,0 =
     /// no aim); `slots`: skill slots pressed this tick (bit i = slot i).
     Input { seq: u32, dx: f32, dy: f32, aim: [i8; 2], slots: u16 },
+    /// Manual aiming and the auto-cast slots.
+    CastPrefs(CastPrefs),
     /// Talk to an NPC on the current map; must be within its radius.
     NpcInteract { npc: String },
     /// Pick a mission at a Kafra employee or mission board the player is
@@ -1655,15 +1844,15 @@ pub enum ClientMsg {
     MissionSelect { mission: String, public: bool },
     /// Quick start (`LobbyDirectory::quick_start`): alone, at a mission
     /// giver, launches `mission` with these modifiers at once; a party
-    /// leader starts the party's run (everyone ready, the party's mission).
+    /// leader starts the party's run on `mission` (switching the party to
+    /// it), with the members in town.
     MissionStart { mission: String, tier: u8, mask: u32 },
     /// Join a lobby by its code (public or private), from anywhere in the hub.
     LobbyJoin { code: String },
-    LobbyReady { ready: bool },
-    /// Leader only; every other member must be ready.
+    /// Leader only, at any time: the members in town go along.
     LobbyStart,
     /// Leader only: the run's difficulty tier and curse mask
-    /// (`world::modifiers`); members are unreadied.
+    /// (`world::modifiers`).
     LobbyModifiers { tier: u8, mask: u32 },
     LobbyLeave,
     /// Leader only: remove a member (by entity id).
@@ -1684,12 +1873,17 @@ pub enum ClientMsg {
     Emote { emote: u8 },
     /// Sit down (1, hubs only) or stand up (0).
     Pose { pose: u8 },
+    /// Mount (true) or get off the Peco Peco: needs a learned mount skill
+    /// (Peco Peco Ride), anywhere; answered with `player_mount`.
+    Mount { on: bool },
     /// Ping a spot near the player with marker `flag` (`0..=MAX_FLAG`).
     Flag { flag: u8, x: f32, y: f32 },
     /// Buy `count` of `item` from the merchant `npc` (standing at it).
     ShopBuy { npc: String, item: String, count: u32 },
     /// Sell `count` of `item` from the bag to the merchant `npc`.
     ShopSell { npc: String, item: String, count: u32 },
+    /// The shop window's cart at the merchant `npc`: buys and sells at once.
+    ShopDeal { npc: String, order: ShopOrder },
     /// Wear `item` from the bag; `slot` picks an accessory slot (0xFF =
     /// the item's own). Town only.
     Equip { item: String, slot: u8 },
@@ -1745,6 +1939,11 @@ impl ClientMsg {
                 b.put_i8(aim[1]);
                 b.put_u16_le(*slots);
             }
+            ClientMsg::CastPrefs(p) => {
+                b.put_u8(kind::CAST_PREFS);
+                b.put_u8(u8::from(p.manual_aim));
+                b.put_u16_le(p.auto);
+            }
             ClientMsg::NpcInteract { npc } => {
                 b.put_u8(kind::NPC_INTERACT);
                 b.put_str(npc);
@@ -1757,10 +1956,6 @@ impl ClientMsg {
             ClientMsg::LobbyJoin { code } => {
                 b.put_u8(kind::LOBBY_JOIN);
                 b.put_str(code);
-            }
-            ClientMsg::LobbyReady { ready } => {
-                b.put_u8(kind::LOBBY_READY);
-                b.put_bool(*ready);
             }
             ClientMsg::LobbyStart => b.put_u8(kind::LOBBY_START),
             ClientMsg::MissionStart { mission, tier, mask } => {
@@ -1807,6 +2002,10 @@ impl ClientMsg {
                 b.put_u8(kind::POSE_REQ);
                 b.put_u8(*pose);
             }
+            ClientMsg::Mount { on } => {
+                b.put_u8(kind::MOUNT_REQ);
+                b.put_bool(*on);
+            }
             ClientMsg::Flag { flag, x, y } => {
                 b.put_u8(kind::FLAG_REQ);
                 b.put_u8(*flag);
@@ -1818,6 +2017,11 @@ impl ClientMsg {
                 b.put_str(npc);
                 b.put_str(item);
                 b.put_var((*count).into());
+            }
+            ClientMsg::ShopDeal { npc, order } => {
+                b.put_u8(kind::SHOP_DEAL);
+                b.put_str(npc);
+                order.put(&mut b);
             }
             ClientMsg::Equip { item, slot } => {
                 b.put_u8(kind::EQUIP);
@@ -1892,10 +2096,10 @@ impl ClientMsg {
                     let (aim, slots) = if r.is_empty() { ([0, 0], 0) } else { ([r.i8()?, r.i8()?], r.u16()?) };
                     ClientMsg::Input { seq, dx, dy, aim, slots }
                 }
+                kind::CAST_PREFS => ClientMsg::CastPrefs(CastPrefs { manual_aim: r.u8()? & 1 != 0, auto: r.u16()? }),
                 kind::NPC_INTERACT => ClientMsg::NpcInteract { npc: r.str()? },
                 kind::MISSION_SELECT => ClientMsg::MissionSelect { mission: r.str()?, public: r.bool()? },
                 kind::LOBBY_JOIN => ClientMsg::LobbyJoin { code: r.str()? },
-                kind::LOBBY_READY => ClientMsg::LobbyReady { ready: r.bool()? },
                 kind::LOBBY_START => ClientMsg::LobbyStart,
                 kind::MISSION_START => ClientMsg::MissionStart { mission: r.str()?, tier: r.u8()?, mask: r.var32()? },
                 kind::LOBBY_MODIFIERS => ClientMsg::LobbyModifiers { tier: r.u8()?, mask: r.var32()? },
@@ -1910,9 +2114,11 @@ impl ClientMsg {
                 kind::SKILL_SLOT => ClientMsg::SkillSlot { slot: r.u8()?, skill: r.str()? },
                 kind::EMOTE_REQ => ClientMsg::Emote { emote: r.u8()? },
                 kind::POSE_REQ => ClientMsg::Pose { pose: r.u8()? },
+                kind::MOUNT_REQ => ClientMsg::Mount { on: r.bool()? },
                 kind::FLAG_REQ => ClientMsg::Flag { flag: r.u8()?, x: r.pos()?, y: r.pos()? },
                 kind::SHOP_BUY => ClientMsg::ShopBuy { npc: r.str()?, item: r.str()?, count: r.var32()? },
                 kind::SHOP_SELL => ClientMsg::ShopSell { npc: r.str()?, item: r.str()?, count: r.var32()? },
+                kind::SHOP_DEAL => ClientMsg::ShopDeal { npc: r.str()?, order: ShopOrder::read(r)? },
                 kind::EQUIP => ClientMsg::Equip { item: r.str()?, slot: r.u8()? },
                 kind::UNEQUIP => ClientMsg::Unequip { slot: r.u8()? },
                 kind::ITEM_USE => ClientMsg::ItemUse { item: r.str()? },
@@ -1938,7 +2144,8 @@ impl ClientMsg {
                 _ => return None,
             })
         };
-        let known = matches!(k, INPUT_KIND | kind::PING..=kind::ITEM_USE | kind::CHAT_REQ | kind::PARTY_REQ | kind::INSPECT_REQ | kind::FRIEND_REQ | kind::TRADE_REQ | kind::FEEDBACK_REQ | kind::STAGE_RESUME | kind::LOBBY_MODIFIERS | kind::MISSION_START);
+        // The retired ready flag (`LOBBY_READY`) is unknown now: ignored.
+        let known = k != kind::LOBBY_READY && matches!(k, INPUT_KIND | kind::PING..=kind::ITEM_USE | kind::CHAT_REQ | kind::PARTY_REQ | kind::INSPECT_REQ | kind::FRIEND_REQ | kind::TRADE_REQ | kind::FEEDBACK_REQ | kind::STAGE_RESUME | kind::LOBBY_MODIFIERS | kind::MISSION_START | kind::CAST_PREFS | kind::SHOP_DEAL | kind::MOUNT_REQ);
         if !known {
             return Err(Unknown);
         }
@@ -2097,13 +2304,14 @@ mod tests {
             ClientMsg::HubLeave,
             ClientMsg::HubChannels,
             ClientMsg::Input { seq: 7, dx: 1.0, dy: -0.5, aim: [-12, 100], slots: 0b10_0000_0101 },
+            ClientMsg::CastPrefs(CastPrefs { manual_aim: true, auto: 0b1001 }),
+            ClientMsg::CastPrefs(CastPrefs::default()),
             ClientMsg::SkillLearn { skill: "bolt".into() },
             ClientMsg::SkillReset,
             ClientMsg::SkillSlot { slot: 4, skill: "slide".into() },
             ClientMsg::NpcInteract { npc: "board".into() },
             ClientMsg::MissionSelect { mission: "m".into(), public: false },
             ClientMsg::LobbyJoin { code: "AB2CD".into() },
-            ClientMsg::LobbyReady { ready: true },
             ClientMsg::LobbyStart,
             ClientMsg::MissionStart { mission: "m".into(), tier: 2, mask: 0b100_0001 },
             ClientMsg::LobbyModifiers { tier: 7, mask: 0b101_0001 },
@@ -2114,6 +2322,7 @@ mod tests {
             ClientMsg::StyleSet { look: Look { gender: 1, hair: 12, hair_color: 15, body_color: 7 } },
             ClientMsg::Emote { emote: 127 },
             ClientMsg::Pose { pose: 1 },
+            ClientMsg::Mount { on: true },
             ClientMsg::Flag { flag: 9, x: 120.5, y: 33.25 },
             ClientMsg::ShopBuy { npc: "tool".into(), item: "red_potion".into(), count: 12 },
             ClientMsg::ShopSell { npc: "tool".into(), item: "jellopy".into(), count: 300 },
@@ -2147,8 +2356,9 @@ mod tests {
         assert_eq!(ClientMsg::decode(&[]), Err(ClientDecodeError::Malformed));
         assert_eq!(ClientMsg::decode(&[0x7F]), Err(ClientDecodeError::Unknown));
         assert_eq!(ClientMsg::decode(&[0xFF, 1]), Err(ClientDecodeError::Unknown), "extended kinds");
-        assert_eq!(ClientMsg::decode(&[kind::LOBBY_READY]), Err(ClientDecodeError::Malformed));
-        assert_eq!(ClientMsg::decode(&[kind::LOBBY_READY, 1, 0]), Err(ClientDecodeError::Malformed), "trailing");
+        assert_eq!(ClientMsg::decode(&[kind::LOBBY_READY, 1]), Err(ClientDecodeError::Unknown), "the retired ready flag");
+        assert_eq!(ClientMsg::decode(&[kind::LOBBY_JOIN]), Err(ClientDecodeError::Malformed));
+        assert_eq!(ClientMsg::decode(&[kind::LOBBY_START, 0]), Err(ClientDecodeError::Malformed), "trailing");
         assert_eq!(ClientMsg::decode(&[kind::HUB_JOIN, 0xFF, 0xFF, 0x7F]), Err(ClientDecodeError::Malformed));
         assert_eq!(ClientMsg::decode(&[kind::EMOTE_REQ]), Err(ClientDecodeError::Malformed));
         assert_eq!(ClientMsg::decode(&[kind::POSE_REQ, 1, 0]), Err(ClientDecodeError::Malformed), "trailing");
@@ -2250,8 +2460,8 @@ mod tests {
                     mission,
                     public: true,
                     members: vec![
-                        LobbyMemberInfo { entity_id: 5, name: "Ann".into(), archetype: "novice".into(), ready: false, leader: true },
-                        LobbyMemberInfo { entity_id: 6, name: "Bo".into(), archetype: "novice".into(), ready: true, leader: false },
+                        LobbyMemberInfo { entity_id: 5, name: "Ann".into(), archetype: "novice".into(), leader: true, online: true, away: false, level: 12, offline_secs: 0 },
+                        LobbyMemberInfo { entity_id: 6, name: "Bo".into(), archetype: "mage".into(), leader: false, online: false, away: true, level: 3, offline_secs: 86_400 },
                     ],
                 },
             },
@@ -2259,6 +2469,7 @@ mod tests {
             ServerMsg::LobbyError { code: "lobby_full".into(), message: "full".into() },
             ServerMsg::Emote { entity_id: RESIDENT_ENTITY_BASE + 3, emote: 46 },
             ServerMsg::Pose { entity_id: 5, pose: pose::SIT },
+            ServerMsg::PlayerMount { entity_id: 5, mount: mount::PECO, speed: 25 },
             ServerMsg::Flag { entity_id: 5, flag: 3, x: 140.75, y: 12.5 },
             ServerMsg::Inventory {
                 zeny: 1_234_567,
@@ -2270,6 +2481,8 @@ mod tests {
             ServerMsg::Shop { npc: "dega".into(), name: "Dega".into(), items: vec!["sword".into(), "knife".into()] },
             ServerMsg::ItemUsed { item: "red_potion".into(), cooldown_ms: 1000 },
             ServerMsg::PlayerGear { entity_id: 5, weapon: "katana".into() },
+            ServerMsg::PlayerHeadgear { entity_id: 5, items: vec!["hat".into(), "sunglasses".into()] },
+            ServerMsg::PlayerHeadgear { entity_id: 5, items: Vec::new() },
             ServerMsg::Loot { entity_id: MONSTER_ENTITY_BASE + 7, x: 12.5, y: 3.25, item: "jellopy".into(), count: 2, rare: false },
             ServerMsg::Loot { entity_id: 5, x: 0.0, y: 0.0, item: "zeny".into(), count: 1500, rare: true },
             ServerMsg::Combo { count: 187, rank: 5, window_ms: 3000, left_ms: 2950 },
@@ -2384,7 +2597,7 @@ pub(crate) mod golden {
                         code: "AB2CD".into(),
                         mission,
                         public: false,
-                        members: vec![LobbyMemberInfo { entity_id: 9, name: "Bo".into(), archetype: "novice".into(), ready: true, leader: true }],
+                        members: vec![LobbyMemberInfo { entity_id: 9, name: "Bo".into(), archetype: "novice".into(), leader: true, online: true, away: false, level: 1, offline_secs: 0 }],
                     },
                 }
                 .encode(),
@@ -2451,6 +2664,7 @@ pub(crate) mod golden {
             ("shop", ServerMsg::Shop { npc: "dega".into(), name: "Dega".into(), items: vec!["sword".into()] }.encode()),
             ("item_used", ServerMsg::ItemUsed { item: "red_potion".into(), cooldown_ms: 1000 }.encode()),
             ("player_gear", ServerMsg::PlayerGear { entity_id: 300, weapon: "bow".into() }.encode()),
+            ("player_headgear", ServerMsg::PlayerHeadgear { entity_id: 300, items: vec!["hat".into(), "flu_mask".into()] }.encode()),
             (
                 "loot",
                 ServerMsg::Loot { entity_id: 0x800005, x: 10.5, y: 3.25, item: "knife".into(), count: 1, rare: true }.encode(),
@@ -2506,6 +2720,9 @@ pub(crate) mod golden {
                 pack: (6, 12),
                 drops: vec![DropBrief { item: "apple".into(), rate: 300, min: 1, max: 2 }],
             }],
+            band: (1, 3, 15),
+            light_permille: 700,
+            events: vec![EventBrief { id: "tide".into(), name: "Tide".into(), starts: vec![120, 420], warn_secs: 15, duration_secs: 40 }],
         }
     }
 
@@ -2571,7 +2788,7 @@ pub(crate) mod golden {
         ),
         (
             "lobby_state",
-            "310105414232434416706f72696e675f69736c616e645f737572766976616c16506f72696e672049736c616e6420537572766976616c48486f6c64206f757420616761696e73742067726f77696e67207761766573206f6e20506f72696e672049736c616e6420756e74696c2074686520626f73732073686f77732075702e0a7072745f66696c6430380400010902426f066e6f7669636503",
+            "310105414232434416706f72696e675f69736c616e645f737572766976616c16506f72696e672049736c616e6420537572766976616c48486f6c64206f757420616761696e73742067726f77696e67207761766573206f6e20506f72696e672049736c616e6420756e74696c2074686520626f73732073686f77732075702e0a7072745f66696c6430380800010902426f066e6f76696365060100",
         ),
         ("lobby_left", "32ff06637573746f6d"),
         ("pong", "1105"),
@@ -2590,12 +2807,13 @@ pub(crate) mod golden {
         ("shop", "3c04646567610444656761010573776f7264"),
         ("item_used", "3d0a7265645f706f74696f6ee807"),
         ("player_gear", "3eac0203626f77"),
+        ("player_headgear", "8bac02020368617408666c755f6d61736b"),
         ("loot", "3f85808004a002d000056b6e6966650101"),
         ("combo", "60bb0105b8178617"),
         ("revive", "61ac022de28601"),
         ("bonus", "680007047a656e79a002d000b0ea01"),
         ("bonus_gone", "680107047a656e79ac02"),
-        ("mission_info", "6c016d0166840701145a010170015005737761726d05776174657205736d616c6c00010a0515060c01056170706c65ac020102"),
+        ("mission_info", "6c016d0166840701145a010170015005737761726d05776174657205736d616c6c00010a0515060c01056170706c65ac02010201030fbc0501047469646504546964650278a4030f28"),
         ("stage_clock", "6d84c305"),
         ("fog", "6e0080f92b80f92bf09309a002d000000a8002"),
         ("fog_exposure", "6e020c1e"),
@@ -2633,6 +2851,16 @@ pub(crate) mod golden {
         let b = ClientMsg::MissionStart { mission: "m1".into(), tier: 2, mask: 65 }.encode();
         assert_eq!(hex(&b), "63026d310241");
         assert_eq!(ClientMsg::decode(&b), Ok(ClientMsg::MissionStart { mission: "m1".into(), tier: 2, mask: 65 }));
+    }
+
+    /// Cast preferences (0x85). Change only together with `client_test.dart`
+    /// (`cast prefs golden`).
+    #[test]
+    fn cast_prefs_match_the_dart_golden() {
+        let prefs = CastPrefs { manual_aim: true, auto: 0x8009 };
+        let b = ClientMsg::CastPrefs(prefs).encode();
+        assert_eq!(hex(&b), "85010980");
+        assert_eq!(ClientMsg::decode(&b), Ok(ClientMsg::CastPrefs(prefs)));
     }
 
     /// Change these only together with `client_test.dart`.
@@ -2712,6 +2940,36 @@ pub(crate) mod golden {
         assert_eq!(ClientMsg::decode(&[kind::TRADE_REQ]), Err(ClientDecodeError::Malformed), "no op");
         let got: Vec<(&str, String)> = trade().into_iter().map(|(n, b)| (n, hex(&b))).collect();
         let want: Vec<(&str, String)> = TRADE_EXPECTED.iter().map(|(n, h)| (*n, h.to_string())).collect();
+        assert_eq!(got, want);
+    }
+
+    /// Merchant cart frames (0x8C SHOP_DEAL, 0x8D SHOP_DONE): a list of
+    /// their own. Change these only together with `client_test.dart`
+    /// (`shop goldens`).
+    pub fn shop() -> Vec<(&'static str, Bytes)> {
+        let order = ShopOrder { buy: vec![("red_potion".into(), 12)], sell: vec![("jellopy".into(), 300), ("sword+7".into(), 1)] };
+        vec![
+            ("shop_deal", ClientMsg::ShopDeal { npc: "tool".into(), order }.encode()),
+            ("shop_done", ServerMsg::ShopDone { spent: 600, earned: 1250 }.encode()),
+        ]
+    }
+
+    const SHOP_EXPECTED: &[(&str, &str)] = &[("shop_deal", "8c04746f6f6c010a7265645f706f74696f6e0c02076a656c6c6f7079ac020773776f72642b3701"), ("shop_done", "8dd804e209")];
+
+    #[test]
+    fn shop_frames_round_trip_and_match_the_dart_goldens() {
+        for (name, b) in shop() {
+            println!("(\"{name}\", \"{}\"),", hex(&b));
+            if name == "shop_done" {
+                assert_eq!(ServerMsg::decode(&b).unwrap().encode(), b);
+                assert!(ServerMsg::decode(&b[..b.len() - 1]).is_none(), "truncated {name}");
+            } else {
+                assert_eq!(ClientMsg::decode(&b).unwrap().encode(), b);
+                assert_eq!(ClientMsg::decode(&b[..b.len() - 1]), Err(ClientDecodeError::Malformed), "truncated {name}");
+            }
+        }
+        let got: Vec<(&str, String)> = shop().into_iter().map(|(n, b)| (n, hex(&b))).collect();
+        let want: Vec<(&str, String)> = SHOP_EXPECTED.iter().map(|(n, h)| (*n, h.to_string())).collect();
         assert_eq!(got, want);
     }
 
@@ -2825,6 +3083,20 @@ pub(crate) mod golden {
         assert_eq!(got, want);
     }
 
+    /// Mount frames (0x90 PLAYER_MOUNT, 0x91 MOUNT_REQ). Change these only
+    /// together with `client_test.dart` (`mount goldens`).
+    #[test]
+    fn mount_frames_match_the_dart_goldens() {
+        let b = ServerMsg::PlayerMount { entity_id: 300, mount: mount::PECO, speed: 25 }.encode();
+        assert_eq!(hex(&b), "90ac020119");
+        assert_eq!(ServerMsg::decode(&b).unwrap().encode(), b);
+        assert!(ServerMsg::decode(&b[..b.len() - 1]).is_none());
+        let req = ClientMsg::Mount { on: false }.encode();
+        assert_eq!(hex(&req), "9100");
+        assert_eq!(ClientMsg::decode(&req), Ok(ClientMsg::Mount { on: false }));
+        assert_eq!(ClientMsg::decode(&[kind::MOUNT_REQ]), Err(ClientDecodeError::Malformed));
+    }
+
     /// Disconnect frames (0x73 PLAYER_LINK, 0x75 RESUMABLE, 0x5F
     /// STAGE_RESUME). Change these only together with `client_test.dart`
     /// (`link goldens`).
@@ -2847,5 +3119,15 @@ pub(crate) mod golden {
         assert_eq!(hex(&resume), "5f01");
         assert_eq!(ClientMsg::decode(&resume), Ok(ClientMsg::StageResume { accept: true }));
         assert_eq!(ClientMsg::decode(&[kind::STAGE_RESUME]), Err(ClientDecodeError::Malformed));
+    }
+
+    /// 0xA5 MONSTER_HP. Change this only together with `client_test.dart`
+    /// (`monster hp golden`).
+    #[test]
+    fn monster_hp_matches_the_dart_golden() {
+        let b = ServerMsg::MonsterHp { bars: vec![(MONSTER_ENTITY_BASE + 7, 255), (MONSTER_ENTITY_BASE + 300, 0)] }.encode();
+        assert_eq!(hex(&b), "a50287808004ff ac828004 00".replace(' ', ""));
+        assert_eq!(ServerMsg::decode(&b).unwrap().encode(), b);
+        assert!(ServerMsg::decode(&b[..b.len() - 1]).is_none());
     }
 }

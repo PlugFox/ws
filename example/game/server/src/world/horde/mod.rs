@@ -27,6 +27,7 @@
 //! party, which keeps the pressure where the players are and removes
 //! long-distance pathing altogether.
 
+pub mod affixes;
 pub mod catalog;
 pub mod director;
 pub mod field;
@@ -45,7 +46,7 @@ use rand::{Rng, SeedableRng};
 use crate::world::combat::{Archetype, Condition, MonsterBlock};
 use crate::world::modifiers::{Modifiers, MonsterScale};
 use std::sync::Arc;
-use storage::{HordeStorage, FLAG_BOSS, FLAG_FULL, FLAG_LOS, FLAG_PLANT};
+use storage::{HordeStorage, FLAG_BOSS, FLAG_BURROWED, FLAG_FULL, FLAG_LOS, FLAG_PLANT};
 /// A player as the horde sees it: position and light radius (cells).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlayerView {
@@ -275,6 +276,9 @@ pub struct Horde {
     scale: MonsterScale,
     /// Live plants (`plants.rs`): not monsters to the alive cap.
     plants: u16,
+    /// Monster affixes: the run's odds, the density cap's count, news for
+    /// the clients (`affixes.rs`).
+    affixes: affixes::AffixBook,
 }
 
 impl Horde {
@@ -301,6 +305,9 @@ impl Horde {
         };
         let max_radius = catalog.defs().iter().map(|d| d.radius).fold(0.0, f32::max);
         let scale = config.modifiers.monsters();
+        let (lo, hi) = config.waves.levels;
+        let affix_rules = crate::world::combat::affixes::AffixRules::new((lo.max(1) + hi.max(lo.max(1))).div_ceil(2), config.modifiers);
+        let affixes = affixes::AffixBook::new(affix_rules, config.pool);
         let mut horde = Self {
             store: HordeStorage::new(config.pool),
             push: vec![(0.0, 0.0); config.pool],
@@ -327,6 +334,7 @@ impl Horde {
             hz: 20,
             scale,
             plants: 0,
+            affixes,
         };
         horde.plant_flora();
         horde
@@ -459,7 +467,8 @@ impl Horde {
             // Its hit count, untouched by the modifiers.
             return MonsterBlock { hp: def.hits.1.max(1) as i32, ..MonsterBlock::new(1, Archetype::Plant, 1) };
         }
-        self.scale.apply(MonsterBlock::new(self.store.level[s] as u32, def.archetype, self.party))
+        let block = self.scale.apply(MonsterBlock::new(self.store.level[s] as u32, def.archetype, self.party));
+        self.affix_block(slot, block)
     }
 
     /// The mission modifiers this horde runs under.
@@ -494,12 +503,40 @@ impl Horde {
         if self.store.is_alive(slot) && self.store.is_plant(slot) {
             self.plants -= 1;
         }
+        self.affix_despawn(slot);
         self.store.despawn(slot);
     }
 
     /// Largest monster body radius of the catalog (cells).
     pub fn max_radius(&self) -> f32 {
         self.max_radius
+    }
+
+    /// Burrows a monster (`on`) or brings it up ([`FLAG_BURROWED`]): while
+    /// under, it keeps moving (its own steps or [`Self::place`]) but is out
+    /// of the query index (no attack, area or auto-target finds it), out of
+    /// the crowd push, and the hub skips it for melee, skills and damage.
+    /// Clients get [`STATUS_BURROWED`] in its status and draw a mound.
+    /// Generic: boss scripts dive with it (`boss.rs` Burrow), and any
+    /// burrowing monster can.
+    pub fn set_burrowed(&mut self, slot: u16, on: bool) {
+        if !self.store.is_alive(slot) || self.store.burrowed(slot) == on {
+            return;
+        }
+        self.store.set_burrowed(slot, on);
+        if self.index.hold {
+            return; // built at the end of the step
+        }
+        if on {
+            // Out of the index now (near_box also skips it until a rebuild).
+            return;
+        }
+        // Surfacing: findable at once.
+        if self.index.fresh.len() >= MAX_FRESH {
+            self.rebuild_index();
+        } else if !self.index.fresh.contains(&slot) {
+            self.index.fresh.push(slot);
+        }
     }
 
     /// Moves a monster (knockback, pull); the query index follows. Plants
@@ -529,7 +566,8 @@ impl Horde {
         let entries = s
             .alive()
             .iter()
-            .filter(|&&slot| s.hp[slot as usize] > 0)
+            // Burrowed monsters cannot be found by any attack.
+            .filter(|&&slot| s.hp[slot as usize] > 0 && s.flags[slot as usize] & FLAG_BURROWED == 0)
             .map(|&slot| (slot, s.x[slot as usize], s.y[slot as usize]));
         idx.grid.rebuild(entries);
         for &slot in s.alive() {
@@ -556,7 +594,7 @@ impl Horde {
         let m = self.max_radius + idx.slack;
         let (bx0, by0) = idx.grid.bucket_of(x0 - m, y0 - m);
         let (bx1, by1) = idx.grid.bucket_of(x1 + m, y1 + m);
-        let live = |slot: u16| s.is_alive(slot) && s.hp[slot as usize] > 0;
+        let live = |slot: u16| s.is_alive(slot) && s.hp[slot as usize] > 0 && s.flags[slot as usize] & FLAG_BURROWED == 0;
         for by in by0..=by1 {
             for bx in bx0..=bx1 {
                 for &slot in idx.grid.bucket(bx, by) {
@@ -619,6 +657,15 @@ impl Horde {
     /// Default light radius (cells).
     pub fn light_radius(&self) -> f32 {
         self.config.light_radius
+    }
+
+    /// Changes the default light radius mid-run (darkness, a sandstorm, a
+    /// lit brazier: `hub/env.rs`); spawns, simulation tiers and snapshots
+    /// follow it from the next tick.
+    pub fn set_light_radius(&mut self, cells: f32) {
+        if cells.is_finite() {
+            self.config.light_radius = cells.max(1.0);
+        }
     }
 
     /// [`Self::tick_views`] with the default light radius for everyone.
@@ -794,6 +841,8 @@ impl Horde {
                 continue; // frozen, stunned, petrified, rooted or flinching
             }
             let def = self.catalog.get(s.kind[k]);
+            // Hasted and frenzied monsters (affixes.rs) walk faster.
+            let pace = pace * affixes::pace(s.affix[k], s.affix_state[k]);
             if self.targets.is_empty() {
                 // Nobody to hunt: lose interest and roam.
                 if let Some((ux, uy)) = roam_heading(slot, s.generation[k], tick, self.hz) {
@@ -850,7 +899,8 @@ impl Horde {
             .alive()
             .iter()
             // Plants are no obstacle: the horde walks over them.
-            .filter(|&&slot| s.flags[slot as usize] & (FLAG_FULL | FLAG_PLANT) == FLAG_FULL)
+            // Burrowed ones pass under everything.
+            .filter(|&&slot| s.flags[slot as usize] & (FLAG_FULL | FLAG_PLANT | FLAG_BURROWED) == FLAG_FULL)
             .map(|&slot| (slot, s.x[slot as usize], s.y[slot as usize]));
         self.grid.rebuild(entries);
 
@@ -859,7 +909,7 @@ impl Horde {
         for &a in s.alive() {
             let ai = a as usize;
             self.push[ai] = (0.0, 0.0);
-            if s.flags[ai] & (FLAG_FULL | FLAG_PLANT) != FLAG_FULL {
+            if s.flags[ai] & (FLAG_FULL | FLAG_PLANT | FLAG_BURROWED) != FLAG_FULL {
                 continue;
             }
             let ra = self.catalog.get(s.kind[ai]).radius;
@@ -1069,7 +1119,11 @@ impl Horde {
         }
         let mut placed = 0;
         let mut put = |h: &mut Self, x: f32, y: f32| {
-            if h.spawnable(x, y) && h.spawn(kind, x, y).is_some() {
+            if h.spawnable(x, y)
+                && let Some(slot) = h.spawn(kind, x, y)
+            {
+                // Hand spawns stay plain; the director's may roll affixes.
+                h.roll_affixes(slot);
                 placed += 1;
                 true
             } else {

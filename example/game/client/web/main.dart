@@ -46,7 +46,15 @@ Future<void> main() async {
     );
     web.console.info('Entering the hub as ${character['name']}'.toJS);
     await session.start();
-    if (await session.exited != 'characters') api.forget();
+    switch (await session.exited) {
+      case 'characters':
+        break;
+      // Log out: the server revokes the session too.
+      case 'logout':
+        await api.logout();
+      default:
+        api.forget();
+    }
     notice = session.exitNotice;
   }
 }

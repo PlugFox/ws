@@ -719,3 +719,38 @@ fn roaming_headings_vary_and_rest_some_legs() {
     // Slot 5 at 20 Hz: legs of 50 ticks, offset 485, so 1000 and 1014 share one.
     assert_eq!(roam_heading(5, 0, 1000, 20), roam_heading(5, 0, 1014, 20));
 }
+
+#[test]
+fn a_burrowed_monster_moves_unseen_and_surfaces_findable() {
+    use crate::world::combat::Condition;
+    use super::storage::STATUS_BURROWED;
+    let w = world(60, 30, None);
+    let mut h = Horde::new(w, catalog(), config(40.0));
+    let mut v = Viewer::new(&h);
+    let p = PlayerView { x: 50.5, y: 15.5, light: 40.0, id: 0, hunted: true };
+    let mole = h.spawn(0, 10.5, 15.5).unwrap();
+    let wall = h.spawn(0, 12.5, 15.5).unwrap();
+    h.tick_views(0, 20, &[p]);
+    h.set_burrowed(mole, true);
+    // No query finds it, at once and after a rebuild.
+    assert!(h.nearest_to(10.5, 15.5, 1.0, |s| s == wall).is_none());
+    h.store_mut().afflict(mole, Condition::Poisoned, 200);
+    for t in 1..40 {
+        h.tick_views(t, 20, &[p]);
+    }
+    let mut near = Vec::new();
+    h.near_box(0.0, 0.0, 60.0, 30.0, &mut near);
+    assert!(!near.contains(&mole) && near.contains(&wall));
+    // It still walks (under the other one: no push), and its status keeps
+    // the burrowed bit through condition ticks; clients get it.
+    let x = h.monsters().find(|m| m.0 == mole).unwrap().3;
+    assert!(x > 13.0, "moved under the crowd toward the player: {x}");
+    assert_eq!(h.store().status[mole as usize], STATUS_BURROWED | Condition::Poisoned.bit());
+    v.frame(&h, p, 40);
+    assert_eq!(v.mirror.monsters[&mole].status & STATUS_BURROWED, STATUS_BURROWED);
+    // Up again: findable without waiting for a rebuild.
+    h.set_burrowed(mole, false);
+    let (mx, my) = (h.store().x[mole as usize], h.store().y[mole as usize]);
+    assert_eq!(h.nearest_to(mx, my, 0.5, |s| s == wall).map(|f| f.0), Some(mole));
+    assert_eq!(h.store().status[mole as usize] & STATUS_BURROWED, 0);
+}

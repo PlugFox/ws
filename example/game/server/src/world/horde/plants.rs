@@ -199,6 +199,20 @@ impl Horde {
         Some(slot)
     }
 
+    /// An interactive object (a plant kind: a brazier, an egg) at a fixed
+    /// spot (`hub/env.rs`), felled in its rolled hit count. `None` off
+    /// walkable ground, for a kind that is not a plant, or with the pool
+    /// full.
+    pub fn place_object(&mut self, kind: u8, x: f32, y: f32) -> Option<u16> {
+        let def = self.catalog.get(kind);
+        if !def.is_plant() || !self.world.map(self.map).walk.is_walkable(x, y) {
+            return None;
+        }
+        let (lo, hi) = def.hits;
+        let hits = self.rng.gen_range(lo..=hi.max(lo));
+        self.spawn_plant(kind, x, y, hits)
+    }
+
     /// Live plants on the field.
     pub fn plants(&self) -> usize {
         self.plants as usize

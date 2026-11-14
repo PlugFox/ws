@@ -6,6 +6,70 @@ typedef ChangelogEntry = ({String title, String date, List<String> items});
 
 const changelog = <ChangelogEntry>[
   (
+    title: 'Three new expeditions',
+    date: '2026-11-14',
+    items: [
+      'The Kafra\'s "Choose an expedition" opens a new window: every mission with its picture, level band and whether it suits your level, and a full page on the one you pick with its boss, dangers, best loot and difficulty. Under-level? It warns you and asks once more. On phones the list and the page are two screens.',
+      'Prontera Culvert (levels 15–30): thief bugs, rats and bats under the capital. Break the egg clusters before they hatch, mind the sewage banks and the flush, and face the Thief Bug Queen, the Rat King and the Golden Thief Bug, whose golden shell turns spells back until you crack it. Fire fizzles in sewage; cold freezes it into safe ice.',
+      'Sograt Desert (levels 30–45): sandstorms every 2½ minutes (get behind cover; spells drift with the wind), antlion pits, Hodes hunting from under the sand, Muka cacti that prick back. Survive Sirocco and his pack, the Sand Colossus and Phreeoni rising from the great sinkhole.',
+      'Payon Caves (levels 45–60): a dark shrine full of undead and fox spirits. Strike the braziers to kindle them and ring the shrine bells to stun the undead; face the Weeping Bride, the Jiangshi General and Moonlight Flower. New condition: Feared.',
+      'Monsters can spawn with ★ to ★★★ affixes (Hasted, Armoured, Vampiric, Fire-enchanted, Teleporting, Summoner, Thorns and more), each with its own aura and telegraphed tricks. Starred monsters pay more experience, zeny and loot; their minions pay nothing.',
+    ],
+  ),
+  (
+    title: 'Clearer skills and controls',
+    date: '2026-11-14',
+    items: [
+      'Skill indicators show each spell\'s real shape: lines, walls, cones, a reticle on single targets, bounce reach. A quiet look that can\'t be mistaken for a monster\'s attack.',
+      'Every skill level now improves something: no more dead levels. Mystical Amplification now empowers your next damaging spell.',
+      'Click to move: left-click the ground to walk there around obstacles, or hold to steer; click a monster, a bubble or a portal to walk to it. Touch has a "Tap to move" option.',
+      'Elites and bosses show a health bar under their feet; players show a mana bar under their health.',
+      'Steadier movement: inputs that arrive together are no longer lost, so walks end where you aimed them.',
+    ],
+  ),
+  (
+    title: 'The Thief and the Peco Peco',
+    date: '2026-11-14',
+    items: [
+      'New class: the Thief, who becomes an Assassin at 30 and an Assassin Cross at 60. Poisons, Sonic Blow, Hiding and Cloaking to slip through the horde: strike out of hiding to attack with advantage. Katars arrive at the weapon merchant.',
+      'Crusaders and Paladins can ride a Grand Peco: learn Peco Peco Ride and press its hotbar key, in town or on a mission. New cavalry skills: Cavalier Mastery, Spear Mastery, Brandish Spear, Spear Quicken and, for Paladins, Spiral Pierce.',
+      'Archers learn Piercing Arrow: one shot down a line that hits every monster it passes.',
+    ],
+  ),
+  (
+    title: 'Parties that stay together',
+    date: '2026-11-14',
+    items: [
+      'Your party stays together after a mission, when you switch characters and when you log out. The party window shows who is in town, on a mission or offline.',
+      'No more Ready button: the party leader starts a mission whenever they like, and whoever is in town comes along. Parties now hold up to eight players.',
+      'Sessions renew themselves, so no more "token expired" at the character select, which now also has a Log out button.',
+    ],
+  ),
+  (
+    title: 'Sharper fights',
+    date: '2026-11-14',
+    items: [
+      'Melee hits land at arm\'s reach, and monsters only strike when they touch you. Monsters attack less often, and bosses pause between their big moves.',
+      'Party buffs (Blessing, Increase AGI, …) go to the nearest party member who lacks them, you included; auto-cast waits until someone needs them. Heal picks whoever is hurt most. Support buffs at their top level outlast their cooldown.',
+      'New setting "Manual aiming": skills aimed at a monster pick the one nearest your mouse, and ground skills land where you point.',
+      'Travel skills (Back Slide, Blink, Space) go where you are walking, or toward the mouse when you stand still.',
+      'Fire Wall grows from 3 to 10 flames with its level.',
+      'Potions heal twice as much and Blue Potions restore far more SP. A Food Vendor in Izlude sells cheap fruit, meat and grapes (for SP).',
+    ],
+  ),
+  (
+    title: 'Looks and handling',
+    date: '2026-11-14',
+    items: [
+      'Hats, glasses and masks show on your character, other players and the character select screen.',
+      'Characters face what they attack or cast at; casting has its own pose, and spears and other weapons no longer vanish mid-swing.',
+      'Eclipse really leaps between its landing circles; Heal is a spinning green column; Fire and Cold Bolts fall from the sky.',
+      'The game has its own mouse cursor: Classic or Gilded, in three sizes (Settings, Graphics), with a sword over monsters, a speech bubble over NPCs and a grabbing hand over loot.',
+      'Character creation: every class stands the same height, the pose buttons match, and skill effects no longer play on your hero.',
+      'Shops have a cart: buy and sell several items at once, see the total and what you will have left. Quantities by +/−, +10, Max or typing; Shift+click takes a whole stack; items drag between the Inventory, the shop and the trade window. The trade window shows who has pressed OK and Trade and warns when an offer changed.',
+    ],
+  ),
+  (
     title: 'Interface polish',
     date: '2026-11-14',
     items: [

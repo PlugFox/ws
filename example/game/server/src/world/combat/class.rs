@@ -11,6 +11,7 @@ pub enum Class {
     Archer,
     Mage,
     Acolyte,
+    Thief,
 }
 
 /// The three saving throws (5e's six folded into what monsters target).
@@ -25,7 +26,7 @@ pub enum Save {
 // locked entries of `profile::PROFILES`.
 
 impl Class {
-    pub const ALL: [Class; 4] = [Class::Swordsman, Class::Archer, Class::Mage, Class::Acolyte];
+    pub const ALL: [Class; 5] = [Class::Swordsman, Class::Archer, Class::Mage, Class::Acolyte, Class::Thief];
 
     /// Database / wire id.
     pub const fn id(self) -> &'static str {
@@ -34,6 +35,7 @@ impl Class {
             Class::Archer => "archer",
             Class::Mage => "mage",
             Class::Acolyte => "acolyte",
+            Class::Thief => "thief",
         }
     }
 
@@ -45,6 +47,7 @@ impl Class {
             "archer" | "ranger" | "rogue" => Class::Archer,
             "mage" => Class::Mage,
             "acolyte" => Class::Acolyte,
+            "thief" => Class::Thief,
             _ => return None,
         })
     }
@@ -64,6 +67,9 @@ impl Class {
             (Class::Acolyte, 1) => "Acolyte",
             (Class::Acolyte, 2) => "Priest",
             (Class::Acolyte, _) => "High Priest",
+            (Class::Thief, 1) => "Thief",
+            (Class::Thief, 2) => "Assassin",
+            (Class::Thief, _) => "Assassin Cross",
         }
     }
 
@@ -71,7 +77,7 @@ impl Class {
     const fn hit_die(self, tier: u32) -> u32 {
         let dice = match self {
             Class::Mage => [6, 6, 8],
-            Class::Acolyte => [8, 8, 10],
+            Class::Acolyte | Class::Thief => [8, 8, 10],
             Class::Archer => [8, 10, 10],
             Class::Swordsman => [10, 12, 12],
         };
@@ -98,6 +104,8 @@ impl Class {
             Class::Mage => [4, 5, 6],
             Class::Acolyte => [3, 4, 5],
             Class::Archer => [2, 2, 3],
+            // Sonic Blow and the poisons are hungry.
+            Class::Thief => [2, 3, 3],
             Class::Swordsman => [1, 1, 2],
         };
         sp[(tier - 1) as usize]
@@ -133,7 +141,7 @@ impl Class {
     pub const fn proficient_save(self) -> Save {
         match self {
             Class::Swordsman => Save::Body,
-            Class::Archer => Save::Reflex,
+            Class::Archer | Class::Thief => Save::Reflex,
             Class::Mage | Class::Acolyte => Save::Mind,
         }
     }
@@ -148,7 +156,7 @@ impl Class {
     /// at tier 2 and 3; casters stay at one and scale through `k`.
     pub const fn attacks_per_action(self, level: u32) -> u32 {
         match self {
-            Class::Swordsman | Class::Archer => tier(level),
+            Class::Swordsman | Class::Archer | Class::Thief => tier(level),
             Class::Mage | Class::Acolyte => 1,
         }
     }
@@ -174,6 +182,7 @@ mod tests {
             (Class::Acolyte, [9, 63, 183, 364, 637], [13, 40, 101, 222, 417]),
             (Class::Archer, [9, 63, 184, 394, 667], [12, 30, 70, 131, 248]),
             (Class::Swordsman, [12, 84, 245, 516, 906], [11, 20, 40, 71, 149]),
+            (Class::Thief, [9, 63, 183, 364, 637], [12, 30, 71, 161, 278]),
         ];
         for (class, hp, sp) in table {
             for (i, &l) in levels.iter().enumerate() {
@@ -189,7 +198,10 @@ mod tests {
             assert_eq!(Class::from_id(c.id()), Some(c));
         }
         assert_eq!(Class::from_id("Warrior"), Some(Class::Swordsman));
-        assert_eq!(Class::from_id("thief"), None);
+        assert_eq!(Class::from_id("thief"), Some(Class::Thief));
+        assert_eq!(Class::from_id("rogue"), Some(Class::Archer), "old rogues stay archers");
+        assert_eq!((Class::Thief.title(1), Class::Thief.title(30), Class::Thief.title(60)), ("Thief", "Assassin", "Assassin Cross"));
+        assert_eq!(Class::Thief.attacks_per_action(30), 2);
         assert_eq!(Class::Mage.title(29), "Mage");
         assert_eq!(Class::Mage.title(30), "Wizard");
         assert_eq!(Class::Acolyte.title(60), "High Priest");

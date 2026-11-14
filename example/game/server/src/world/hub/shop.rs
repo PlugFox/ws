@@ -3,7 +3,7 @@
 //! and a new weapon is shown to everyone on the map.
 //!
 //! The bag itself lives with the session's character (the socket task):
-//! trades come back to it as [`HubEvent::Trade`], potions as
+//! orders come back to it as [`HubEvent::Shop`], potions as
 //! [`HubEvent::ItemUsed`], so the stage never writes belongings it does
 //! not own.
 
@@ -11,6 +11,7 @@ use super::{hub_error, HubEvent, HubInstance, Outgoing, SHOP};
 use crate::world::combat::items::{self, Effect, Kind, POTION_COOLDOWN_MS, POTION_REGEN_MS};
 use crate::world::combat::{Bag, Condition, Weapon};
 use crate::world::protocol::ServerMsg;
+use crate::world::trade::{OrderError, ShopOrder};
 
 impl super::HubPlayer {
     /// Held weapon id (what other clients draw).
@@ -25,10 +26,11 @@ impl super::HubPlayer {
 }
 
 impl HubInstance {
-    /// A buy or sell at merchant `npc`: the player must stand at it, and a
-    /// buy must be something it sells. The socket task applies the trade to
-    /// the bag ([`HubEvent::Trade`]).
-    pub fn trade(&mut self, user_id: u32, npc: &str, item: &str, count: u32, sell: bool, out: &mut Outgoing) {
+    /// A merchant order at `npc` (the shop window's cart, or one item): the
+    /// player must stand at it, and every buy must be something it sells.
+    /// The socket task applies the order to the bag ([`HubEvent::Shop`]),
+    /// all of it or nothing.
+    pub fn shop(&mut self, user_id: u32, npc: &str, order: ShopOrder, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
         if self.is_trading(user_id) {
             out.push((user_id, HubEvent::Control(hub_error("trade_busy", "Finish your trade first."))));
@@ -38,13 +40,20 @@ impl HubInstance {
         let map = self.world.map(p.map);
         let event = match map.manifest.npcs.iter().find(|n| n.id == npc && n.kind == SHOP) {
             None => HubEvent::Control(hub_error("no_such_npc", format!("no merchant {npc} here"))),
-            Some(n) if !n.in_reach(p.x, p.y) => HubEvent::Control(hub_error("npc_too_far", format!("walk closer to {}", n.name))),
-            Some(n) if !sell && !items::shop(&n.shop).is_some_and(|s| s.contains(&item)) => {
-                HubEvent::Control(hub_error("not_sold_here", format!("{} does not sell that", n.name)))
-            }
-            Some(_) => HubEvent::Trade { item: item.into(), count: count.clamp(1, 999), sell },
+            Some(n) if !self.at_merchant(n, p.x, p.y) => HubEvent::Control(hub_error("npc_too_far", format!("walk closer to {}", n.name))),
+            Some(n) => match order.check(items::shop(&n.shop).unwrap_or_default()) {
+                Err(OrderError::NotSoldHere) => HubEvent::Control(hub_error("not_sold_here", format!("{} does not sell that", n.name))),
+                Err(e) => HubEvent::Control(hub_error(e.code(), e.message())),
+                Ok(()) => HubEvent::Shop(order),
+            },
         };
         out.push((user_id, event));
+    }
+
+    /// Standing at merchant `n` (anywhere, with the `GAME_DEV` test hooks:
+    /// the e2e shop opens without a walk).
+    pub(super) fn at_merchant(&self, n: &crate::world::map::NpcDef, x: f32, y: f32) -> bool {
+        n.in_reach(x, y) || self.config.missions_anywhere
     }
 
     /// The player's belongings changed (the socket task's copy): the next
@@ -52,6 +61,7 @@ impl HubInstance {
     pub fn set_bag(&mut self, user_id: u32, bag: Bag, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
         let before = self.players[i].weapon_id().to_string();
+        let worn = self.players[i].headgear();
         let p = &mut self.players[i];
         p.profile.weapon = bag.weapon().to_string();
         p.profile.bag = bag;
@@ -60,6 +70,10 @@ impl HubInstance {
             let p = &self.players[i];
             let msg = ServerMsg::PlayerGear { entity_id: p.profile.character_id, weapon: after };
             self.broadcast(p.map, &msg, out);
+        }
+        let p = &self.players[i];
+        if p.headgear() != worn {
+            self.broadcast(p.map, &p.headgear_msg(), out);
         }
         self.trade_bag_changed(user_id, out);
     }
@@ -204,6 +218,7 @@ mod tests {
     use crate::world::combat::{self, Bag, Class, Condition};
     use crate::world::map::{CameraConstraint, LocationKind};
     use crate::world::protocol::ServerMsg;
+    use crate::world::trade::ShopOrder;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -244,6 +259,15 @@ mod tests {
         stage.players[i].fighter.as_mut().unwrap()
     }
 
+    fn order(buy: &[(&str, u32)], sell: &[(&str, u32)]) -> ShopOrder {
+        let lines = |l: &[(&str, u32)]| l.iter().map(|(i, n)| (i.to_string(), *n)).collect();
+        ShopOrder { buy: lines(buy), sell: lines(sell) }
+    }
+
+    fn refused(out: &[(u32, HubEvent)], want: &str) -> bool {
+        matches!(&events(out, 1)[..], [HubEvent::Control(ServerMsg::HubError { code, .. })] if code == want)
+    }
+
     #[test]
     fn merchants_trade_only_with_players_standing_at_them() {
         let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
@@ -251,27 +275,67 @@ mod tests {
         hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         place(&mut hub, 1, 2.5, 2.5);
         out.clear();
-        hub.trade(1, "merchant", "red_potion", 2, false, &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::HubError { code, .. })] if code == "npc_too_far"), "{out:?}");
+        hub.shop(1, "merchant", order(&[("red_potion", 2)], &[]), &mut out);
+        assert!(refused(&out, "npc_too_far"), "{out:?}");
         out.clear();
         // The merchant stands at (5,5).
         place(&mut hub, 1, 5.5, 4.5);
-        hub.trade(1, "merchant", "sword", 1, false, &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::HubError { code, .. })] if code == "not_sold_here"), "{out:?}");
+        hub.shop(1, "merchant", order(&[("sword", 1)], &[]), &mut out);
+        assert!(refused(&out, "not_sold_here"), "{out:?}");
         out.clear();
-        hub.trade(1, "merchant", "red_potion", 2, false, &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Trade { item, count: 2, sell: false }] if item == "red_potion"), "{out:?}");
+        let o = order(&[("red_potion", 2)], &[]);
+        hub.shop(1, "merchant", o.clone(), &mut out);
+        assert!(matches!(&events(&out, 1)[..], [HubEvent::Shop(got)] if *got == o), "{out:?}");
         out.clear();
         // Anything can be sold; the board is no merchant.
-        hub.trade(1, "merchant", "sword", 1, true, &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Trade { sell: true, .. }]), "{out:?}");
+        hub.shop(1, "merchant", order(&[], &[("sword", 1)]), &mut out);
+        assert!(matches!(&events(&out, 1)[..], [HubEvent::Shop(_)]), "{out:?}");
         out.clear();
-        hub.trade(1, "board", "sword", 1, true, &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::HubError { code, .. })] if code == "no_such_npc"), "{out:?}");
+        hub.shop(1, "board", order(&[], &[("sword", 1)]), &mut out);
+        assert!(refused(&out, "no_such_npc"), "{out:?}");
         out.clear();
         // Talking to it opens the goods.
         hub.interact(1, "merchant", &mut out);
         assert!(matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::Shop { items, .. })] if items.contains(&"red_potion".to_string())), "{out:?}");
+    }
+
+    #[test]
+    fn a_cart_goes_to_the_bag_whole_or_is_refused_whole() {
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
+        let mut out = Vec::new();
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        place(&mut hub, 1, 5.5, 4.5);
+        out.clear();
+        // Several buys and sells at once, one event.
+        let cart = order(&[("red_potion", 12), ("blue_potion", 1)], &[("jellopy", 300), ("sword+7", 1)]);
+        hub.shop(1, "merchant", cart.clone(), &mut out);
+        assert!(matches!(&events(&out, 1)[..], [HubEvent::Shop(got)] if *got == cart), "{out:?}");
+        // One line the merchant does not sell refuses the whole cart.
+        out.clear();
+        hub.shop(1, "merchant", order(&[("red_potion", 12), ("sword", 1)], &[("jellopy", 3)]), &mut out);
+        assert!(refused(&out, "not_sold_here"), "{out:?}");
+        for (bad, code) in [
+            (order(&[], &[]), "shop_empty"),
+            (order(&[("red_potion", 0)], &[]), "shop_bad_count"),
+            (order(&[], &[("jellopy", 1000)]), "shop_bad_count"),
+            (order(&[], &vec![("jellopy", 1); 21]), "shop_too_many"),
+        ] {
+            out.clear();
+            hub.shop(1, "merchant", bad.clone(), &mut out);
+            assert!(refused(&out, code), "{bad:?}: {out:?}");
+        }
+        // Test hooks (GAME_DEV): merchants trade from anywhere in town.
+        let mut cfg = quiet();
+        cfg.missions_anywhere = true;
+        let mut dev = HubInstance::new(1, Arc::new(test_world()), cfg);
+        dev.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        place(&mut dev, 1, 2.5, 2.5);
+        out.clear();
+        dev.interact(1, "merchant", &mut out);
+        assert!(matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::Shop { .. })]), "{out:?}");
+        out.clear();
+        dev.shop(1, "merchant", order(&[("red_potion", 1)], &[]), &mut out);
+        assert!(matches!(&events(&out, 1)[..], [HubEvent::Shop(_)]), "{out:?}");
     }
 
     #[test]
@@ -297,6 +361,35 @@ mod tests {
     }
 
     #[test]
+    fn headgear_is_shown_to_the_map() {
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
+        let mut out = Vec::new();
+        let mut bag = Bag::starting(Class::Swordsman, "");
+        bag.zeny = 10_000;
+        bag.buy("hat", 1, &["hat"]).unwrap();
+        bag.equip(Class::Swordsman, "hat", None).unwrap();
+        hub.join(PlayerProfile { archetype: "swordsman".into(), bag: bag.clone(), ..profile(1) }, Uuid::nil(), None, 0, &mut out);
+        let worn = |out: &[(u32, HubEvent)], to: u32, items: &[&str]| {
+            events(out, to).iter().any(|e| {
+                matches!(e, HubEvent::Control(ServerMsg::PlayerHeadgear { entity_id: 101, items: got }) if got.iter().map(String::as_str).eq(items.iter().copied()))
+            })
+        };
+        // Its own client learns it on arrival, a newcomer too.
+        assert!(worn(&out, 1, &["hat"]), "{out:?}");
+        out.clear();
+        hub.join(profile(2), Uuid::nil(), None, 0, &mut out);
+        assert!(worn(&out, 2, &["hat"]), "{out:?}");
+        out.clear();
+        // Taking it off tells the map; the same bag again says nothing.
+        bag.unequip(crate::world::combat::items::Slot::UpperHead).unwrap();
+        hub.set_bag(1, bag.clone(), &mut out);
+        assert!(worn(&out, 2, &[]) && worn(&out, 1, &[]), "{out:?}");
+        out.clear();
+        hub.set_bag(1, bag, &mut out);
+        assert!(!events(&out, 2).iter().any(|e| matches!(e, HubEvent::Control(ServerMsg::PlayerHeadgear { .. }))), "{out:?}");
+    }
+
+    #[test]
     fn potions_heal_over_time_never_stack_and_cure() {
         let mut stage = stage();
         let mut bag = Bag::starting(Class::Swordsman, "");
@@ -313,10 +406,13 @@ mod tests {
         assert_eq!(fighter(&mut stage).hp, 1, "nothing at once");
         assert!(events(&out, 1).iter().any(|e| matches!(e, HubEvent::ItemUsed { item } if item == "red_potion")));
         let total = fighter(&mut stage).regen[0].unwrap().total;
-        assert!((4..=10).contains(&total), "2d4+2: {total}");
+        assert!((8..=20).contains(&total), "4d4+4: {total}");
         out.clear();
         // Cooldown: the next drink waits; after it, another Red Potion
-        // does not beat the running one and is kept.
+        // does not beat the running one (a top roll) and is kept.
+        if let Some(r) = fighter(&mut stage).regen[0].as_mut() {
+            (r.left, r.total) = (20, 20);
+        }
         stage.use_item(1, "red_potion", &mut out);
         assert!(out.is_empty(), "{out:?}");
         stage.tick += 25;

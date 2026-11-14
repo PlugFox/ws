@@ -7,7 +7,7 @@
 //! its skills (the [`SkillBook`]). Only the judgement calls live here, in
 //! [`PROFILES`]: the party role, the radar ratings, the difficulty, a one-
 //! line pitch and which skills to show first. Lines not playable yet
-//! (Thief, Merchant, Super Novice, Ninja, Gunslinger, Taekwon) are listed
+//! (Merchant, Super Novice, Ninja, Gunslinger, Taekwon) are listed
 //! too, locked, with their ratings and planned titles only (ROADMAP
 //! "Classes").
 
@@ -162,13 +162,15 @@ pub const PROFILES: &[Profile] = &[
     Profile {
         id: "thief",
         name: "Thief",
-        class: None,
+        class: Some(Class::Thief),
         roles: &[Role::Melee],
+        // The quickest blades and Sonic Blow; Cloaking and Back Stab move
+        // it through the horde; poison ground for control; no heals.
         ratings: r(4, 2, 5, 1, 1, 2),
         difficulty: 4,
         pitch: "Poison, stealth and the fastest blades: in and out of the horde.",
-        signature: &[],
-        planned: &["Thief", "Assassin · Rogue", "Assassin Cross · Stalker"],
+        signature: &["sonic_blow", "envenom", "cloaking", "venom_dust", "meteor_assault"],
+        planned: &[],
     },
     Profile {
         id: "merchant",
@@ -421,6 +423,14 @@ mod tests {
         assert_eq!(sword["weapons"][0]["items"][0]["id"], "knife");
         assert_eq!(sword["roles"][0]["id"], "tank");
         assert_eq!(sword["ratings"].as_array().unwrap().len(), 6);
+
+        let thief = describe(find("thief").unwrap(), &book);
+        assert_eq!(thief["locked"], false, "the Thief line is playable");
+        assert_eq!(thief["titles"], json!(["Thief", "Assassin", "Assassin Cross"]));
+        assert_eq!(thief["start_weapon"], "knife");
+        let kinds: Vec<_> = thief["weapons"].as_array().unwrap().iter().map(|w| w["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["dagger", "sword", "katar"]);
+        assert_eq!(thief["save"], "reflex");
 
         let ninja = describe(find("ninja").unwrap(), &book);
         assert_eq!(ninja["locked"], true);

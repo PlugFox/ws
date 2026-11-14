@@ -29,7 +29,7 @@ const NAMES: &[&str] = &[
     "Liora", "Merrick", "Nessa", "Osric", "Perrin", "Quilla", "Rowan", "Sabine", "Tobias", "Ulric", "Vesna",
     "Wendel", "Yara", "Elowen", "Bram", "Maren", "Thane", "Ilsa", "Cedric",
 ];
-const ARCHETYPES: &[&str] = &["novice", "swordsman", "mage", "archer", "acolyte"];
+const ARCHETYPES: &[&str] = &["novice", "swordsman", "mage", "archer", "acolyte", "thief"];
 /// Friendly emotes residents play; pets only `!` and the heart.
 const EMOTES: &[u8] = &[0, 1, 2, 3, 15, 17, 18, 27, 33, 46];
 const PET_EMOTES: &[u8] = &[0, 3];

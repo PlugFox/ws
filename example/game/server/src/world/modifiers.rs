@@ -628,8 +628,15 @@ mod tests {
         bounded_on(&test);
         // The real roster and drop tables, when the asset pack is baked.
         let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/dist");
+        // Each mission spawns from its own roster (missions::roster), so the
+        // bound holds per mission, never over every mission's kinds mixed.
         if let Ok(baked) = MonsterCatalog::load(&dist) {
-            bounded_on(&baked);
+            for mission in crate::world::missions::MISSIONS {
+                let roster = crate::world::missions::roster(mission, &baked);
+                if roster.defs().iter().any(|d| !d.boss) {
+                    bounded_on(&roster);
+                }
+            }
         }
     }
 
@@ -678,7 +685,8 @@ mod tests {
             let cap = (m.monsters().count as f64).powf(COUNT_LOOT_GROWTH as f64) * 1.08;
             assert!(got.1 <= plain.1 * cap, "{m:?}: item drops {} vs {} (cap ×{cap:.2})", got.1, plain.1);
             assert!(got.2 <= plain.2 * cap, "{m:?}: kill zeny {} vs {} (cap ×{cap:.2})", got.2, plain.2);
-            if m == (Modifiers { tier: 0, flags: ModFlags::SWARM }) {
+            // (A roster whose drop tables are still empty has no loot to compare.)
+            if m == (Modifiers { tier: 0, flags: ModFlags::SWARM }) && plain.1 > 0.0 {
                 assert!(got.1 > plain.1 * 1.05, "{m:?}: a swarm pays somewhat more ({} vs {})", got.1, plain.1);
                 assert!(got.1 / plain.1 < got.0 / plain.0 * 0.85, "{m:?}: loot grows slower than the count");
             }

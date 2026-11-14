@@ -44,4 +44,21 @@ void main() {
     expect(tips.where((t) => t.contains('Poring</b> shows up')), isEmpty, reason: 'only bosses');
     expect(loadingTips(keys, town: true, brief: withBoss).where((t) => t.contains('Angeling')), isEmpty);
   });
+
+  test('mission tips name the level band and the map events', () {
+    final brief = MissionBrief(
+      mission: 'sograt_desert',
+      map: 'moc_fild17',
+      timeLimitSecs: 900,
+      levelMin: 30,
+      levelMax: 50,
+      levelEverySecs: 90,
+      monsters: const [],
+      band: (min: 30, recommended: 33, max: 45),
+      events: const [(id: 'storm', name: 'Sandstorm', starts: [100, 300, 500], warnSecs: 10, durationSecs: 30)],
+    );
+    final tips = loadingTips(keys, town: false, mission: 'Sograt Desert', brief: brief);
+    expect(tips, contains('Sograt Desert is made for levels <b>30–45</b>.'));
+    expect(tips, contains('<b>Sandstorm</b> strikes at <b>1:40</b>, then every <b>3:20</b>.'));
+  });
 }

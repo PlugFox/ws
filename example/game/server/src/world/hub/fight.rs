@@ -5,7 +5,7 @@
 
 use super::aim::aimed_plant;
 use super::area::Area;
-use super::cast::{push, wound, Casting, Kill};
+use super::cast::{envenom, push, ticks16, wound, Casting, Kill, VENOM_SECS};
 use super::{facing_of, HubEvent, HubInstance, HubPlayer, MapIdx, Outgoing};
 use crate::world::combat::skills::SLOTS;
 use crate::world::combat::rules::{attack_roll, AttackOutcome};
@@ -23,8 +23,9 @@ use crate::world::modifiers::ModFlags;
 /// Standing still this many ticks (0.15 s at 20 Hz) starts the basic attack:
 /// releasing the stick between steps must not trigger a swing.
 const STILL_TICKS: u32 = 3;
-/// Monsters reach this far beyond touching (cells).
-const MONSTER_REACH: f32 = 0.35;
+/// Monsters reach this far beyond touching (cells): they stop at contact
+/// (`HordeConfig::player_radius`), so a blow needs a body against the player.
+const MONSTER_REACH: f32 = 0.2;
 /// Player body radius as the horde uses it (cells).
 const PLAYER_RADIUS: f32 = 0.4;
 /// An ally standing this close revives a downed player (cells; 1.5 m).
@@ -95,6 +96,9 @@ pub struct Fighter {
     pub(super) channel: Option<super::cast::Channel>,
     /// Rooted after a cast; the basic attack waits.
     pub(super) recovery: u32,
+    /// Riding a Peco Peco (`SkillBook::rides`, set with the passives):
+    /// riding skills need it.
+    pub(super) riding: bool,
     /// Modifiers of the learned passives.
     passive: Mods,
     /// Running buffs.
@@ -106,6 +110,8 @@ pub struct Fighter {
     /// Ticks left per condition (monster skills), and the active set.
     cond: [u16; CONDITIONS],
     pub(super) status: Status,
+    /// Where the last fear came from (cells): a feared fighter flees it.
+    pub(super) fear_from: (f32, f32),
     /// Kills of the party and experience gained since the stage began
     /// (the result screen).
     pub(super) run_exp: u64,
@@ -184,12 +190,14 @@ impl Fighter {
             casting: None,
             channel: None,
             recovery: 0,
+            riding: false,
             passive: Mods::default(),
             buffs: Vec::new(),
             mods: Mods::default(),
             temp_hp: 0,
             cond: [0; CONDITIONS],
             status: Status(0),
+            fear_from: (0.0, 0.0),
             run_exp: 0,
             buffs_sent: 0,
             skills_dirty: false,
@@ -341,6 +349,11 @@ impl Fighter {
         }
     }
 
+    /// Ticks left on the buff `skill` gave (0 = none), as of tick `now`.
+    pub(super) fn buff_left(&self, skill: u16, now: u32) -> u32 {
+        self.buffs.iter().find(|b| b.skill == skill).map_or(0, |b| b.until.saturating_sub(now))
+    }
+
     /// Starts (or refreshes) the buff of `skill` until tick `until`, with
     /// `temp_hp` temporary HP (the larger pool is kept).
     pub(super) fn buff(&mut self, skill: u16, until: u32, mods: Mods, temp_hp: i32) {
@@ -365,9 +378,28 @@ impl Fighter {
         }
     }
 
+    /// A damaging spell went off: Mystical Amplification is spent.
+    pub(super) fn spend_amplify(&mut self) {
+        if self.mods.amplify > 0.0 {
+            self.buffs.retain(|b| b.mods.amplify <= 0.0);
+            self.sum_mods();
+        }
+    }
+
     /// Leaves condition `c` for `ticks` (the longer of two is kept). Endure
     /// keeps the player on their feet.
     pub(super) fn afflict(&mut self, c: Condition, ticks: u16) {
+        self.afflict_inner(c, ticks);
+    }
+
+    /// Terrified by something at `from` (cells) for `ticks`: it flees from
+    /// there, and can neither attack nor cast, until the fear wears off.
+    pub(super) fn frighten(&mut self, from: (f32, f32), ticks: u16) {
+        self.fear_from = from;
+        self.afflict_inner(Condition::Feared, ticks);
+    }
+
+    fn afflict_inner(&mut self, c: Condition, ticks: u16) {
         if self.mods.steady && matches!(c, Condition::Stunned | Condition::Frozen) {
             return;
         }
@@ -673,6 +705,10 @@ impl HubInstance {
         self.bonus_step(out, &mut hits);
         // The overtime poison fog: rising, closing in, its toll (fog.rs).
         self.fog_step(out, &mut hits);
+        // The mission's environment: events, light, hazards (env.rs).
+        self.env_step(out, &mut hits);
+        // Sograt Desert's sand-blast, hodes and boss (sograt.rs).
+        self.desert_step(out, &mut hits);
         let Some(horde) = self.horde.as_mut() else { return };
         let map = horde.map();
         let hz = self.config.tick_hz as f32;
@@ -688,7 +724,8 @@ impl HubInstance {
             let Some(f) = p.fighter.as_mut() else { continue };
             f.attack_cd = f.attack_cd.saturating_sub(1);
             // Link-dead players do not fight back (they only take hits).
-            if !f.is_up() || p.dir != (0.0, 0.0) || f.mods.hidden || f.status.held() || p.link_dead {
+            // Hiding stops the attack, but for a thief's: it strikes out of it.
+            if !f.is_up() || p.dir != (0.0, 0.0) || (f.mods.hidden && !f.mods.ambush) || f.status.helpless() || p.link_dead {
                 f.still = 0;
                 continue;
             }
@@ -700,7 +737,9 @@ impl HubInstance {
                 continue;
             }
             let weapon = f.weapon;
-            let m = f.mods;
+            let mut m = f.mods;
+            // Katars crit a step earlier.
+            m.crit += weapon.kind.crit();
             let (dice, kind) = weapon.damage(f.class, f.level);
             let damage = Damage::new(Dice { bonus: dice.bonus + m.damage_flat, ..dice }, kind);
             let (range, arc_cos, splash) = match weapon.reach {
@@ -724,7 +763,14 @@ impl HubInstance {
             if !targets.contains(&target) {
                 targets.push(target);
             }
-            let attacks = f.class.attacks_per_action(f.level);
+            // Double Attack: now and then one more swing on every target.
+            let attacks = f.class.attacks_per_action(f.level) + u32::from(m.double > 0 && rng.die(100) <= m.double);
+            // Out of hiding: the swing ends it, with advantage.
+            let ambush = m.lurking();
+            if ambush {
+                f.unhide();
+            }
+            let venom = ticks16(VENOM_SECS, hz);
             let entity = p.profile.character_id;
             let uid = p.profile.user_id;
             let k = cantrip_k(f.level);
@@ -734,7 +780,7 @@ impl HubInstance {
                 for _ in 0..attacks {
                     let id = MONSTER_ENTITY_BASE + s as u32;
                     let status = horde.store().status_of(s);
-                    let advantage = (status.advantage_against() + m.advantage as i8 + f.status.advantage()).clamp(-1, 1);
+                    let advantage = (status.advantage_against() + (m.advantage || ambush) as i8 + f.status.advantage()).clamp(-1, 1);
                     let ac = block.ac + status.ac();
                     let bless = if m.to_hit_die > 0 { rng.die(m.to_hit_die) as i32 } else { 0 };
                     match attack_roll(rng, weapon.to_hit(f.level) + m.to_hit + bless, ac, advantage, m.crit_from()) {
@@ -757,6 +803,9 @@ impl HubInstance {
                             hits.push(HitEvent { target: id, amount: amount as u32, flags });
                             if dead {
                                 break;
+                            }
+                            if m.venom > 0 && amount > 0 && rng.die(100) <= m.venom {
+                                envenom(horde, s, venom);
                             }
                         }
                     }
@@ -819,8 +868,11 @@ impl HubInstance {
                 // Mission modifiers that add monsters make each one worth
                 // less: experience, zeny and drop chances alike.
                 let share = horde.loot_permille(def.archetype);
-                let shares = share_kill(loot::scale_amount(kill_value(level, def.archetype), share, rng), level, &levels);
-                let zeny = loot::scale_amount(items::kill_zeny(level, def.archetype), share, rng);
+                // Affixes: each star pays more, minions nothing (affix.rs).
+                let bonus = super::affix::reward(store, s);
+                let paid = (share as u64 * bonus.permille as u64 / 1000) as u32;
+                let shares = share_kill(loot::scale_amount(kill_value(level, def.archetype), paid, rng), level, &levels);
+                let zeny = loot::scale_amount(items::kill_zeny(level, def.archetype), paid, rng);
                 let mut it = shares.into_iter();
                 for p in self.players.iter_mut().filter(|p| p.map == map) {
                     if let Some(f) = p.fighter.as_mut() {
@@ -835,8 +887,10 @@ impl HubInstance {
                 }
                 // Drops: the killer's (or the nearest member's); elites and
                 // bosses roll once for everyone on the map.
-                if !def.drops.is_empty() {
+                if !def.drops.is_empty() && bonus.drop_permille > 0 {
                     let (mx, my) = (store.x[s as usize], store.y[s as usize]);
+                    // A starred monster may roll its whole table twice.
+                    let rolls = 1 + u32::from(bonus.extra_roll_pct > 0 && rng.chance(bonus.extra_roll_pct));
                     let entity_id = MONSTER_ENTITY_BASE + s as u32;
                     let shared = matches!(def.archetype, Archetype::Elite | Archetype::Boss);
                     let owner = if shared { None } else { looter(&self.players, map, killer, mx, my) };
@@ -846,19 +900,25 @@ impl HubInstance {
                         }
                         let uid = p.profile.user_id;
                         let Some(f) = p.fighter.as_mut() else { continue };
-                        loot::roll_scaled(&def.drops, share, rng, |d, n| {
-                            if d.is_zeny() {
-                                f.zeny += n as u64;
-                                f.run_zeny += n as u64;
-                                f.progress_dirty = true;
-                            } else {
-                                f.add_loot(d.item, n);
-                            }
-                            let msg = ServerMsg::Loot { entity_id, x: mx, y: my, item: d.item.into(), count: n, rare: d.rare };
-                            out.push((uid, HubEvent::Control(msg)));
-                        });
+                        // Steal: the player's own roll at better odds.
+                        let odds = (share as f32 * (1.0 + f.mods.loot) * bonus.drop_permille as f32 / 1000.0).round() as u32;
+                        for _ in 0..rolls {
+                            loot::roll_scaled(&def.drops, odds, rng, |d, n| {
+                                if d.is_zeny() {
+                                    f.zeny += n as u64;
+                                    f.run_zeny += n as u64;
+                                    f.progress_dirty = true;
+                                } else {
+                                    f.add_loot(d.item, n);
+                                }
+                                let msg = ServerMsg::Loot { entity_id, x: mx, y: my, item: d.item.into(), count: n, rare: d.rare };
+                                out.push((uid, HubEvent::Control(msg)));
+                            });
+                        }
                     }
                 }
+                // Novas and the Volatile blast: marked now, landing later.
+                super::affix::on_death(horde, s, tick, hz, rng, &mut self.affix, &mut self.hazards);
                 horde.despawn(s);
             }
         }
@@ -882,6 +942,8 @@ impl HubInstance {
         self.monster_skills(out, &mut hits);
         // Scripted elites and bosses: phases, patterns, shouts (boss.rs).
         self.boss_step(out, &mut hits);
+        // Monster affixes: blinks, regeneration, summons, sweeps (affix.rs).
+        self.affix_step(out, &mut hits);
         let Some(horde) = self.horde.as_mut() else { return };
         let rng = &mut self.dice;
 
@@ -904,7 +966,8 @@ impl HubInstance {
                 continue;
             }
             let status = store.status_of(s);
-            if store.flags[i] & FLAG_FULL == 0 || ups.is_empty() || status.held() || store.staggered(s) || store.is_plant(s) {
+            // Burrowed: it cannot bite from under the ground.
+            if store.flags[i] & FLAG_FULL == 0 || ups.is_empty() || status.held() || store.staggered(s) || store.is_plant(s) || store.burrowed(s) {
                 continue;
             }
             let (mx, my) = (store.x[i], store.y[i]);
@@ -946,12 +1009,15 @@ impl HubInstance {
                         let amount = f.take_from(block.damage.roll(rng, crit), true, evil);
                         let flags = damage_type_bits(DamageType::Physical) | if crit { hit::CRITICAL } else { 0 };
                         hits.push(HitEvent { target: id, amount: amount as u32, flags });
+                        // Affixes: Vampiric heals, an enchantment adds its element.
+                        super::affix::melee(horde, s, &block, f, id, amount, rng, hz, &mut hits);
                         f.fall_if_spent(hz);
                     }
                 }
             }
             f.quiet = 0;
-            horde.store_mut().cooldown[i] = (block.attack_interval_ms as f32 * hz / 1000.0).round() as u16;
+            let pace = super::affix::attack_interval(horde.store(), s);
+            horde.store_mut().cooldown[i] = (block.attack_interval_ms as f32 * pace * hz / 1000.0).round() as u16;
             swings.push(Swing { entity_id: MONSTER_ENTITY_BASE + s as u32, facing: facing_of(dx, dy), target: id });
         }
 

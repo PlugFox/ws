@@ -5,6 +5,7 @@
 //! clocks; randomness comes in through [`Dice`], seeded per instance so a
 //! stage replays the same rolls in tests.
 
+pub mod affixes;
 pub mod buffs;
 pub mod class;
 pub mod combo;

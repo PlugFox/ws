@@ -38,13 +38,24 @@ final class WalkGrid {
   /// Same rule as the server: the cell containing the point (floor).
   bool isWalkable(double x, double y) => isWalkableCell(x.floor(), y.floor());
 
-  /// Way from (sx, sy) to within [reach] of (tx, ty) (click to walk to an
-  /// NPC): A* over walkable cells, 8-way without cutting corners, then
-  /// straightened where the line between two points is clear. Returns the
-  /// points to walk through (cell centres, the last one in reach; empty
-  /// when already there), or null when no walkable cell in reach can be
-  /// reached within [budget] expanded cells.
-  List<(double, double)>? findPath(double sx, double sy, double tx, double ty, double reach, {int budget = 60000}) {
+  /// Way from (sx, sy) to within [reach] of (tx, ty) (click to walk): A*
+  /// over walkable cells, 8-way without cutting corners, then straightened
+  /// where the line between two points is clear. Returns the points to
+  /// walk through (cell centres, the last one in reach; empty when already
+  /// there), or null when no walkable cell in reach can be reached within
+  /// [budget] expanded cells. With [closest] an unreachable goal is not a
+  /// failure: the way leads to the reachable cell nearest to it (empty
+  /// when that is where we stand), so a click on a cliff or past a wall
+  /// walks to its edge.
+  List<(double, double)>? findPath(
+    double sx,
+    double sy,
+    double tx,
+    double ty,
+    double reach, {
+    int budget = 60000,
+    bool closest = false,
+  }) {
     if (_near(sx, sy, tx, ty, reach)) return const [];
     final x0 = sx.floor(), y0 = sy.floor();
     if (!isWalkableCell(x0, y0)) return null;
@@ -105,12 +116,20 @@ final class WalkGrid {
     push(h(x0, y0), start);
     var goal = -1;
     var expanded = 0;
+    // The expanded cell nearest the goal ([closest]).
+    var near = start;
+    var nearH = h(x0, y0);
     while (heapC.isNotEmpty && expanded < budget) {
       final c = pop();
       if (closed[c] != 0) continue;
       closed[c] = 1;
       expanded++;
       final cx = c % width, cy = c ~/ width;
+      final hc = h(cx, cy);
+      if (hc < nearH - 1e-9) {
+        nearH = hc;
+        near = c;
+      }
       if (_near(cx + 0.5, cy + 0.5, tx, ty, reach)) {
         goal = c;
         break;
@@ -132,7 +151,10 @@ final class WalkGrid {
         }
       }
     }
-    if (goal < 0) return null;
+    if (goal < 0) {
+      if (!closest || near == start) return closest ? const [] : null;
+      goal = near;
+    }
     final cells = <(double, double)>[];
     for (var c = goal; c != start; c = from[c]) {
       cells.add(((c % width) + 0.5, (c ~/ width) + 0.5));
@@ -152,6 +174,36 @@ final class WalkGrid {
       i = j + 1;
     }
     return out;
+  }
+
+  /// Centre of the walkable cell nearest to (x, y): the point itself when
+  /// its cell is walkable, else searched ring by ring up to [maxRing] cells
+  /// out (null when nothing walkable is that close). Where a click on a
+  /// wall, a tree or water means to go.
+  (double, double)? nearestWalkable(double x, double y, {int maxRing = 12}) {
+    if (isWalkable(x, y)) return (x, y);
+    final cx = x.floor(), cy = y.floor();
+    (double, double)? best;
+    var bestD = double.infinity;
+    for (var r = 1; r <= maxRing; r++) {
+      for (var dy = -r; dy <= r; dy++) {
+        // The ring only: full rows at the top and bottom, ends between.
+        final step = dy.abs() == r ? 1 : 2 * r;
+        for (var dx = -r; dx <= r; dx += step) {
+          if (!isWalkableCell(cx + dx, cy + dy)) continue;
+          final px = cx + dx + 0.5, py = cy + dy + 0.5;
+          final d = (px - x) * (px - x) + (py - y) * (py - y);
+          if (d < bestD) {
+            bestD = d;
+            best = (px, py);
+          }
+        }
+      }
+      // Every cell past ring r is at least r + 0.5 away; a corner of this
+      // ring may be farther than that, so a nearer one can still follow.
+      if (best != null && math.sqrt(bestD) <= r + 0.5) return best;
+    }
+    return best;
   }
 
   static bool _near(double x, double y, double tx, double ty, double reach) {

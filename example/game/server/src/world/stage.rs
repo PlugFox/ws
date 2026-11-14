@@ -147,6 +147,9 @@ pub struct StageDirectory {
     worlds: Arc<HashMap<String, Arc<HubWorld>>>,
     /// Monster catalog; stages run without monsters when absent.
     monsters: Option<Arc<MonsterCatalog>>,
+    /// Each mission's roster catalogue (`missions::roster`), built with
+    /// the catalog: what its stages spawn and its brief lists.
+    rosters: Arc<HashMap<&'static str, Arc<MonsterCatalog>>>,
     skills: Arc<SkillBook>,
     config: StageConfig,
     state: Arc<Mutex<StageState>>,
@@ -158,13 +161,43 @@ impl StageDirectory {
             .into_iter()
             .map(|w| (w.map(w.entry()).id().to_string(), Arc::new(w)))
             .collect();
-        Self { worlds: Arc::new(worlds), monsters: None, skills: Arc::new(SkillBook::default()), config, state: Arc::new(Mutex::new(StageState::default())) }
+        Self { worlds: Arc::new(worlds), monsters: None, rosters: Arc::default(), skills: Arc::new(SkillBook::default()), config, state: Arc::new(Mutex::new(StageState::default())) }
     }
 
     /// Stages launched from now on get a horde of these monsters.
     pub fn with_monsters(mut self, catalog: MonsterCatalog) -> Self {
         self.monsters = (!catalog.is_empty()).then(|| Arc::new(catalog));
+        let rosters = self.monsters.as_deref().map_or_else(HashMap::new, |all| {
+            super::missions::MISSIONS.iter().map(|m| (m.id, Arc::new(super::missions::roster(m, all)))).collect()
+        });
+        self.rosters = Arc::new(rosters);
         self
+    }
+
+    /// The catalogue stages of `mission` spawn from: its roster
+    /// (`missions::roster`); `None` without monsters.
+    pub fn roster(&self, mission: &MissionInfo) -> Option<Arc<MonsterCatalog>> {
+        let all = self.monsters.as_ref()?;
+        Some(match self.rosters.get(mission.id) {
+            Some(r) => Arc::clone(r),
+            // A mission outside the table (tests): built on the spot.
+            None => Arc::new(super::missions::roster(mission, all)),
+        })
+    }
+
+    /// Whether `mission`'s location is in the baked pack.
+    pub fn has_map(&self, mission: &MissionInfo) -> bool {
+        self.worlds.contains_key(mission.map)
+    }
+
+    /// The mission list (`MISSION_LIST`): every mission of the ladder,
+    /// open or coming soon on this server.
+    pub fn cards(&self) -> Vec<super::missions::MissionCard> {
+        super::missions::MISSIONS
+            .iter()
+            .enumerate()
+            .map(|(i, m)| super::missions::card(i, m, self.roster(m).as_deref(), self.has_map(m)))
+            .collect()
     }
 
     /// The monster catalogue stages spawn from (mission briefs).
@@ -183,9 +216,10 @@ impl StageDirectory {
         self.config.link_grace
     }
 
-    /// Whether `mission` can be launched at all (its map is loaded).
+    /// Whether `mission` can be launched at all: its map is loaded and
+    /// (when the server has monsters) its roster has some to send.
     pub fn supports(&self, mission: &MissionInfo) -> bool {
-        self.worlds.contains_key(mission.map)
+        self.has_map(mission) && self.roster(mission).is_none_or(|r| super::missions::has_monsters(&r))
     }
 
     /// Spawns a stage instance for `mission`, expecting the party `members`
@@ -211,9 +245,11 @@ impl StageDirectory {
         let mut instance = HubInstance::stage(stage_id, mission.id, Arc::clone(world), self.config.sim.clone())
             .with_skills(Arc::clone(&self.skills))
             .with_modifiers(mods);
-        if let Some(catalog) = &self.monsters {
-            let config = HordeConfig { waves: mission.waves.clone(), ..self.config.horde.clone() }.with_modifiers(mods);
-            instance = instance.with_horde(Horde::new(Arc::clone(world), Arc::clone(catalog), config));
+        if let Some(catalog) = self.roster(mission) {
+            // The mission's own light (a dark cave) under the modifiers'.
+            let light_radius = self.config.horde.light_radius * mission.env.light_scale;
+            let config = HordeConfig { waves: mission.waves.clone(), light_radius, ..self.config.horde.clone() }.with_modifiers(mods);
+            instance = instance.with_horde(Horde::new(Arc::clone(world), catalog, config));
         }
         // A link-dead player the actor let go (the mission ended and they
         // were sent home) is no longer waited for.
@@ -488,9 +524,9 @@ mod tests {
     use crate::world::OUTBOX_CAPACITY;
 
     static MISSION: MissionInfo =
-        MissionInfo { id: "m1", name: "M1", description: "", map: "field", max_players: 4, time_limit_secs: 900.0, waves: crate::world::horde::director::WaveRules::NORMAL, fog: None };
+        MissionInfo { id: "m1", name: "M1", map: "field", max_players: 4, fog: None, ..MissionInfo::TEMPLATE };
     static MISSING: MissionInfo =
-        MissionInfo { id: "m2", name: "M2", description: "", map: "nowhere", max_players: 4, time_limit_secs: 900.0, waves: crate::world::horde::director::WaveRules::NORMAL, fog: None };
+        MissionInfo { id: "m2", name: "M2", map: "nowhere", max_players: 4, fog: None, ..MissionInfo::TEMPLATE };
 
     fn stages(max: usize) -> StageDirectory {
         let field = map(

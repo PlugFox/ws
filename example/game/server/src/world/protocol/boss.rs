@@ -13,7 +13,9 @@
 //!                   (as in CAST; shape 3 = ring: `a` outer radius, `b`
 //!                   inner), var delay_ms (when it resolves, from now),
 //!                   u8 flags (1 safe: standing inside spares you, 2 a
-//!                   bar centred on the caster: it fills from the middle)}
+//!                   bar centred on the caster: it fills from the middle,
+//!                   4 the caster leaps and lands on its centre as it
+//!                   resolves)}
 //! 0x6F BOSS_SHOUT   var entity_id, str name, str text, u8 style (0 an
 //!                   elite, 1 a boss): a yell over its head and in the log
 //! 0x72 BOSS_BAR     var entity_id, str name, u8 rank (0 gone: drop its
@@ -45,6 +47,9 @@ pub mod zone_flags {
     pub const SAFE: u8 = 1;
     /// A bar centred on its caster (a cross): it fills from the middle out.
     pub const CENTRE: u8 = 2;
+    /// The caster leaps onto its centre and lands as it resolves (pounces,
+    /// bounding hops): clients draw the jump instead of a teleport.
+    pub const LANDS: u8 = 4;
 }
 
 /// [`ServerMsg::BossCast`] flags.

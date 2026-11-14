@@ -9,11 +9,12 @@
 use super::map::{MapData, MapError};
 use super::missions;
 use super::modifiers::{self, ModFlags};
-use super::protocol::{pose, Look, MapInfo, PlayerInfo, ServerMsg, SnapshotBody, MAX_EMOTE, MAX_FLAG};
+use super::protocol::{pose, CastPrefs, Look, MapInfo, PlayerInfo, ServerMsg, SnapshotBody, MAX_EMOTE, MAX_FLAG};
 use super::horde::view::MonsterView;
 use super::horde::{Horde, PlayerView};
 use super::combat::{self, Loadout, SkillBook};
 use bytes::{Bytes, BytesMut};
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
@@ -21,20 +22,39 @@ use uuid::Uuid;
 
 pub type MapIdx = u8;
 
+mod affix;
+#[cfg(test)]
+mod affix_tests;
 mod aim;
 mod area;
 mod bonus;
 mod boss;
 mod brain;
 mod cast;
+mod culvert;
+mod env;
 mod feedback;
 mod fight;
 mod fog;
 mod mission;
+mod mount;
+mod plates;
+#[cfg(test)]
+mod peco_tests;
+#[cfg(test)]
+mod balance_tests;
+#[cfg(test)]
+mod skill_level_tests;
 #[cfg(test)]
 mod plant_tests;
+#[cfg(test)]
+mod aim_tests;
+#[cfg(test)]
+mod thief_tests;
 mod residents;
 mod shop;
+mod payon;
+mod sograt;
 mod trade;
 mod social;
 mod stats;
@@ -166,6 +186,21 @@ impl HubWorld {
         Arrival { map: m.id.clone(), x, y }
     }
 
+    /// Where the `seat`-th arrival of a party stands around `spawn`: the
+    /// first on it, the next ones on a ring one cell out (eight spots), a
+    /// blocked spot falls back to the spawn.
+    pub fn party_spot(&self, map: MapIdx, spawn: (f32, f32), seat: usize) -> (f32, f32) {
+        if seat == 0 {
+            return spawn;
+        }
+        let a = (seat - 1) as f32 * std::f32::consts::TAU / 8.0;
+        let (x, y) = (spawn.0 + a.cos(), spawn.1 + a.sin());
+        match self.map(map).walk.is_walkable(x, y) {
+            true => (x, y),
+            false => spawn,
+        }
+    }
+
     pub fn link(&self, map: MapIdx, portal: usize) -> &PortalLink {
         &self.links[map as usize][portal]
     }
@@ -183,8 +218,9 @@ pub struct HubSimConfig {
     /// A held direction is dropped after this many ticks without input, so a
     /// frozen client does not walk forever.
     pub input_timeout_ticks: u32,
-    /// Test hooks (`GAME_DEV=1`): a mission can be picked anywhere in
-    /// town, and `/end win|lose` in chat ends a running mission at once.
+    /// Test hooks (`GAME_DEV=1`): a mission can be picked and a merchant
+    /// opened anywhere in town, and `/end win|lose` in chat ends a running
+    /// mission at once.
     pub missions_anywhere: bool,
     /// Simulated townsfolk walking the entry map of every hub channel
     /// (none on stages).
@@ -216,6 +252,10 @@ pub struct PlayerProfile {
     pub bag: combat::Bag,
 }
 
+/// Inputs a player may have waiting for their tick (150 ms at 20 Hz):
+/// absorbs network jitter without letting a fast client queue up latency.
+const INPUT_QUEUE: usize = 3;
+
 #[derive(Debug)]
 struct HubPlayer {
     profile: PlayerProfile,
@@ -226,8 +266,17 @@ struct HubPlayer {
     y: f32,
     dir: (f32, f32),
     facing: u8,
+    /// Last input the simulation applied: what snapshots acknowledge.
     last_seq: u32,
     has_seq: bool,
+    /// Highest input received (stale ones are refused against it).
+    rx_seq: u32,
+    /// Received inputs not yet applied, oldest first. The client sends one
+    /// per tick and predicts one step per input, so the tick applies one per
+    /// tick: two frames landing in the same tick must both move, or the
+    /// client's prediction runs ahead and the walk ends a step short.
+    /// Bounded by [`INPUT_QUEUE`] (preallocated, never grows past it).
+    queued: VecDeque<(u32, (f32, f32))>,
     last_input_tick: u32,
     /// Set on arrival (and on a denied portal); portals stay inert until the
     /// player has stepped outside every trigger. Without it, arrival points
@@ -242,6 +291,8 @@ struct HubPlayer {
     /// the last tick.
     aim: [i8; 2],
     pressed: u16,
+    /// Manual aiming and the auto-cast slots (`CAST_PREFS`).
+    prefs: CastPrefs,
     /// Sitting (hubs only); any movement stands the player up.
     sitting: bool,
     /// Earliest ticks of the next emote and flag (rate limits).
@@ -251,6 +302,9 @@ struct HubPlayer {
     /// and hit, but neither moves nor attacks until a new socket
     /// re-attaches (`stage.rs` has the grace).
     link_dead: bool,
+    /// What riding adds to the walking pace in town (0 on foot; on a stage
+    /// the fighter's riding passives do it). See `mount.rs`.
+    ride: f32,
 }
 
 impl HubPlayer {
@@ -266,6 +320,22 @@ impl HubPlayer {
             level: self.fighter.as_ref().map_or(self.profile.level, |f| f.level),
             weapon: self.weapon_id().into(),
         }
+    }
+
+    /// Headgear worn, upper / middle / lower (item ids; bare slots left out).
+    fn headgear(&self) -> Vec<String> {
+        use combat::items::{base_id, Slot};
+        [Slot::UpperHead, Slot::MidHead, Slot::LowerHead]
+            .iter()
+            .map(|&s| base_id(&self.profile.bag.equip[s as usize]))
+            .filter(|id| !id.is_empty())
+            .map(String::from)
+            .collect()
+    }
+
+    /// What the map's clients draw on this player's head (`PLAYER_HEADGEAR`).
+    fn headgear_msg(&self) -> ServerMsg {
+        ServerMsg::PlayerHeadgear { entity_id: self.profile.character_id, items: self.headgear() }
     }
 }
 
@@ -293,9 +363,9 @@ pub enum HubEvent {
     /// Internal: the player stands at a skill master; the socket task
     /// resets the loadout.
     SkillResetApproved,
-    /// Internal: the player stands at a merchant that may make this trade;
-    /// the socket task applies it to the character's bag.
-    Trade { item: String, count: u32, sell: bool },
+    /// Internal: the player stands at a merchant that may take this
+    /// order; the socket task applies it to the character's bag.
+    Shop(crate::world::trade::ShopOrder),
     /// Internal: the player drank `item` on a mission (one fewer).
     ItemUsed { item: String },
     /// Internal: zeny earned on a mission (kills, the clear bonus).
@@ -377,12 +447,16 @@ pub struct HubInstance {
     minds: Vec<brain::Mind>,
     mob_casts: Vec<brain::MobCast>,
     hazards: Vec<brain::Hazard>,
+    /// Monster affixes' pending tricks (`affix.rs`).
+    affix: affix::AffixStage,
     kind_skills: Vec<Vec<u16>>,
     /// Scripted elite and boss fights (`boss.rs`).
     bosses: boss::Bosses,
     /// Monsters the party killed this stage, the boss bar, the outcome.
     kills: u32,
     boss: Option<mission::BossBar>,
+    /// The bars under the elites and bosses (`plates.rs`).
+    plates: plates::Plates,
     outcome: mission::Outcome,
     /// Simulated townsfolk on the entry map (hub channels only).
     residents: residents::Residents,
@@ -392,6 +466,11 @@ pub struct HubInstance {
     bonuses: bonus::Bonuses,
     /// The overtime poison fog of the stage's mission (`fog.rs`).
     fog: fog::Fog,
+    /// Hazards, map events, light and objects of the mission (`env.rs`).
+    env: env::Env,
+    /// Sograt Desert's sand-blast, buried hodes and the boss's rise
+    /// (`sograt.rs`; `None` on other maps).
+    desert: Option<sograt::Desert>,
     /// Player-to-player trades (`trade.rs`, hub channels only).
     trades: trade::Trades,
     /// What each party member did this run, for the result screen
@@ -480,6 +559,11 @@ impl HubInstance {
                 InstanceKind::Stage { mission, .. } => missions::find(mission).map_or(0.0, |m| m.time_limit_secs),
                 InstanceKind::Hub { .. } => 0.0,
             }),
+            env: match &kind {
+                InstanceKind::Stage { mission, .. } => env::for_stage(mission, &world.map(world.entry()).hazards),
+                InstanceKind::Hub { .. } => env::Env::default(),
+            },
+            desert: sograt::Desert::for_stage(&kind),
             fog: fog::Fog::new(match &kind {
                 InstanceKind::Stage { mission, .. } => missions::find(mission).and_then(|m| m.fog),
                 InstanceKind::Hub { .. } => None,
@@ -500,10 +584,12 @@ impl HubInstance {
             minds: Vec::new(),
             mob_casts: Vec::new(),
             hazards: Vec::new(),
+            affix: affix::AffixStage::default(),
             kind_skills: Vec::new(),
             bosses: boss::Bosses::default(),
             kills: 0,
             boss: None,
+            plates: plates::Plates::default(),
             outcome: mission::Outcome::Running,
             horde_players: Vec::new(),
             monster_buf: BytesMut::new(),
@@ -595,6 +681,12 @@ impl HubInstance {
         let (map, x, y) = placed.unwrap_or_else(|| {
             let entry = self.world.entry();
             let (x, y) = self.world.map(entry).spawn;
+            // A party arriving on a stage (up to `missions::PARTY_MAX`)
+            // rings the spawn instead of stacking on it.
+            let (x, y) = match self.kind {
+                InstanceKind::Stage { .. } => self.world.party_spot(entry, (x, y), self.players.len()),
+                InstanceKind::Hub { .. } => (x, y),
+            };
             (entry, x, y)
         });
         let player = HubPlayer {
@@ -608,16 +700,20 @@ impl HubInstance {
             facing: 0,
             last_seq: 0,
             has_seq: false,
+            rx_seq: 0,
+            queued: VecDeque::with_capacity(INPUT_QUEUE + 1),
             last_input_tick: self.tick,
             portal_guard: true,
             monsters: None,
             fighter: None,
             aim: [0, 0],
             pressed: 0,
+            prefs: CastPrefs::default(),
             sitting: false,
             emote_ready: 0,
             flag_ready: 0,
             link_dead: false,
+            ride: 0.0,
         };
         let joined = match &self.kind {
             InstanceKind::Hub { channel } => ServerMsg::HubJoined {
@@ -638,6 +734,7 @@ impl HubInstance {
         out.push((user_id, HubEvent::Control(joined)));
         self.mission_hello(user_id, out);
         let mut player = player;
+        player.ride = player.ride_bonus(&self.skills);
         // Entering the game, reaching a location, coming back to town after
         // a mission: every arrival settles the character's statuses here.
         player.fighter = self.settle_on_arrival(user_id, &player.profile);
@@ -660,6 +757,7 @@ impl HubInstance {
         self.announce_fighter(idx, out);
         self.announce_bonuses(idx, out);
         self.announce_fog(idx, out);
+        self.announce_env(idx, out);
         out.push((user_id, HubEvent::Control(self.skills_msg(idx))));
         for o in self.players.iter().filter(|o| o.link_dead && o.map == p.map && o.profile.user_id != user_id) {
             out.push((user_id, HubEvent::Control(ServerMsg::PlayerLink { entity_id: o.profile.character_id, online: false })));
@@ -678,6 +776,7 @@ impl HubInstance {
         let p = &mut self.players[i];
         p.link_dead = true;
         p.dir = (0.0, 0.0);
+        p.queued.clear();
         p.pressed = 0;
         p.monsters = None;
         let msg = ServerMsg::PlayerLink { entity_id: p.profile.character_id, online: false };
@@ -697,7 +796,8 @@ impl HubInstance {
         p.link_dead = false;
         p.map_epoch = epoch;
         p.monsters = None;
-        (p.has_seq, p.last_seq, p.last_input_tick) = (false, 0, tick);
+        (p.has_seq, p.last_seq, p.rx_seq, p.last_input_tick) = (false, 0, 0, tick);
+        p.queued.clear();
         p.dir = (0.0, 0.0);
         p.pressed = 0;
         p.portal_guard = true;
@@ -748,19 +848,33 @@ impl HubInstance {
     pub fn set_loadout(&mut self, user_id: u32, loadout: Loadout, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
         let p = &mut self.players[i];
+        let rode = self.skills.rides(&p.profile.loadout);
         p.profile.loadout = loadout;
         if let Some(f) = p.fighter.as_mut() {
             cast::equip(f, &self.skills, &p.profile.loadout);
         }
         out.push((user_id, HubEvent::Control(self.skills_msg(i))));
+        // Got on or off the Peco Peco: the map sees it.
+        self.remount(i, rode, out);
     }
 
     /// Aim and skill slots of an accepted input (see [`HubInstance::input`]).
     pub fn act(&mut self, user_id: u32, aim: [i8; 2], slots: u16) {
         let Some(i) = self.find(user_id) else { return };
         let p = &mut self.players[i];
-        p.aim = aim;
+        // Two frames can land in one tick: a press keeps its aim until the
+        // tick casts it (the frame after it, with no press, carries none).
+        if slots != 0 || p.pressed == 0 {
+            p.aim = aim;
+        }
         p.pressed |= slots;
+    }
+
+    /// The connection's manual aiming and auto-cast slots (`CAST_PREFS`).
+    pub fn cast_prefs(&mut self, user_id: u32, prefs: CastPrefs) {
+        if let Some(i) = self.find(user_id) {
+            self.players[i].prefs = prefs;
+        }
     }
 
     /// Removes a player if `session_id` still owns the slot. Returns whether
@@ -810,7 +924,7 @@ impl HubInstance {
         let tick = self.tick;
         let Some(i) = self.find(user_id) else { return false };
         let p = &mut self.players[i];
-        if p.has_seq && seq <= p.last_seq {
+        if p.has_seq && seq <= p.rx_seq {
             return false;
         }
         if !dx.is_finite() || !dy.is_finite() {
@@ -823,8 +937,14 @@ impl HubInstance {
         } else {
             (dx, dy)
         };
-        p.dir = dir;
-        p.last_seq = seq;
+        // Applied by the tick, one per tick. A backlog past the bound (the
+        // client's clock running fast, a burst after a stall) drops the
+        // oldest: that one step is lost and the client reconciles.
+        if p.queued.len() >= INPUT_QUEUE {
+            p.queued.pop_front();
+        }
+        p.queued.push_back((seq, dir));
+        p.rx_seq = seq;
         p.has_seq = true;
         p.last_input_tick = tick;
         true
@@ -837,7 +957,10 @@ impl HubInstance {
         let map = self.world.map(p.map);
         let reply = match map.manifest.npcs.iter().find(|n| n.id == npc_id) {
             None => hub_error("no_such_npc", format!("no NPC {npc_id} on {}", map.id())),
-            Some(n) if !n.in_reach(p.x, p.y) => hub_error("npc_too_far", format!("walk closer to {}", n.name)),
+            // GAME_DEV: merchants and mission givers answer from anywhere (e2e: `?shop=kafra`).
+            Some(n) if !n.in_reach(p.x, p.y) && !((n.kind == SHOP || gives_missions(&n.kind)) && self.at_merchant(n, p.x, p.y)) => {
+                hub_error("npc_too_far", format!("walk closer to {}", n.name))
+            }
             Some(n) if n.kind == SHOP => ServerMsg::Shop {
                 npc: n.id.clone(),
                 name: n.name.clone(),
@@ -964,6 +1087,7 @@ impl HubInstance {
         p.sitting = sit;
         if sit {
             p.dir = (0.0, 0.0);
+            p.queued.clear();
         }
         let (map, entity_id) = (p.map, p.profile.character_id);
         self.broadcast(map, &ServerMsg::Pose { entity_id, pose }, out);
@@ -1005,6 +1129,25 @@ impl HubInstance {
             self.end_stage(map, how == "win", out);
             return;
         }
+        // Test hook (`GAME_DEV=1`): `/spawn <monster id>` puts a monster of
+        // the stage's roster 6 cells east of the speaker (a boss for the
+        // e2e smoke tests without waiting ten minutes).
+        if self.config.missions_anywhere
+            && let Some(id) = text.strip_prefix("/spawn ")
+            && let Some(horde) = self.horde.as_mut()
+            && let Some(kind) = horde.catalog().kind_of(id.trim())
+        {
+            let (x, y) = (self.players[i].x, self.players[i].y);
+            let walk = &self.world.map(self.players[i].map).walk;
+            let spot = [(6.0, 0.0), (-6.0, 0.0), (0.0, 6.0), (0.0, -6.0), (3.0, 0.0), (0.0, 3.0)]
+                .into_iter()
+                .map(|(dx, dy)| (x + dx, y + dy))
+                .find(|&(sx, sy)| walk.is_walkable(sx, sy));
+            if let Some((sx, sy)) = spot {
+                horde.spawn(kind, sx, sy);
+            }
+            return;
+        }
         let p = &self.players[i];
         let range = match self.kind {
             InstanceKind::Hub { .. } => Some(super::chat::CHAT_RANGE),
@@ -1033,6 +1176,12 @@ impl HubInstance {
         let mut transitions: Vec<(usize, usize)> = Vec::new();
         let mut stood_up: Vec<(MapIdx, u32)> = Vec::new();
         for (idx, p) in self.players.iter_mut().enumerate() {
+            // This tick's input: the oldest one received (one per tick, as
+            // the client predicted it); none queued keeps the last intent.
+            if let Some((seq, dir)) = p.queued.pop_front() {
+                p.dir = dir;
+                p.last_seq = seq;
+            }
             if p.link_dead || self.tick.wrapping_sub(p.last_input_tick) > timeout || p.fighter.as_ref().is_some_and(|f| !f.is_up()) {
                 p.dir = (0.0, 0.0);
             }
@@ -1042,18 +1191,24 @@ impl HubInstance {
             }
             let map = world.map(p.map);
             let (mut dx, mut dy) = p.dir;
-            // Buffs and conditions change the pace; moving ends playing dead.
+            // Buffs and conditions change the pace; moving ends playing dead
+            // and hiding (not Cloaking).
             let step = match p.fighter.as_mut() {
                 Some(f) => {
                     if !f.status.can_move() {
                         (dx, dy) = (0.0, 0.0);
+                    } else if f.status.has(combat::Condition::Feared) {
+                        // Terrified: it runs from what scared it, whatever it was told.
+                        let (fx, fy) = (p.x - f.fear_from.0, p.y - f.fear_from.1);
+                        let d = (fx * fx + fy * fy).sqrt();
+                        (dx, dy) = if d > 0.05 { (fx / d, fy / d) } else { (1.0, 0.0) };
                     }
-                    if dx != 0.0 || dy != 0.0 {
+                    if (dx != 0.0 || dy != 0.0) && !f.mods.cloak {
                         f.unhide();
                     }
                     step * f.mods.pace() * f.status.speed() * if f.curses.intersects(ModFlags::SLOW) { modifiers::SLOW_PACE } else { 1.0 }
                 }
-                None => step,
+                None => step * (1.0 + p.ride),
             };
             if dx != 0.0 || dy != 0.0 {
                 // Axis-separated moves let the player slide along walls. The
@@ -1146,6 +1301,7 @@ impl HubInstance {
                 p.monsters = None;
                 (p.x, p.y) = *arrival;
                 p.dir = (0.0, 0.0);
+                p.queued.clear();
                 p.portal_guard = true;
                 p.sitting = false;
                 self.announce_arrival(idx, Some(def.name.clone()), out);
@@ -1159,9 +1315,12 @@ impl HubInstance {
         self.announce_map(idx, via_portal, out);
         let p = &self.players[idx];
         let info = p.info();
+        let headgear = p.headgear_msg();
         for o in self.players.iter().filter(|o| o.map == p.map && o.profile.user_id != p.profile.user_id) {
             out.push((o.profile.user_id, HubEvent::Control(ServerMsg::PlayerAppeared { player: info.clone() })));
+            out.push((o.profile.user_id, HubEvent::Control(headgear.clone())));
         }
+        self.announce_rider(idx, out);
     }
 
     /// `map_enter` (then `pose` for everyone sitting there) to the player.
@@ -1193,6 +1352,12 @@ impl HubInstance {
         for entity_id in sitting.chain(resting) {
             out.push((p.profile.user_id, HubEvent::Control(ServerMsg::Pose { entity_id, pose: pose::SIT })));
         }
+        // What everyone here (the player too) wears on the head.
+        for o in others.iter().copied().chain(std::iter::once(p)) {
+            out.push((p.profile.user_id, HubEvent::Control(o.headgear_msg())));
+        }
+        // Who rides here (the player too).
+        self.announce_mounts(idx, out);
     }
 
     fn emit_snapshots(&mut self, out: &mut Outgoing) {
@@ -1803,6 +1968,34 @@ mod tests {
     }
 
     #[test]
+    fn two_inputs_in_one_tick_both_move() {
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
+        let mut out = Vec::new();
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        let (_, x0, _) = hub.position_of(1).unwrap();
+        // A burst: two frames land before the tick, then a stop frame.
+        hub.input(1, 1, 1.0, 0.0);
+        hub.input(1, 2, 1.0, 0.0);
+        hub.tick(&mut out);
+        assert_eq!(last_snapshot(&out, 1).unwrap().ack_seq, 1, "one input per tick");
+        hub.input(1, 3, 0.0, 0.0);
+        hub.tick(&mut out);
+        assert_eq!(last_snapshot(&out, 1).unwrap().ack_seq, 2);
+        hub.tick(&mut out);
+        assert_eq!(last_snapshot(&out, 1).unwrap().ack_seq, 3);
+        hub.tick(&mut out);
+        // Exactly the two steps the client predicted, none lost or added.
+        let (_, x1, _) = hub.position_of(1).unwrap();
+        assert!((x1 - x0 - 0.6).abs() < 1e-4, "two steps of 0.3, got {}", x1 - x0);
+        // A backlog past the bound drops the oldest instead of queueing latency.
+        for seq in 4..4 + INPUT_QUEUE as u32 + 2 {
+            hub.input(1, seq, 0.0, 1.0);
+        }
+        hub.tick(&mut out);
+        assert_eq!(last_snapshot(&out, 1).unwrap().ack_seq, 4 + 2, "two oldest dropped");
+    }
+
+    #[test]
     fn portal_moves_player_and_guard_prevents_bounce() {
         let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
         let mut out = Vec::new();
@@ -2224,12 +2417,12 @@ mod tests {
     }
 
     #[test]
-    fn back_slide_goes_away_from_the_aim_even_while_moving() {
+    fn standing_back_slide_goes_toward_the_aim() {
         let mut stage = skill_stage("swordsman", 5, &[("slide", 1)]);
         let (_, px, py) = stage.position_of(1).unwrap();
         let mut out = Vec::new();
         stage.input(1, 1, 0.0, 0.0);
-        stage.act(1, [8, 0], 1); // aim 1 m east
+        stage.act(1, [-8, 0], 1); // aim 1 m west
         stage.tick(&mut out);
         let (_, x, y) = stage.position_of(1).unwrap();
         assert!(x < px - 2.0, "slid west from {px} to {x}");
@@ -2244,7 +2437,7 @@ mod tests {
         assert!(fighter(&stage, 1).travel.is_some());
         let (_, px, _) = stage.position_of(1).unwrap();
         let mut out = Vec::new();
-        stage.act(1, [8, 0], 1 << super::cast::TRAVEL_SLOT);
+        stage.act(1, [-8, 0], 1 << super::cast::TRAVEL_SLOT);
         stage.tick(&mut out);
         let (_, x, _) = stage.position_of(1).unwrap();
         assert!(x < px - 2.0, "slid west from {px} to {x}");

@@ -94,11 +94,13 @@ impl MonsterBlock {
     pub fn new(level: u32, archetype: Archetype, players: u32) -> Self {
         let ml = level.max(1);
         let (hp_pct, ac_mod, die, interval) = match archetype {
-            Archetype::Swarm => (100, -1, Dice::new(1, 4, 0), 1600),
-            Archetype::Chaser => (70, 0, Dice::new(1, 6, 0), 1000),
-            Archetype::Tank => (400, 2, Dice::new(1, 10, 0), 2000),
-            Archetype::Elite => (600, 2, Dice::new(2, 6, 0), 1400),
-            Archetype::Boss => (6000, 4, Dice::new(2, 10, 0), 1200),
+            // Intervals are paced so a crowd's blows stay readable: even a
+            // chaser swings at most ~37 times a minute (COMBAT.md "Cadence").
+            Archetype::Swarm => (100, -1, Dice::new(1, 4, 0), 2200),
+            Archetype::Chaser => (70, 0, Dice::new(1, 6, 0), 1600),
+            Archetype::Tank => (400, 2, Dice::new(1, 10, 0), 2600),
+            Archetype::Elite => (600, 2, Dice::new(2, 6, 0), 2000),
+            Archetype::Boss => (6000, 4, Dice::new(2, 10, 0), 1800),
             // HP is its rolled hit count (`Horde::plant`), it never strikes,
             // and AC 1 leaves only a natural 1 to miss it.
             Archetype::Plant => (0, -(9 + (ml / 8) as i32) + 1, Dice::new(0, 1, 0), u32::MAX),

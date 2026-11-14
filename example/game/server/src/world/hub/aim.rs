@@ -6,7 +6,7 @@
 use super::area::Area;
 use super::fight::Fighter;
 use super::{HubPlayer, MapIdx};
-use crate::world::combat::skills::{Effect, MoveMode, Payload, Shape, SkillDef, Target};
+use crate::world::combat::skills::{Effect, MoveMode, Payload, Shape, SkillDef, Target, TargetKind};
 use crate::world::horde::storage::FLAG_BOSS;
 use crate::world::horde::Horde;
 
@@ -199,6 +199,14 @@ impl Field<'_> {
     }
 }
 
+/// A group skill on monster `m`: centred on what crowds around it.
+fn group_on(field: &Field<'_>, def: &SkillDef, slv: u8, m: (u16, f32, f32), at: impl Fn(f32, f32) -> Aimed) -> Aimed {
+    let group = field.monsters_near(m.1, m.2, reach_of(def, slv));
+    let n = group.len().max(1) as f32;
+    let (cx, cy) = (group.iter().map(|g| g.1).sum::<f32>() / n, group.iter().map(|g| g.2).sum::<f32>() / n);
+    Aimed { monster: Some(field.tag(m.0)), ..at(cx, cy) }
+}
+
 /// It strikes monsters at once (a nova, a taunt), rather than laying
 /// ground that waits for them (an aura, a sanctum).
 fn strikes_now(def: &SkillDef, slv: u8) -> bool {
@@ -208,28 +216,94 @@ fn strikes_now(def: &SkillDef, slv: u8) -> bool {
         .any(|a| a.payload.hostile() && !matches!(a.payload, Payload::Barrier) && !a.timing.lasting(slv) && a.timing.trigger <= 0.0)
 }
 
+/// A buff with at most this many seconds left counts as gone: auto-cast
+/// renews it on whoever is about to lose it.
+pub(super) const REFRESH_SECS: f32 = 3.0;
+/// Auto-cast heals an ally only below this share of their HP (a scratch
+/// is not worth the SP).
+const AUTO_HEAL_BELOW: f32 = 0.9;
+
+/// How a press asks for its target (`Press::default()`: a plain press
+/// with automatic targeting, as pickup bonuses cast).
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Press {
+    /// The skill's index in the book: the buff it leaves is known by it.
+    pub skill: Option<u16>,
+    /// The tick of the press.
+    pub now: u32,
+    /// Ticks of [`REFRESH_SECS`].
+    pub refresh: u32,
+    /// An auto-cast slot: only a target that needs the skill (an ally
+    /// without its buff, a real wound), else no cast and nothing spent.
+    pub auto: bool,
+    /// Manual aiming with a pointer: enemy skills pick the monster nearest
+    /// the pointer, ground skills land on it.
+    pub manual: bool,
+}
+
 /// Picks where a skill goes; `None` = no valid target, nothing is spent.
 pub(super) fn aim_skill(field: &Field<'_>, caster: &HubPlayer, def: &SkillDef, slv: u8) -> Option<Aimed> {
+    aim_press(field, caster, def, slv, &Press::default())
+}
+
+/// [`aim_skill`] for a press: auto-cast and manual aiming (COMBAT.md §4.3).
+pub(super) fn aim_press(field: &Field<'_>, caster: &HubPlayer, def: &SkillDef, slv: u8, press: &Press) -> Option<Aimed> {
     let (px, py) = (caster.x, caster.y);
     let aim = (caster.aim[0] != 0 || caster.aim[1] != 0)
         .then(|| (caster.aim[0] as f32 * AIM_UNIT, caster.aim[1] as f32 * AIM_UNIT));
+    // Where the pointer is on the ground, when the player aims by hand.
+    let pointer = aim.filter(|_| press.manual).map(|(ax, ay)| (px + ax, py + ay));
     let range = def.range;
     let base = Aimed { x: px, y: py, ox: px, oy: py, dir: facing_dir(caster.facing), ally: None, monster: None };
     let at = |x: f32, y: f32| Aimed { x, y, dir: norm(x - px, y - py).unwrap_or(base.dir), ..base };
     let on = |m: (u16, f32, f32)| Aimed { monster: Some(field.tag(m.0)), ..at(m.1, m.2) };
     let ally = |p: &HubPlayer| Aimed { ally: Some(p.profile.user_id), ..at(p.x, p.y) };
+    // Who still wants the buff this skill leaves (everyone, if it leaves none).
+    let timed = press.skill.filter(|_| def.timed_buff(slv));
+    let needs = |f: &Fighter| timed.is_none_or(|s| f.buff_left(s, press.now) <= press.refresh);
+    let d2 = |p: &HubPlayer| (p.x - px).powi(2) + (p.y - py).powi(2);
+
+    // Travel goes where the player walks, standing still where they point;
+    // with neither (a resting gamepad, touch) the archetype decides below.
+    if def.travels()
+        && let Some(dir) = norm(caster.dir.0, caster.dir.1).or_else(|| aim.and_then(|(ax, ay)| norm(ax, ay)))
+    {
+        return Some(match def.target {
+            Target::Escape => Aimed { dir, ..base },
+            _ => Aimed { x: px + dir.0 * range.max(1.0), y: py + dir.1 * range.max(1.0), dir, ..base },
+        });
+    }
+    // Manual aiming: the monster nearest the pointer, or the pointer itself.
+    if let Some((qx, qy)) = pointer {
+        match def.target.kind() {
+            TargetKind::Enemy => {
+                let q2 = |m: &(u16, f32, f32)| (m.1 - qx).powi(2) + (m.2 - qy).powi(2);
+                let m = field.monsters_near(px, py, range).into_iter().min_by(|a, b| q2(a).total_cmp(&q2(b)))?;
+                return Some(match def.target {
+                    Target::NearestGroup => group_on(field, def, slv, m, at),
+                    _ => on(m),
+                });
+            }
+            TargetKind::Ground => {
+                let (dx, dy) = (qx - px, qy - py);
+                let d = (dx * dx + dy * dy).sqrt();
+                let k = if d > range && d > 0.0 { range / d } else { 1.0 };
+                return Some(at(px + dx * k, py + dy * k));
+            }
+            _ => {}
+        }
+    }
     match def.target {
         // A nova or a taunt around the caster waits for something to hit.
         Target::Caster if strikes_now(def, slv) => field.nearest(px, py, reach_of(def, slv)).map(|_| base),
+        // Auto-cast keeps a self buff up, never recasts it early.
+        Target::Caster if press.auto && caster.fighter.as_ref().is_some_and(|f| !needs(f)) => None,
         Target::Caster => Some(base),
         Target::Nearest => field.nearest(px, py, range).map(on),
         Target::Strongest => field.strongest(px, py, range).map(on),
         Target::NearestGroup => {
             let first = field.nearest(px, py, range)?;
-            let group = field.monsters_near(first.1, first.2, reach_of(def, slv));
-            let n = group.len().max(1) as f32;
-            let (cx, cy) = (group.iter().map(|m| m.1).sum::<f32>() / n, group.iter().map(|m| m.2).sum::<f32>() / n);
-            Some(Aimed { monster: Some(field.tag(first.0)), ..at(cx, cy) })
+            Some(group_on(field, def, slv, first, at))
         }
         Target::Densest | Target::Spread => field.densest(px, py, range, reach_of(def, slv)).map(|(x, y)| at(x, y)),
         Target::Line | Target::Front | Target::Aim => {
@@ -249,6 +323,7 @@ pub(super) fn aim_skill(field: &Field<'_>, caster: &HubPlayer, def: &SkillDef, s
             };
             Some(Aimed { x: px + dir.0 * d, y: py + dir.1 * d, dir, ..base })
         }
+        // Standing still with no pointer (travel otherwise returned above).
         Target::Escape => {
             let slide = def.effects.iter().any(|e| matches!(e, Effect::Move { mode: MoveMode::Slide, .. }));
             let near = field.monsters_near(px, py, ESCAPE_SCAN);
@@ -257,34 +332,50 @@ pub(super) fn aim_skill(field: &Field<'_>, caster: &HubPlayer, def: &SkillDef, s
                 let (cx, cy) = (near.iter().map(|m| m.1).sum::<f32>() / n, near.iter().map(|m| m.2).sum::<f32>() / n);
                 norm(px - cx, py - cy)
             });
-            let dir = match (aim.and_then(|(ax, ay)| norm(ax, ay)), away.flatten()) {
-                // A slide goes back from the aim, a blink along it.
-                (Some(a), _) => {
-                    if slide {
-                        (-a.0, -a.1)
-                    } else {
-                        a
-                    }
-                }
-                (None, Some(away)) => away,
-                (None, None) => {
-                    let f = base.dir;
-                    if slide { (-f.0, -f.1) } else { f }
-                }
-            };
+            let dir = away.flatten().unwrap_or_else(|| {
+                let f = base.dir;
+                if slide { (-f.0, -f.1) } else { f }
+            });
             Some(Aimed { dir, ..base })
         }
-        Target::Allies => Some(Aimed { ally: Some(caster.profile.user_id), ..base }),
+        // The nearest member (the caster first) who lacks the buff or is
+        // about to lose it. Nobody: auto-cast waits, a press renews it
+        // around the caster.
+        Target::Allies => {
+            let pick = field.allies(px, py, range).filter(|(_, f)| needs(f)).min_by(|a, b| d2(a.0).total_cmp(&d2(b.0)));
+            match pick {
+                Some((p, _)) => Some(ally(p)),
+                None if press.auto => None,
+                None => Some(Aimed { ally: Some(caster.profile.user_id), ..base }),
+            }
+        }
+        // Lowest HP share, ties to the nearest; auto-cast leaves scratches.
         Target::MostWoundedAlly => {
+            let share = |f: &Fighter| f.hp as f32 / f.max_hp.max(1) as f32;
             let (p, _) = field
                 .allies(px, py, range)
-                .filter(|(_, f)| f.hp < f.max_hp)
-                .min_by(|a, b| (a.1.hp as f32 / a.1.max_hp as f32).total_cmp(&(b.1.hp as f32 / b.1.max_hp as f32)))?;
+                .filter(|(_, f)| f.hp < f.max_hp && (!press.auto || share(f) < AUTO_HEAL_BELOW))
+                .min_by(|a, b| share(a.1).total_cmp(&share(b.1)).then(d2(a.0).total_cmp(&d2(b.0))))?;
             Some(ally(p))
         }
+        // The most crowded ally still without the buff; auto-cast only
+        // when monsters crowd someone.
         Target::MostThreatenedAlly => {
-            let (p, _) = field.allies(px, py, range).max_by_key(|(p, _)| field.threat(p))?;
-            Some(ally(p))
+            let crowded: Vec<(&HubPlayer, bool, usize)> =
+                field.allies(px, py, range).map(|(p, f)| (p, needs(f), field.threat(p))).collect();
+            let most = |need: bool| {
+                crowded
+                    .iter()
+                    .filter(|c| c.1 || !need)
+                    .max_by(|a, b| a.2.cmp(&b.2).then(d2(b.0).total_cmp(&d2(a.0))))
+                    .map(|c| (c.0, c.2))
+            };
+            let (p, n) = match most(true) {
+                Some(found) => found,
+                None if press.auto => return None,
+                None => most(false)?,
+            };
+            (!press.auto || n > 0).then(|| ally(p))
         }
         Target::DensestAllies => {
             let r = reach_of(def, slv);

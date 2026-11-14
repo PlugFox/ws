@@ -29,6 +29,13 @@ extension type GameView._(JSObject _) implements JSObject {
   /// Light radius of the focused unit in cells (0 = no limit): beyond it
   /// the world sinks into fog and [Row.flagFade] units dissolve.
   external void setLightRadius(double cells);
+
+  /// Camera shake, [strength] 0..1 over [ms] (skipped with reduced motion).
+  external void shakeCamera(double strength, int ms);
+
+  /// A map event for the engine's weather effects (`weather.ts`):
+  /// `{phase, id, name, startMs, durationMs}`.
+  external void setEnvironmentEvent(String json);
   external int spriteIndex(String name);
   external int actionIndex(String name);
   @JS('upsertEntities')
@@ -41,6 +48,9 @@ extension type GameView._(JSObject _) implements JSObject {
   external void renderFrame(double renderTime);
   external void setLabel(double entityId, String? text, String kind);
   external double pickEntity(double clientX, double clientY);
+
+  /// Pickup bubble (`showBonus` id) under a client-space point, or NaN.
+  external double pickBonus(double clientX, double clientY);
   @JS('pickGround')
   external bool _pickGround(double clientX, double clientY, JSFloat32Array out);
   external void showDialog(String specJson);
@@ -77,8 +87,12 @@ extension type GameView._(JSObject _) implements JSObject {
   /// a negative gender removes them.
   external void setLook(double entityId, int gender, int hair, int hairColor, int bodyColor);
 
-  /// Health bar under a player's name on combat maps (0..1; NaN hides it).
+  /// Health bar under a player's name on combat maps, or under an elite
+  /// or boss (0..1; NaN hides it). Kept until the entity's plate shows.
   external void setHealth(double entityId, double fraction);
+
+  /// Mana bar under a player's health bar on combat maps (0..1; NaN hides it).
+  external void setMana(double entityId, double fraction);
 
   /// Revive ring over a downed player, filling while an ally stands by
   /// (0..1; NaN removes it).
@@ -112,6 +126,9 @@ extension type GameView._(JSObject _) implements JSObject {
 
   /// Weapon family a character holds (`sword`, `bow`, ...): its attack sound.
   external void setWeapon(double entityId, String kind);
+
+  /// Headgear a character wears: item ids, comma separated ('' = none).
+  external void setHeadgear(double entityId, String items);
 
   /// A unit's own sound: `attack`, `hit`, `die`, `move`.
   external void unitSound(double entityId, String event);
@@ -228,6 +245,19 @@ extension type GameView._(JSObject _) implements JSObject {
   /// phase, pips, enraged}`; rank 0 drops that bar; '' drops them all).
   external void setBossBar(String json);
 
+  /// The monster affix table (server `AFFIX_DEFS`): `{defs: [{id, bit,
+  /// name, desc, color}], ranks, expPct, dropPct, extraPct, hpPct}`.
+  external void setAffixDefs(String json);
+
+  /// A monster's affixes: bit mask (0 clears), state (1 frenzied, 2 shield
+  /// broken, 4 minion) and its display name; the engine draws its stars,
+  /// plate, auras and boss-bar line.
+  external void setAffixes(double entityId, int bits, int state, String name);
+
+  /// A moment of an affix trick (`blink_mark`, `blink`, `summon`, `split`,
+  /// `frenzy`, `thorns`, `fuse`) at a cell position.
+  external void affixEvent(double entityId, String name, double x, double y);
+
   /// Own buff icons (`[{skill, ms}]` JSON; ms 0 = until toggled off).
   external void setBuffs(String json);
 
@@ -276,11 +306,15 @@ extension type GameView._(JSObject _) implements JSObject {
   external void setInventory(String json);
 
   /// A merchant's window `{npc, name, items}`; '' closes it. Events:
-  /// `shop_buy` / `shop_sell {npc, item, count}`, `shop_close`.
+  /// `shop_deal {npc, buy: [{id, count}], sell: [{id, count}]}` (the
+  /// cart), `shop_close`.
   external void showShop(String json);
 
   /// A line in the open shop's footer.
   external void shopNote(String text);
+
+  /// The cart went through ([spent] and [earned] zeny): the shop empties it.
+  external void shopDone(int spent, int earned);
 
   /// Player trade: `{request: {name, level}}`, `{pending: {name}}`, the
   /// table `{partner, mine, theirs, myLock, theirLock, myOk, theirOk}`,
@@ -302,9 +336,18 @@ extension type GameView._(JSObject _) implements JSObject {
   /// equip: [10 ids]}`; '' closes it.
   external void showInspect(String json);
 
-  /// The entity under the pointer (NaN = none): its name lights up, and
-  /// the cursor is a hand while [clickable].
+  /// The entity under the pointer (NaN = none): its name lights up.
   external void setHover(double entityId, bool clickable);
+
+  /// The cursor over the game world: `talk` (an NPC), `attack` (a
+  /// monster), `pick` (loot), `walk` (open ground, click to move),
+  /// `portal`, `wait`, `disabled`; '' the default arrow.
+  external void setCursor(String kind);
+
+  /// Click to move: the ground marker at cell ([x], [y]) where the walk
+  /// ends, a ring that closes and fades; [kind] 1 = it stops short of the
+  /// click (nothing reachable nearer). NaN removes it.
+  external void markMove(double x, double y, int kind);
 
   /// The potion the `hp` / `sp` orb would drink now ('' = none).
   external String quickPotion(String kind);
@@ -329,7 +372,8 @@ extension type GameView._(JSObject _) implements JSObject {
   external double skillReach(String skill);
 
   /// Aim guide around the local player: offset and reach in cells; NaN hides.
-  external void setAimGuide(double x, double y, double reach);
+  /// With [skill] (the one being aimed) it shows that skill's areas.
+  external void setAimGuide(double x, double y, double reach, [String skill]);
 
   /// Controller navigation of the open window or side panel (`Nav` codes);
   /// true when the UI took it, false when it is game input.
@@ -426,9 +470,13 @@ abstract final class Act {
   /// Combat stance (weapon drawn).
   static const ready = 6;
 
-  /// Swing with a weapon (most families) / with a dagger.
+  /// Swing with a weapon (the engine plays whichever of the two the class
+  /// and weapon family draw the weapon in).
   static const attack2 = 7;
   static const attack3 = 8;
+
+  /// The skill wind-up pose (held on its last frame).
+  static const cast = 9;
 }
 
 /// Entity row layout for `upsertEntities` (engine `units.ts`):
@@ -455,6 +503,10 @@ abstract final class Row {
   static const flagBurning = 256;
   static const flagPoisoned = 512;
   static const flagTaunted = 1024;
+
+  /// Burrowed: drawn as a moving mound of earth instead of the sprite
+  /// (2048 is the engine's own leap bit).
+  static const flagBurrowed = 4096;
 }
 
 /// Growable row buffer for `upsertEntities`; reused every frame.

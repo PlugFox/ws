@@ -49,6 +49,23 @@ pub struct Mods {
     pub evil_damage: i32,
     /// SP back per kill by a skill (Soul Drain).
     pub soul_drain: i32,
+    /// Percent chance a basic attack swings once more (Double Attack).
+    pub double: u32,
+    /// Percent chance a weapon hit leaves the monster Poisoned (Enchant
+    /// Poison).
+    pub venom: u32,
+    /// Drop chances of the player's own loot rolls raised by this fraction
+    /// (Steal).
+    pub loot: f32,
+    /// Hidden while moving too: walking does not end it (Cloaking).
+    pub cloak: bool,
+    /// Can strike out of hiding: the basic attack and skill presses work
+    /// and end it, the first blow with advantage (Hiding, Cloaking).
+    pub ambush: bool,
+    /// The next damaging spell (fixed dice) deals as if this fraction of
+    /// its dice rolled their maximum; casting it ends the buff (Mystical
+    /// Amplification).
+    pub amplify: f32,
 }
 
 impl Mods {
@@ -79,6 +96,12 @@ impl Mods {
         self.evil_resist += o.evil_resist;
         self.evil_damage += o.evil_damage;
         self.soul_drain += o.soul_drain;
+        self.double += o.double;
+        self.venom += o.venom;
+        self.loot += o.loot;
+        self.cloak |= o.cloak;
+        self.ambush |= o.ambush;
+        self.amplify += o.amplify;
     }
 
     /// Multiplier of the basic attack interval (never below a third).
@@ -99,6 +122,11 @@ impl Mods {
         }
         let keep = (1.0 - self.resist).clamp(0.0, 1.0);
         ((a.max(0) as f32) * keep).round() as i32
+    }
+
+    /// Hidden and still able to strike from it (an ambush comes next).
+    pub fn lurking(&self) -> bool {
+        self.hidden && self.ambush
     }
 
     /// The critical threshold of a d20 (20 = only natural 20s).

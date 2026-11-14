@@ -81,6 +81,7 @@ impl HubInstance {
             return;
         }
         self.boss_bar(map, out);
+        self.monster_plates(map, out);
         self.buff_icons(map, out);
         if self.tick.is_multiple_of(BOSS_SCAN)
             && let Some(h) = self.horde.as_ref()
@@ -115,10 +116,25 @@ impl HubInstance {
         // The run's modifiers for the HUD (the table to name them first).
         out.push((user_id, HubEvent::Control(modifiers::defs_msg())));
         out.push((user_id, HubEvent::Control(horde.modifiers().state_msg(modifiers::scope::STAGE))));
+        // The affix table and the affixed monsters alive (affix.rs).
+        self.affix_hello(user_id, out);
         let Some(m) = missions::find(mission) else { return };
         let brief = missions::brief_with(m, horde.rules(), horde.catalog(), &horde.modifiers().monsters());
         out.push((user_id, HubEvent::Control(ServerMsg::MissionInfo { brief })));
         out.push((user_id, HubEvent::Control(self.stage_clock())));
+    }
+
+    /// The stage's mission (`None` in a hub).
+    pub(super) fn mission_info(&self) -> Option<&'static missions::MissionInfo> {
+        match &self.kind {
+            InstanceKind::Stage { mission, .. } => missions::find(mission),
+            InstanceKind::Hub { .. } => None,
+        }
+    }
+
+    /// The level a won run's clear bonus is paid at (`LevelBand::clear_level`).
+    fn clear_level(&self, level: u32) -> u32 {
+        self.mission_info().map_or(level, |m| m.levels.clear_level(level))
     }
 
     fn stage_clock(&self) -> ServerMsg {
@@ -145,6 +161,9 @@ impl HubInstance {
         }
         let mods = self.modifiers();
         let chest = if victory { self.chest_tables() } else { Vec::new() };
+        // The clear bonus is paid at the mission band's floor at least.
+        let band = self.mission_info().map(|m| m.levels);
+        let clear_level = |level: u32| band.map_or(level, |b| b.clear_level(level));
         // The modifiers' clear bonus per player (user, exp, zeny), for the
         // result screen.
         let mut mod_pay: Vec<(u32, u64, u64)> = Vec::new();
@@ -167,7 +186,7 @@ impl HubInstance {
             out.push((uid, HubEvent::Control(msg)));
             // The clear bonus, with what the last kills dropped.
             if let Some(f) = p.fighter.as_mut() {
-                let bonus = if victory { items::victory_zeny(f.level) } else { 0 };
+                let bonus = if victory { items::victory_zeny(clear_level(f.level)) } else { 0 };
                 let amount = std::mem::take(&mut f.zeny) + bonus;
                 if bonus > 0 {
                     out.push((uid, HubEvent::Control(ServerMsg::Notification { message: format!("Mission bonus: {bonus} zeny") })));
@@ -210,7 +229,7 @@ impl HubInstance {
                 seat: seat as u8,
                 exp: f.run_exp,
                 zeny: f.run_zeny,
-                clear_zeny: if victory { items::victory_zeny(f.level) } else { 0 },
+                clear_zeny: if victory { items::victory_zeny(self.clear_level(f.level)) } else { 0 },
                 mod_exp,
                 mod_zeny,
                 items: self.run.seats()[seat].loot.iter().map(|&(id, n)| (id.to_string(), n)).collect(),

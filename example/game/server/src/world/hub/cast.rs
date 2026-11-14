@@ -14,7 +14,7 @@
 //! the caster's DC), so bolts and storms never whiff; skills that swing the
 //! weapon roll to hit like the basic attack.
 
-use super::aim::{aim_skill, norm, Aimed, Field, BODY};
+use super::aim::{aim_press, norm, Aimed, Field, Press, BODY, REFRESH_SECS};
 use super::area::Area;
 use super::fight::{Fighter, Vital};
 use super::{facing_of, HubEvent, HubInstance, HubPlayer, MapIdx, Outgoing};
@@ -23,7 +23,7 @@ use crate::world::combat::skills::{
     Act, DamageFx, Effect, EffectDice, Follow as FollowFx, HealFx, MoveMode, Payload, Shape, SkillBook, SkillDef, Target,
 };
 use crate::world::combat::{cantrip_k, save_dc, Condition, Damage, DamageType, Dice, Mods, Rng};
-use crate::world::horde::storage::FLAG_BOSS;
+use crate::world::horde::storage::{FLAG_BOSS, FLAG_REFLECT};
 use crate::world::horde::Horde;
 use crate::world::map::WalkGrid;
 use crate::world::protocol::{hit, look, HitEvent, ServerMsg, Telegraph, MONSTER_ENTITY_BASE};
@@ -160,6 +160,13 @@ pub(super) fn scaled(dice: Dice, scale_k: bool, mult: f32, bonus: f32, cl: u32) 
     d
 }
 
+/// Bonus damage of an amplified spell: `fraction` of its dice as if they
+/// rolled their maximum (each such die adds `(sides - 1) / 2` over its
+/// average).
+pub(super) fn amplified(d: Dice, fraction: f32) -> i32 {
+    (fraction.clamp(0.0, 1.0) * d.count as f32 * (d.sides as f32 - 1.0) / 2.0).round() as i32
+}
+
 /// How an effect looks on the ground.
 pub(super) fn look_of(act: &Act) -> u8 {
     if act.timing.trigger > 0.0 {
@@ -222,6 +229,18 @@ fn flight(act: &Act, aimed: &Aimed, x: f32, y: f32) -> f32 {
     ((x - aimed.ox).powi(2) + (y - aimed.oy).powi(2)).sqrt() / act.timing.speed
 }
 
+/// A piercing projectile: a line with a flight speed, once (no ground, no
+/// target limit or chain). It strikes every monster on the line as the
+/// arrow reaches it (Piercing Arrow).
+fn pierces(act: &Act, slv: u8) -> bool {
+    act.area.shape == Shape::Line
+        && act.timing.speed > 0.0
+        && !act.timing.lasting(slv)
+        && act.timing.trigger <= 0.0
+        && act.area.limit.at(slv) <= 0.0
+        && act.area.chain.at(slv) <= 0.0
+}
+
 /// Whether an act leaves ground with a telegraph id.
 fn keeps_id(act: &Act, slv: u8) -> bool {
     act.timing.lasting(slv)
@@ -244,11 +263,22 @@ pub(super) fn telegraphs(def: &SkillDef, slv: u8, caster: &HubPlayer, aimed: &Ai
         }
         let n = count_of(act, slv);
         let t = &act.timing;
-        let fly = flight(act, aimed, aimed.x, aimed.y);
+        let fly = match area {
+            // A piercing arrow flies the whole line.
+            Area::Rect { half_len, .. } if pierces(act, slv) => 2.0 * half_len / t.speed,
+            _ => flight(act, aimed, aimed.x, aimed.y),
+        };
         let span = if t.lasting(slv) { t.secs.at(slv) } else { (n - 1) as f32 * t.every + fly };
         let follow = match act.area.follow {
             FollowFx::Caster => caster.profile.character_id,
             FollowFx::Target => match (aimed.monster, aimed.ally) {
+                (Some((s, _)), _) => MONSTER_ENTITY_BASE + s as u32,
+                (None, Some(uid)) => entity_of(uid),
+                _ => 0,
+            },
+            // A single target is struck wherever it goes (`land`): its
+            // marker goes with it.
+            FollowFx::None if point => match (aimed.monster, aimed.ally) {
                 (Some((s, _)), _) => MONSTER_ENTITY_BASE + s as u32,
                 (None, Some(uid)) => entity_of(uid),
                 _ => 0,
@@ -292,23 +322,45 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
     let (slv, hz, now, def) = (cx.slv, cx.hz, cx.now, cx.def);
     let uid = caster.profile.user_id;
     let mut zone = cx.zone;
+    // A cast out of hiding ends it; weapon blows of that cast roll with
+    // advantage (an ambush). A pickup bonus casting for the player does not.
+    let ambush = mods.lurking() && cx.power.is_none();
+    if ambush && let Some(f) = caster.fighter.as_mut() {
+        f.unhide();
+    }
     for effect in &def.effects {
         let act = match effect {
             Effect::Move { mode, distance } => {
-                let to = moved(walk, caster.x, caster.y, aimed.dir, distance.at(slv).max(0.0), *mode);
+                // Behind: through the picked target, `distance` past it.
+                let total = match mode {
+                    MoveMode::Behind => ((aimed.x - caster.x).powi(2) + (aimed.y - caster.y).powi(2)).sqrt() + distance.at(slv).max(0.0),
+                    _ => distance.at(slv).max(0.0),
+                };
+                let to = moved(walk, caster.x, caster.y, aimed.dir, total, *mode);
                 (caster.x, caster.y) = to;
                 // What follows starts from where the caster ended up.
                 (aimed.ox, aimed.oy) = to;
                 continue;
             }
             Effect::Act(act) => act,
-            Effect::Passive(_) | Effect::Pending(_) => continue,
+            Effect::Passive(_) | Effect::Mount | Effect::Pending(_) => continue,
         };
         let t = &act.timing;
         let load = match &act.payload {
             Payload::Damage(DamageFx { dice, extra, scale_k, mult, bonus, kind, save, knockback }) => {
                 let (base, kind, to_hit) = match dice {
-                    EffectDice::Fixed(d) => (scaled(*d, *scale_k, mult.at(slv), bonus.at(slv), cl), *kind, None),
+                    EffectDice::Fixed(d) => {
+                        let mut d = scaled(*d, *scale_k, mult.at(slv), bonus.at(slv), cl);
+                        // Mystical Amplification: this cast is the next
+                        // spell; the buff ends with it.
+                        if mods.amplify > 0.0 && cx.power.is_none() {
+                            d.bonus += amplified(d, mods.amplify);
+                            if let Some(f) = caster.fighter.as_mut() {
+                                f.spend_amplify();
+                            }
+                        }
+                        (d, *kind, None)
+                    }
                     EffectDice::Weapon => {
                         let (d, k) = weapon.damage(class, cl);
                         let to_hit = weapon.to_hit(cl) + mods.to_hit;
@@ -330,6 +382,9 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
                     caster: uid,
                     bane: mods.evil_damage,
                     drain: mods.soul_drain,
+                    // Riders of the weapon: Enchant Poison, the ambush.
+                    venom: (to_hit.is_some() && mods.venom > 0).then(|| (mods.venom, ticks16(VENOM_SECS, hz))),
+                    advantage: ambush && to_hit.is_some(),
                 };
                 Load::Damage { blow, knock: knockback.at(slv) }
             }
@@ -369,7 +424,9 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
         } else {
             0
         };
-        let ally = aimed.ally.or_else(|| (def.target == Target::Caster && !act.payload.hostile()).then_some(uid));
+        // A self skill's friendly payload lands on the caster (an escape's
+        // too: Tunnel Drive hides where it ends).
+        let ally = aimed.ally.or_else(|| (matches!(def.target, Target::Caster | Target::Escape) && !act.payload.hostile()).then_some(uid));
         let follow = match act.area.follow {
             FollowFx::Caster => Follow::Player(uid),
             FollowFx::Target => match (aimed.monster, aimed.ally) {
@@ -383,6 +440,39 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
                 _ => Follow::None,
             },
         };
+        // A piercing arrow: one homing hit per monster on the line, due
+        // when the arrow gets there (none twice, none missed for walking
+        // on), on a small box facing the flight (the knockback's way).
+        if pierces(act, slv)
+            && let Area::Rect { dir, .. } = area
+        {
+            let mut on = Vec::new();
+            area.monsters(horde, &mut on);
+            let store = horde.store();
+            for s in on {
+                let (mx, my) = (store.x[s as usize], store.y[s as usize]);
+                let along = ((mx - aimed.ox) * dir.0 + (my - aimed.oy) * dir.1).max(0.0);
+                let at = now + ticks_of(along / t.speed, hz);
+                lives.push(Live {
+                    id: 0,
+                    map: caster.map,
+                    skill: cx.skill,
+                    caster: uid,
+                    next: at,
+                    until: at,
+                    pulse: 0,
+                    area: Area::Rect { x: mx, y: my, dir, half_len: 0.5, half_wid: 0.5 },
+                    follow: Follow::Monster(s, store.generation[s as usize]),
+                    point: true,
+                    trap: None,
+                    limit: 0,
+                    chain: (0, 0.0),
+                    ally: None,
+                    load: load.clone(),
+                });
+            }
+            continue;
+        }
         let n = count_of(act, slv);
         let spread = if act.area.spread { spread_targets(horde, &aimed, def.range, n) } else { Vec::new() };
         for i in 0..n {
@@ -440,7 +530,7 @@ pub(super) fn moved(walk: &WalkGrid, x: f32, y: f32, dir: (f32, f32), total: f32
             }
             (x, y)
         }
-        MoveMode::Blink => {
+        MoveMode::Blink | MoveMode::Behind => {
             let mut d = total;
             while d > 0.0 {
                 let (nx, ny) = (x + dir.0 * d, y + dir.1 * d);
@@ -505,8 +595,8 @@ impl HubInstance {
                     continue;
                 }
             }
-            // Down, stunned, frozen or turned to stone: no casting.
-            if !f.is_up() || f.status.held() {
+            // Down, stunned, frozen, turned to stone or terrified: no casting.
+            if !f.is_up() || f.status.helpless() {
                 if f.casting.take().is_some() {
                     casts.push(cancel(entity));
                 }
@@ -545,9 +635,10 @@ impl HubInstance {
             }
 
             // New presses, lowest slot first; one skill per tick. Playing
-            // dead allows nothing.
+            // dead allows nothing; a thief's hiding allows a strike out of it
+            // (`land` ends the hiding).
             let Some(f) = self.players[idx].fighter.as_ref() else { continue };
-            if f.mods.hidden {
+            if f.mods.hidden && !f.mods.ambush {
                 continue;
             }
             for slot in (0..16).filter(|s| pressed & (1 << s) != 0) {
@@ -560,6 +651,10 @@ impl HubInstance {
                 if level == 0
                     || !def.ready()
                     || def.passive
+                    // Mounting is MOUNT_REQ's; riding and spear skills
+                    // need the mount and the spear.
+                    || def.mounts()
+                    || !def.usable_with(f.riding, f.weapon.kind)
                     || busy
                     || !rooted_ok
                     || f.cooldowns[skill as usize] > 0
@@ -568,14 +663,29 @@ impl HubInstance {
                     continue;
                 }
                 let field = Field { horde, players: &self.players, map };
-                let Some(aimed) = aim_skill(&field, &self.players[idx], def, level) else { continue };
+                // An auto-cast slot fires only at a target that needs it and
+                // aims itself; a press by hand follows the pointer when the
+                // player aims manually.
+                let prefs = self.players[idx].prefs;
+                let auto = prefs.auto & (1 << slot) != 0;
+                let press = Press {
+                    skill: Some(skill),
+                    now,
+                    refresh: ticks_of(REFRESH_SECS, hz),
+                    auto,
+                    manual: prefs.manual_aim && !auto,
+                };
+                let Some(aimed) = aim_press(&field, &self.players[idx], def, level, &press) else { continue };
                 let cast_ticks = (def.cast_secs(level) * hz).round() as u32;
                 let cooldown_ms = (def.cooldown_secs(level) * 1000.0).round() as u32;
                 let zone = self.next_zone;
                 self.next_zone = self.next_zone.wrapping_add(zone_ids(def, level)).max(1);
                 let areas = telegraphs(def, level, &self.players[idx], &aimed, zone, &self.players);
                 let p = &mut self.players[idx];
-                if def.target != Target::Escape && (aimed.x, aimed.y) != (p.x, p.y) {
+                if def.travels() {
+                    // A travel skill faces where it goes.
+                    p.facing = facing_of(aimed.dir.0, aimed.dir.1);
+                } else if def.target != Target::Escape && (aimed.x, aimed.y) != (p.x, p.y) {
                     let d = norm(aimed.x - p.x, aimed.y - p.y).unwrap_or(aimed.dir);
                     p.facing = facing_of(d.0, d.1);
                 }
@@ -629,6 +739,10 @@ impl HubInstance {
         }
         let mut lives = std::mem::take(&mut self.lives);
         let mut dispels: Vec<Area> = Vec::new();
+        // Spells meeting the map's sewage (`culvert.rs`): fire fizzles out,
+        // cold freezes it over.
+        let mut sewage: Vec<(DamageType, Area)> = Vec::new();
+        let env = &self.env;
         let walk = &self.world.map(map).walk;
         let secs = horde.director_elapsed();
         lives.retain_mut(|l| {
@@ -644,6 +758,20 @@ impl HubInstance {
             }
             if now < l.next || matches!(l.load, Load::Ward { .. }) {
                 return true;
+            }
+            if let Load::Damage { blow, .. } = &l.load
+                && matches!(blow.damage.kind, DamageType::Fire | DamageType::Cold)
+                && l.caster != 0
+            {
+                let (x, y) = l.area.centre();
+                if env.ground_is(x, y, super::culvert::SEWAGE) {
+                    sewage.push((blow.damage.kind, l.area));
+                    // Burning ground cannot burn on sewage: it goes out.
+                    if blow.damage.kind == DamageType::Fire && l.pulse > 0 {
+                        ended.push(l.id);
+                        return false;
+                    }
+                }
             }
             if matches!(l.load, Load::Dispel) {
                 dispels.push(l.area);
@@ -701,6 +829,7 @@ impl HubInstance {
         lives.append(&mut self.lives);
         self.lives = lives;
         ailments(horde, &mut self.dice, now, hz, hits, kills);
+        self.sewage_meets(map, &sewage, &mut casts);
         for area in dispels {
             ended.extend(self.dispel_hazards(map, &area));
         }
@@ -806,7 +935,18 @@ fn act(
         Load::Damage { blow, knock } => {
             let targets = foes(l, horde);
             let before = kills.len();
-            strike(horde, rng, &targets, blow, hits, kills);
+            let reflected = strike(horde, rng, &targets, blow, hits, kills);
+            if reflected > 0
+                && let Some(p) = players.iter_mut().find(|p| p.profile.user_id == blow.caster)
+                && let Some(f) = p.fighter.as_mut()
+                && f.is_up()
+            {
+                // A shell that turns spells back: half of it, on the caster
+                // (it stings, but never downs them by itself).
+                let taken = f.take_from(reflected, false, false);
+                f.hp = f.hp.max(1);
+                hits.push(HitEvent { target: p.profile.character_id, amount: taken as u32, flags: (blow.damage.kind as u8) << 4 });
+            }
             let slain = (kills.len() - before) as i32;
             if slain > 0
                 && blow.drain > 0
@@ -887,6 +1027,15 @@ fn act(
     }
 }
 
+/// Seconds an envenomed weapon's poison lasts (Enchant Poison).
+pub(super) const VENOM_SECS: f32 = 4.0;
+
+/// An envenomed weapon hit: Poisoned for `ticks` (the longer timer is
+/// kept, never stacked; plants shrug it off).
+pub(super) fn envenom(horde: &mut Horde, s: u16, ticks: u16) {
+    horde.store_mut().afflict(s, Condition::Poisoned, ticks);
+}
+
 /// Puts a condition on a monster; fire remembers the strongest `k` lit.
 fn inflict(horde: &mut Horde, s: u16, c: Condition, ticks: u16, k: u32) {
     let store = horde.store_mut();
@@ -927,7 +1076,8 @@ fn ailments(horde: &mut Horde, rng: &mut Rng, now: u32, hz: f32, hits: &mut Vec<
         let s = horde.store().alive()[k];
         let i = s as usize;
         let status = horde.store().status_of(s);
-        if !status.ailing() || !(now + s as u32).is_multiple_of(second) {
+        // Burrowed: out of reach of everything, ailments included.
+        if !status.ailing() || !(now + s as u32).is_multiple_of(second) || horde.store().burrowed(s) {
             continue;
         }
         let burn = horde.store().burn_k[i] as u32;
@@ -999,6 +1149,8 @@ pub(super) fn wound(
     if status.resists_all() {
         amount /= 2;
     }
+    // Affixes: the shield soaks, Armoured cuts, Thorns tallies (affix.rs).
+    let amount = super::affix::absorb(horde, s, amount, damage.kind);
     horde.store_mut().hp[s as usize] -= amount;
     if amount > 0 {
         horde.flinch(s);
@@ -1026,19 +1178,29 @@ pub(super) struct Blow {
     bane: i32,
     /// SP back to the caster per kill (Soul Drain).
     drain: i32,
+    /// Percent chance a weapon hit poisons (Enchant Poison), and for how
+    /// many ticks.
+    venom: Option<(u32, u16)>,
+    /// The weapon roll has advantage (struck out of hiding).
+    advantage: bool,
 }
 
-/// One hit on each of `targets`.
-fn strike(horde: &mut Horde, rng: &mut Rng, targets: &[u16], blow: Blow, hits: &mut Vec<HitEvent>, kills: &mut Vec<Kill>) {
+/// One hit on each of `targets`. Returns the damage turned back on the
+/// caster by reflecting monsters ([`FLAG_REFLECT`]: a spell, i.e. a blow
+/// without a weapon roll, does nothing to them and half of it comes back).
+fn strike(horde: &mut Horde, rng: &mut Rng, targets: &[u16], blow: Blow, hits: &mut Vec<HitEvent>, kills: &mut Vec<Kill>) -> i32 {
+    let mut reflected = 0;
     for &s in targets {
-        if horde.store().hp[s as usize] <= 0 {
+        // Dead, or dived since it was aimed at.
+        if horde.store().hp[s as usize] <= 0 || horde.store().burrowed(s) {
             continue;
         }
         let id = MONSTER_ENTITY_BASE + s as u32;
         let (crit, saved) = match blow.to_hit {
             Some(bonus) => {
                 let ac = horde.block(s).ac + horde.store().status_of(s).ac();
-                match attack_roll(rng, bonus, ac, horde.store().status_of(s).advantage_against(), 20) {
+                let advantage = (horde.store().status_of(s).advantage_against() + blow.advantage as i8).clamp(-1, 1);
+                match attack_roll(rng, bonus, ac, advantage, 20) {
                     AttackOutcome::Miss => {
                         hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS });
                         continue;
@@ -1048,6 +1210,16 @@ fn strike(horde: &mut Horde, rng: &mut Rng, targets: &[u16], blow: Blow, hits: &
             }
             None => (false, resist(horde, rng, s, blow.dc, blow.save.is_some())),
         };
+        if blow.to_hit.is_none() && horde.store().flags[s as usize] & FLAG_REFLECT != 0 {
+            let element = horde.catalog().get(horde.store().kind[s as usize]).element;
+            let mut amount = blow.damage.resolve(rng, false, saved, element, 0);
+            if let Some(e) = blow.extra {
+                amount += Damage::new(e, blow.damage.kind).resolve(rng, false, saved, element, 0);
+            }
+            reflected += amount / 2;
+            hits.push(HitEvent { target: id, amount: 0, flags: hit::GUARD });
+            continue;
+        }
         let mut amount = wound(horde, rng, s, blow.damage, blow.extra, crit, saved, blow.k);
         if blow.bane > 0 && horde.catalog().get(horde.store().kind[s as usize]).evil {
             amount += blow.bane;
@@ -1060,38 +1232,42 @@ fn strike(horde: &mut Horde, rng: &mut Rng, targets: &[u16], blow: Blow, hits: &
         if horde.store().hp[s as usize] <= 0 {
             flags |= hit::KILL;
             kills.push((s, blow.caster));
-        } else if let Some((condition, ticks)) = blow.save {
-            // A weapon swing that hit still allows a save against its rider.
-            let failed = if blow.to_hit.is_some() { !resist(horde, rng, s, blow.dc, true) } else { !saved };
-            if failed {
-                inflict(horde, s, condition, ticks, blow.k);
-                if condition == Condition::Taunted {
-                    horde.store_mut().taunter[s as usize] = blow.caster;
+        } else {
+            if let Some((condition, ticks)) = blow.save {
+                // A weapon swing that hit still allows a save against its rider.
+                let failed = if blow.to_hit.is_some() { !resist(horde, rng, s, blow.dc, true) } else { !saved };
+                if failed {
+                    inflict(horde, s, condition, ticks, blow.k);
+                    if condition == Condition::Taunted {
+                        horde.store_mut().taunter[s as usize] = blow.caster;
+                    }
                 }
+            }
+            if let Some((chance, ticks)) = blow.venom
+                && amount > 0
+                && rng.die(100) <= chance
+            {
+                envenom(horde, s, ticks);
             }
         }
         hits.push(HitEvent { target: id, amount: amount as u32, flags });
     }
+    reflected
 }
 
 /// Learned levels, hotbar and passives of a fighter from a loadout.
 pub(super) fn equip(f: &mut Fighter, book: &SkillBook, loadout: &crate::world::combat::Loadout) {
     f.skills = vec![0; book.len()];
     f.cooldowns.resize(book.len(), 0);
-    let mut passive = Mods::default();
     for (i, def) in book.iter() {
         let lvl = loadout.level(&def.id).min(def.max_level);
-        if lvl == 0 || !def.usable_by(f.class) {
-            continue;
-        }
-        f.skills[i as usize] = lvl;
-        for e in &def.effects {
-            if let Effect::Passive(b) = e {
-                passive.add(&b.mods(lvl));
-            }
+        if lvl > 0 && def.usable_by(f.class) {
+            f.skills[i as usize] = lvl;
         }
     }
-    f.set_passive(passive);
+    // Riding passives count while mounted, weapon ones with that weapon.
+    f.riding = book.rides(loadout);
+    f.set_passive(book.passives(f.class, loadout, f.weapon.kind));
     for (slot, h) in f.hotbar.iter_mut().enumerate() {
         *h = book.find(loadout.slot(slot)).map(|(i, _)| i).filter(|&i| f.skills[i as usize] > 0);
     }
@@ -1099,7 +1275,7 @@ pub(super) fn equip(f: &mut Fighter, book: &SkillBook, loadout: &crate::world::c
     // (later in the book), then the higher level.
     f.travel = book
         .iter()
-        .filter(|(i, def)| f.skills[*i as usize] > 0 && !def.passive && def.effects.iter().any(|e| matches!(e, Effect::Move { .. })))
+        .filter(|(i, def)| f.skills[*i as usize] > 0 && !def.passive && def.travels())
         .max_by_key(|(i, _)| (*i, f.skills[*i as usize]))
         .map(|(i, _)| i);
 }

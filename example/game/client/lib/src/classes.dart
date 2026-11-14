@@ -14,6 +14,7 @@ const classBodies = <String, List<String>>{
   'mage': ['mage', 'wizard', 'high_wizard'],
   'archer': ['archer', 'hunter', 'sniper'],
   'acolyte': ['acolyte', 'priest', 'high_priest'],
+  'thief': ['thief', 'assassin', 'assassin_cross'],
 };
 
 /// Body slug of a class (`archetype`, the character's class id) at a tier
@@ -25,10 +26,23 @@ String bodyJob(String archetype, [int tier = 1]) {
   return line[(tier < 1 ? 1 : (tier > 3 ? 3 : tier)) - 1];
 }
 
+/// Mounted bodies (riding a Peco Peco) of the bodies that have one: the
+/// engine's body slugs, as `bodyJob` gives them.
+const mountedBodies = <String, String>{'crusader': 'crusader_peco', 'paladin': 'paladin_peco'};
+
+/// The skill that gets on and off the mount (`mount_req`, never a cast).
+const mountSkill = 'peco_ride';
+
+/// Body slug of a character, riding or not: the mounted body when its
+/// class body has one (a rider whose tier has none walks).
+String riderJob(String archetype, int tier, {required bool riding}) {
+  final job = bodyJob(archetype, tier);
+  return riding ? (mountedBodies[job] ?? job) : job;
+}
+
 /// Bodies of the class lines not playable yet (shown locked at creation),
 /// by the all-bodies pack's id (`client/bodies/sprites/<id>_<m|f>.json`).
 const lockedBodies = <String, String>{
-  'thief': 'thief',
   'merchant': 'merchant',
   'super_novice': 'super_novice',
   'ninja': 'ninja',

@@ -776,7 +776,8 @@ mod tests {
         assert_eq!(errors(&out, C), vec!["trade_busy"]);
         // Shops wait for the trade.
         let mut out = Vec::new();
-        hub.trade(A, "merchant", "red_potion", 1, false, &mut out);
+        let one = crate::world::trade::ShopOrder { buy: vec![("red_potion".into(), 1)], sell: Vec::new() };
+        hub.shop(A, "merchant", one, &mut out);
         assert_eq!(errors(&out, A), vec!["trade_busy"]);
     }
 

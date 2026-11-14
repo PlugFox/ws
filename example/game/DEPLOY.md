@@ -39,9 +39,10 @@ What the stages do:
    `ASSETS_BASE=/assets/v/<build id>`; the page's script tags get the build
    id too. Source maps and `.deps` are dropped.
 3. **server**: `cargo build --release --locked` (migrations embedded).
-4. **pack**: the local `dist` minus what the game never requests (class
-   bodies and mounts, raw skill VFX sources, the colour customization
-   atlas, type declarations: ~160 MB of bake intermediates), then
+4. **pack**: the local `dist` minus what the game never requests (the
+   all-bodies pack `client/bodies/` with every RO class body and mount,
+   raw skill VFX sources, the colour customization atlas, type
+   declarations: ~160 MB of bake intermediates), then
    `pipeline/webp_pass.py` (location GLB atlases to WebP, sprite sheets,
    grass atlases and emotes to lossless WebP) and `deploy/precompress.sh`
    (`.br` + `.gz` beside every compressible file: js, json, html, svg,
@@ -50,6 +51,18 @@ What the stages do:
    shell), the binary at `/app/game_server`, the files under `/srv`.
    `HEALTHCHECK` runs `game_server healthcheck` (`GET /health` on the local
    port: 200 when the database answers).
+
+Every body the game draws ships inside the customization pack
+(`client/customization/`, index atlas + palettes), not the all-bodies
+pack: the class bodies of each tier and the mounted ones, the Crusader and
+Paladin on a Grand Peco (`crusader_peco`, `paladin_peco`, with their dyes
+and weapon layers; `pipeline/customization_baker.py` `JOB_BODIES`). A new
+mount or class body goes there too, so the image needs no new exception.
+The one use of the all-bodies pack is the creation screen's preview of the
+classes that are not playable yet (client `classes.dart` `lockedBodies`):
+those few `client/bodies/sprites/<id>_<m|f>.*` files (~3 MB) are let back
+in by `Dockerfile.dockerignore`; unlocking a class there means adding it to
+the customization pack and dropping its exception.
 
 Try it locally against the dev database before pushing:
 

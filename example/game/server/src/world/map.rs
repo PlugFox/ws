@@ -476,6 +476,9 @@ pub struct MapData {
     /// What grows on the field (`server/locations/<id>/plants.json`):
     /// planted by every stage on it (`horde/plants.rs`).
     pub plants: Option<crate::world::horde::plants::PlantRules>,
+    /// Baked hostile ground (`server/locations/<id>/hazards.json`): stages
+    /// on it run them with the mission's own (`world::environment`).
+    pub hazards: Vec<crate::world::environment::Hazard>,
     component_of: Vec<u32>,
     main_component: u32,
 }
@@ -557,6 +560,7 @@ impl MapData {
             heights,
             spawn: (sx as f32 + 0.5, sy as f32 + 0.5),
             plants: None,
+            hazards: Vec::new(),
             component_of,
             main_component,
         })
@@ -590,6 +594,7 @@ impl MapData {
         }
         let mut data = Self::new(manifest, walk, heights)?;
         data.plants = plants;
+        data.hazards = crate::world::environment::load_hazards(&server)?;
         Ok(data)
     }
 

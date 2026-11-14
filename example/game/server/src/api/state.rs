@@ -35,6 +35,19 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Display name of a location (`last_location_id` and the like): the
+    /// manifest name of a hub map, else the place of the mission played on
+    /// that map.
+    pub fn place_name(&self, map: &str) -> Option<String> {
+        let world = self.hub.as_ref().map(|h| h.world());
+        if let Some(w) = world
+            && let Some(i) = w.map_index(map)
+        {
+            return Some(w.map(i).manifest.name.clone());
+        }
+        crate::world::missions::MISSIONS.iter().find(|m| m.map == map).map(|m| m.place.to_string())
+    }
+
     pub fn new(
         config: AppConfig,
         pool: Db,

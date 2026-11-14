@@ -26,6 +26,9 @@ use crate::world::protocol::{hit, HitEvent, ServerMsg, Telegraph, MONSTER_ENTITY
 pub(super) const MAX_MOB_SKILLS: usize = 4;
 /// A monster looks at its skills this often (seconds).
 const CHECK_SECS: f32 = 1.0;
+/// After a skill lands a monster casts none of its skills for this long
+/// (seconds): a kind with several skills chains them no faster than this.
+const SKILL_GCD_SECS: f32 = 4.0;
 
 /// What one monster slot remembers about its skills.
 #[derive(Clone, Copy, Debug, Default)]
@@ -34,7 +37,7 @@ pub(super) struct Mind {
     generation: u8,
     fresh: bool,
     next_check: u32,
-    /// In a wind-up until this tick.
+    /// In a wind-up, then the global skill cooldown, until this tick.
     busy_until: u32,
     /// Tick each skill is ready again.
     ready: [u32; MAX_MOB_SKILLS],
@@ -69,6 +72,33 @@ pub(super) struct Hazard {
     /// Cast by an undead or a demon.
     evil: bool,
     load: HazardLoad,
+}
+
+impl Hazard {
+    /// Damage landing on `area` at tick `at`, then lasting until `until`
+    /// with a strike every `pulse` ticks (0: once); a saving throw against
+    /// `dc` halves it (and spares the rider). For effects that are no
+    /// monster skill (affixes, `affix.rs`).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn damage(
+        id: u32,
+        map: MapIdx,
+        area: Area,
+        at: u32,
+        until: u32,
+        pulse: u32,
+        dc: i32,
+        dice: Dice,
+        kind: DamageType,
+        rider: Option<(Condition, u16)>,
+    ) -> Hazard {
+        Hazard { id, map, next: at, until: until.max(at), pulse, area, dc, ranged: false, evil: false, load: HazardLoad::Damage { dice, kind, rider } }
+    }
+
+    /// A condition on whoever stands in `area` (a save against `dc` resists).
+    pub(super) fn condition(id: u32, map: MapIdx, area: Area, at: u32, until: u32, pulse: u32, dc: i32, condition: Condition, ticks: u16) -> Hazard {
+        Hazard { id, map, next: at, until: until.max(at), pulse, area, dc, ranged: false, evil: false, load: HazardLoad::Condition { condition, ticks, save: true } }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -110,7 +140,7 @@ fn plan<'a>(sk: &'a MonsterSkill, walk: &WalkGrid, mx: f32, my: f32, aim: (f32, 
                 let aimed = Aimed { x: aim.0, y: aim.1, ox: x, oy: y, dir, ally: None, monster: None };
                 out.push((area_of(act, 1, sk.range, &aimed, x, y).0, &**act));
             }
-            Effect::Passive(_) | Effect::Pending(_) => {}
+            Effect::Passive(_) | Effect::Mount | Effect::Pending(_) => {}
         }
     }
     out
@@ -166,7 +196,7 @@ fn land(c: &MobCast, sk: &MonsterSkill, horde: &mut Horde, walk: &WalkGrid, rng:
                 continue;
             }
             Effect::Act(act) => act,
-            Effect::Passive(_) | Effect::Pending(_) => continue,
+            Effect::Passive(_) | Effect::Mount | Effect::Pending(_) => continue,
         };
         let t = &act.timing;
         let lasting = t.lasting(1);
@@ -328,7 +358,7 @@ impl HubInstance {
             let store = horde.store();
             let kind = store.kind[s] as usize;
             let skills = &self.kind_skills[kind];
-            if skills.is_empty() || store.flags[s] & FLAG_FULL == 0 {
+            if skills.is_empty() || store.flags[s] & FLAG_FULL == 0 || store.burrowed(slot) {
                 continue;
             }
             let mind = &mut self.minds[s];
@@ -386,7 +416,7 @@ impl HubInstance {
             };
             let cast = ticks_of(def.cast, hz);
             mind.ready[j] = now + ticks_of(def.cooldown, hz);
-            mind.busy_until = now + cast + 1;
+            mind.busy_until = now + cast + 1 + ticks_of(SKILL_GCD_SECS, hz);
             let zone = self.next_zone;
             let planned = plan(def, walk, mx, my, aim, dir);
             let lasting = planned.iter().filter(|(_, a)| a.timing.lasting(1)).count() as u32;

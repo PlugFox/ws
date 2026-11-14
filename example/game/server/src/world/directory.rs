@@ -8,7 +8,7 @@
 
 use super::combat::Loadout;
 use super::hub::{Arrival, HubEvent, HubInstance, HubSimConfig, HubWorld, Outgoing, PlayerProfile};
-use super::protocol::{ChannelInfo, Look};
+use super::protocol::{CastPrefs, ChannelInfo, Look};
 use super::trade::{Settlement, TradeError, TradeVault};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -66,7 +66,8 @@ pub enum HubCommand {
     /// Where the player stands now (`None`: not here), e.g. to bring them
     /// back to the same spot after a short drop.
     Whereabouts { user_id: u32, reply: tokio::sync::oneshot::Sender<Option<Arrival>> },
-    Input { user_id: u32, seq: u32, dx: f32, dy: f32, aim: [i8; 2], slots: u16 },
+    /// `prefs`: the connection's manual aiming and auto-cast slots.
+    Input { user_id: u32, seq: u32, dx: f32, dy: f32, aim: [i8; 2], slots: u16, prefs: CastPrefs },
     /// Learned skills or hotbar changed (already validated).
     Loadout { user_id: u32, loadout: Loadout },
     Interact { user_id: u32, npc: String },
@@ -84,8 +85,8 @@ pub enum HubCommand {
     Flag { user_id: u32, flag: u8, x: f32, y: f32 },
     /// A local chat line (cleaned and rate limited by the socket).
     Chat { user_id: u32, text: String },
-    /// Buy or sell at a merchant NPC (checked here, applied by the socket).
-    Trade { user_id: u32, npc: String, item: String, count: u32, sell: bool },
+    /// Buy and sell at a merchant NPC (checked here, applied by the socket).
+    Shop { user_id: u32, npc: String, order: crate::world::trade::ShopOrder },
     /// Drink a potion (stages).
     UseItem { user_id: u32, item: String },
     /// Another player's worn gear (the player context menu).
@@ -448,9 +449,10 @@ async fn run_loop(
                         let spot = hub.position_of(user_id).map(|(map, x, y)| Arrival { map: map.into(), x, y });
                         let _ = reply.send(spot);
                     }
-                    HubCommand::Input { user_id, seq, dx, dy, aim, slots } => {
+                    HubCommand::Input { user_id, seq, dx, dy, aim, slots, prefs } => {
                         if hub.input(user_id, seq, dx, dy) {
                             hub.act(user_id, aim, slots);
+                            hub.cast_prefs(user_id, prefs);
                         }
                     }
                     HubCommand::Loadout { user_id, loadout } => hub.set_loadout(user_id, loadout, &mut out),
@@ -469,7 +471,7 @@ async fn run_loop(
                     HubCommand::Pose { user_id, pose } => hub.set_pose(user_id, pose, &mut out),
                     HubCommand::Flag { user_id, flag, x, y } => hub.flag(user_id, flag, x, y, &mut out),
                     HubCommand::Chat { user_id, text } => hub.chat(user_id, text, &mut out),
-                    HubCommand::Trade { user_id, npc, item, count, sell } => hub.trade(user_id, &npc, &item, count, sell, &mut out),
+                    HubCommand::Shop { user_id, npc, order } => hub.shop(user_id, &npc, order, &mut out),
                     HubCommand::UseItem { user_id, item } => hub.use_item(user_id, &item, &mut out),
                     HubCommand::Bag { user_id, bag } => hub.set_bag(user_id, bag, &mut out),
                     HubCommand::Inspect { user_id, target } => hub.inspect(user_id, target, &mut out),
@@ -665,7 +667,7 @@ mod tests {
         let (tx2, rx2) = outbox();
         dir.join(profile(2), Uuid::nil(), None, tx2).unwrap();
 
-        t1.commands.try_send(HubCommand::Input { user_id: 1, seq: 1, dx: 1.0, dy: 0.0, aim: [0, 0], slots: 0 }).unwrap();
+        t1.commands.try_send(HubCommand::Input { user_id: 1, seq: 1, dx: 1.0, dy: 0.0, aim: [0, 0], slots: 0, prefs: CastPrefs::default() }).unwrap();
         let snap = loop {
             if let HubEvent::Snapshot(b) = tokio::time::timeout(Duration::from_secs(2), rx1.recv()).await.unwrap().unwrap() {
                 let s = crate::world::protocol::Snapshot::decode(&b).unwrap();

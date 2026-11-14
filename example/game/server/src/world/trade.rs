@@ -278,6 +278,119 @@ pub trait TradeVault: Send + Sync + 'static {
     fn settle(&self, deal: Deal) -> Pin<Box<dyn Future<Output = Settlement> + Send + 'static>>;
 }
 
+/// Most lines on each side (buy, sell) of one merchant order.
+pub const MAX_ORDER_LINES: usize = 20;
+/// Most of one item on one order line (the shop window's cap).
+pub const MAX_ORDER_COUNT: u32 = 999;
+
+/// A merchant order (`ClientMsg::ShopDeal`): the shop window's cart, buys
+/// and sells together, made all at once or not at all. Selling goes
+/// first, so the loot sold pays for what is bought and frees bag room.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShopOrder {
+    /// Catalogue ids from the merchant's stock, with counts.
+    pub buy: Vec<(String, u32)>,
+    /// Instance keys from the bag (never what is worn), with counts.
+    pub sell: Vec<(String, u32)>,
+}
+
+/// What an order cost and brought in (`ServerMsg::ShopDone`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Receipt {
+    pub spent: u64,
+    pub earned: u64,
+}
+
+/// Why an order is refused before it reaches the bag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderError {
+    Empty,
+    TooManyLines,
+    /// A line of 0 or more than [`MAX_ORDER_COUNT`].
+    BadCount,
+    NotSoldHere,
+}
+
+impl OrderError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            OrderError::Empty => "shop_empty",
+            OrderError::TooManyLines => "shop_too_many",
+            OrderError::BadCount => "shop_bad_count",
+            OrderError::NotSoldHere => "not_sold_here",
+        }
+    }
+
+    pub const fn message(self) -> &'static str {
+        match self {
+            OrderError::Empty => "The cart is empty.",
+            OrderError::TooManyLines => "At most twenty different items to buy and to sell at once.",
+            OrderError::BadCount => "From 1 to 999 of each item.",
+            OrderError::NotSoldHere => "This merchant does not sell that.",
+        }
+    }
+}
+
+impl ShopOrder {
+    /// The order's shape and the merchant's `stock` (the hub, at the
+    /// merchant). The bag is checked when the order is applied.
+    pub fn check(&self, stock: &[&str]) -> Result<(), OrderError> {
+        if self.buy.is_empty() && self.sell.is_empty() {
+            return Err(OrderError::Empty);
+        }
+        if self.buy.len() > MAX_ORDER_LINES || self.sell.len() > MAX_ORDER_LINES {
+            return Err(OrderError::TooManyLines);
+        }
+        if self.buy.iter().chain(&self.sell).any(|(_, n)| !(1..=MAX_ORDER_COUNT).contains(n)) {
+            return Err(OrderError::BadCount);
+        }
+        if self.buy.iter().any(|(id, _)| !stock.contains(&id.as_str())) {
+            return Err(OrderError::NotSoldHere);
+        }
+        Ok(())
+    }
+
+    /// Applies a [checked](Self::check) order to `bag`: every sale, then
+    /// every purchase. All or nothing: on an error `bag` is untouched.
+    pub fn apply(&self, bag: &mut Bag) -> Result<Receipt, ItemError> {
+        let mut next = bag.clone();
+        let mut receipt = Receipt::default();
+        for (id, n) in &self.sell {
+            receipt.earned += next.sell(id, *n)?;
+        }
+        for (id, n) in &self.buy {
+            receipt.spent += next.buy(id, *n, &[id.as_str()])?;
+        }
+        *bag = next;
+        Ok(receipt)
+    }
+
+    /// Wire form (`protocol.rs`, 0x8C SHOP_DEAL, after the merchant): two
+    /// lists of {str item, var count}, buys then sells.
+    pub fn put(&self, b: &mut impl PutWire) {
+        for lines in [&self.buy, &self.sell] {
+            b.put_var(lines.len() as u64);
+            for (id, n) in lines {
+                b.put_str(id);
+                b.put_var((*n).into());
+            }
+        }
+    }
+
+    pub fn read(r: &mut Reader<'_>) -> Option<Self> {
+        let mut lines = || {
+            let n = r.var()?;
+            if n > MAX_ORDER_LINES as u64 {
+                return None;
+            }
+            (0..n).map(|_| Some((r.str()?, r.var32()?))).collect::<Option<Vec<_>>>()
+        };
+        let buy = lines()?;
+        let sell = lines()?;
+        Some(ShopOrder { buy, sell })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +507,57 @@ mod tests {
             o.set_item(&b, id, 1).unwrap();
         }
         assert_eq!(o.set_item(&b, ids[MAX_OFFER_ITEMS], 1), Err(TradeError::TooManyItems));
+    }
+
+    fn order(buy: &[(&str, u32)], sell: &[(&str, u32)]) -> ShopOrder {
+        let lines = |l: &[(&str, u32)]| l.iter().map(|(i, n)| (i.to_string(), *n)).collect();
+        ShopOrder { buy: lines(buy), sell: lines(sell) }
+    }
+
+    #[test]
+    fn a_shop_order_sells_first_then_buys_all_or_nothing() {
+        let price = |id: &str| u64::from(items::find(id).unwrap().price);
+        let sale = |id: &str| u64::from(items::sell_price(items::find(id).unwrap().price));
+        // The jellopy sold pays for part of the potions.
+        let start = bag(2 * price("red_potion") - 4 * sale("jellopy"), &[("jellopy", 10)]);
+        let mut b = start.clone();
+        let o = order(&[("red_potion", 2)], &[("jellopy", 4)]);
+        let r = o.apply(&mut b).unwrap();
+        assert_eq!(r, Receipt { spent: 2 * price("red_potion"), earned: 4 * sale("jellopy") });
+        assert_eq!((b.zeny, b.count("red_potion"), b.count("jellopy")), (0, 2, 6));
+        // One zeny short, or one jellopy more than owned: nothing moves.
+        for bad in [order(&[("red_potion", 3)], &[("jellopy", 4)]), order(&[("red_potion", 1)], &[("jellopy", 11)])] {
+            let mut b = start.clone();
+            assert!(bad.apply(&mut b).is_err(), "{bad:?}");
+            assert_eq!(b, start, "{bad:?}");
+        }
+        // The worn knife is not in the bag: it cannot be sold.
+        let mut b = start.clone();
+        assert_eq!(order(&[], &[("knife", 1)]).apply(&mut b), Err(ItemError::NotInBag));
+        // Selling frees the room a full bag needs for a purchase.
+        let mut full = Bag::default();
+        full.zeny = price("red_potion");
+        let others: Vec<&str> = items::catalogue().iter().map(|e| e.id).filter(|id| *id != "red_potion").take(3).collect();
+        full.items = (0..MAX_STACKS).map(|i| Stack { id: others[i % 3].into(), count: 1, attrs: Attrs { refine: (i / 3) as u8, ..Attrs::default() } }).collect();
+        let key = full.items[0].key();
+        let mut b = full.clone();
+        assert_eq!(order(&[("red_potion", 1)], &[]).apply(&mut b), Err(ItemError::BagFull));
+        assert!(order(&[("red_potion", 1)], &[(key.as_str(), 1)]).apply(&mut b).is_ok());
+    }
+
+    #[test]
+    fn shop_orders_are_checked_against_the_stock_and_their_shape() {
+        let stock = ["red_potion", "blue_potion"];
+        assert_eq!(order(&[("red_potion", 999)], &[("jellopy", 1)]).check(&stock), Ok(()));
+        assert_eq!(order(&[], &[]).check(&stock), Err(OrderError::Empty));
+        assert_eq!(order(&[("sword", 1)], &[]).check(&stock), Err(OrderError::NotSoldHere));
+        assert_eq!(order(&[("red_potion", 0)], &[]).check(&stock), Err(OrderError::BadCount));
+        assert_eq!(order(&[], &[("jellopy", MAX_ORDER_COUNT + 1)]).check(&stock), Err(OrderError::BadCount));
+        let many: Vec<(&str, u32)> = (0..=MAX_ORDER_LINES).map(|_| ("jellopy", 1)).collect();
+        assert_eq!(order(&[], &many).check(&stock), Err(OrderError::TooManyLines));
+        // The wire form bounds the lists too.
+        let mut w = bytes::BytesMut::new();
+        order(&[], &many).put(&mut w);
+        assert!(ShopOrder::read(&mut Reader::new(&w)).is_none());
     }
 }

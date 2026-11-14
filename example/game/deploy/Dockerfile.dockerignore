@@ -38,10 +38,17 @@ example/assets/dist/engine.bundle.*
 example/assets/dist/*.d.ts
 example/assets/dist/kit/
 # bake intermediates: every class body and mount (the customization pack is
-# what the game draws), raw skill VFX sources (the game plays
+# what the game draws, the Peco Peco riders included), raw skill VFX sources (the game plays
 # skills/effects/*), the skills source table (the server reads server/skills.json),
 # the colour customization atlas (the engine draws the index atlas)
-example/assets/dist/client/bodies/
+example/assets/dist/client/bodies/**
+# ...except the bodies of the classes the creation screen shows as locked
+# (charui.ts loadExternalBody; client classes.dart `lockedBodies`)
+!example/assets/dist/client/bodies/sprites/merchant_[mf].*
+!example/assets/dist/client/bodies/sprites/super_novice_[mf].*
+!example/assets/dist/client/bodies/sprites/ninja_[mf].*
+!example/assets/dist/client/bodies/sprites/gunslinger_[mf].*
+!example/assets/dist/client/bodies/sprites/taekwon_boy_[mf].*
 example/assets/dist/client/skills/vfx/
 example/assets/dist/client/skills/skills.json
 example/assets/dist/client/customization/sprites.png

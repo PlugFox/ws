@@ -7,7 +7,7 @@
 
 use super::dice::Dice;
 use super::rules::DamageType;
-use super::{Class, Condition, Mods};
+use super::{Class, Condition, Mods, WeaponKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -70,6 +70,34 @@ pub enum Target {
     DownedAlly,
 }
 
+/// What a target archetype points at, coarsely: manual aiming and the
+/// auto-cast checks follow it rather than single archetypes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetKind {
+    /// The caster itself (self buffs, novas around the caster).
+    Caster,
+    /// A party member, the caster included (heals, buffs, revives).
+    Ally,
+    /// A monster (bolts, homing hits, curses).
+    Enemy,
+    /// A point on the ground (storms, walls, traps, sanctums).
+    Ground,
+    /// A direction from the caster (lines, swings).
+    Direction,
+}
+
+impl Target {
+    pub fn kind(self) -> TargetKind {
+        match self {
+            Target::Caster => TargetKind::Caster,
+            Target::Allies | Target::MostWoundedAlly | Target::MostThreatenedAlly | Target::DownedAlly => TargetKind::Ally,
+            Target::Nearest | Target::NearestGroup | Target::Strongest => TargetKind::Enemy,
+            Target::Densest | Target::Spread | Target::Aim | Target::DensestAllies => TargetKind::Ground,
+            Target::Front | Target::Line | Target::Escape => TargetKind::Direction,
+        }
+    }
+}
+
 /// Shape of an effect's area (COMBAT.md §4.3). Sizes grow with the skill
 /// level (`Lin`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -106,6 +134,8 @@ pub enum Follow {
 pub enum MoveMode {
     Slide,
     Blink,
+    /// A blink to the picked target and `distance` past it (Back Stab).
+    Behind,
 }
 
 impl<'de> Deserialize<'de> for MoveMode {
@@ -113,6 +143,7 @@ impl<'de> Deserialize<'de> for MoveMode {
         match String::deserialize(d)?.as_str() {
             "slide" | "dash" => Ok(MoveMode::Slide),
             "blink" => Ok(MoveMode::Blink),
+            "behind" => Ok(MoveMode::Behind),
             other => Err(serde::de::Error::custom(format!("unknown move mode {other}"))),
         }
     }
@@ -251,8 +282,25 @@ pub struct BuffFx {
     pub evil_resist: Lin,
     pub evil_damage: Lin,
     pub soul_drain: Lin,
+    /// Percent chances: a basic attack swings once more (`double`), a
+    /// weapon hit poisons (`venom`).
+    pub double: Lin,
+    pub venom: Lin,
+    /// Fraction more drop chance on the player's own loot rolls.
+    pub loot: Lin,
+    /// Hidden while walking (Cloaking); strikes out of hiding (`ambush`).
+    pub cloak: bool,
+    pub ambush: bool,
+    /// The next damaging spell as if this fraction of its dice rolled
+    /// their maximum (Mystical Amplification).
+    pub amplify: Lin,
     /// On until cast again (Energy Coat).
     pub toggle: bool,
+    /// A passive that only counts while riding a Peco Peco (Peco Peco
+    /// Ride, Cavalier Mastery; on an active skill too: it is not cast) ...
+    pub riding: bool,
+    /// ... or only with a weapon of this family in hand (Spear Mastery).
+    pub weapon: Option<WeaponKind>,
 }
 
 impl BuffFx {
@@ -285,7 +333,18 @@ impl BuffFx {
             evil_resist: n(self.evil_resist),
             evil_damage: i(self.evil_damage),
             soul_drain: i(self.soul_drain),
+            double: i(self.double).clamp(0, 100) as u32,
+            venom: i(self.venom).clamp(0, 100) as u32,
+            loot: n(self.loot).max(0.0),
+            cloak: self.cloak,
+            ambush: self.ambush,
+            amplify: n(self.amplify).max(0.0),
         }
+    }
+
+    /// A passive's conditions hold for a rider (or not) holding `weapon`.
+    pub fn holds(&self, riding: bool, weapon: WeaponKind) -> bool {
+        (riding || !self.riding) && self.weapon.is_none_or(|w| w == weapon)
     }
 
     pub fn grants_temp_hp(&self) -> bool {
@@ -354,8 +413,12 @@ pub enum Effect {
     /// The caster moves (slides keep the facing, blinks skip the ground in
     /// between).
     Move { mode: MoveMode, distance: Lin },
-    /// Always on while learned.
+    /// Always on while learned (while its conditions hold, [`BuffFx::holds`]).
     Passive(BuffFx),
+    /// Mounts or dismounts (Peco Peco Ride): riding is a state of the
+    /// character, kept between sessions and toggled with `MOUNT_REQ`
+    /// anywhere (town too), never cast.
+    Mount,
     /// Not cast by the server yet.
     Pending(String),
 }
@@ -395,9 +458,23 @@ pub struct SkillDef {
     pub cooldown: Lin,
     pub sp: Lin,
     pub effects: Vec<Effect>,
+    /// Castable only while riding (Brandish Spear) ...
+    pub riding: bool,
+    /// ... or only with a weapon of this family in hand (Spear Quicken).
+    pub weapon: Option<WeaponKind>,
 }
 
 impl SkillDef {
+    /// It toggles the mount (Peco Peco Ride).
+    pub fn mounts(&self) -> bool {
+        self.effects.iter().any(|e| matches!(e, Effect::Mount))
+    }
+
+    /// Its riding and weapon requirements hold.
+    pub fn usable_with(&self, riding: bool, weapon: WeaponKind) -> bool {
+        (riding || !self.riding) && self.weapon.is_none_or(|w| w == weapon)
+    }
+
     /// Every effect is one the server casts.
     pub fn ready(&self) -> bool {
         !self.effects.is_empty() && self.effects.iter().all(|e| !matches!(e, Effect::Pending(_)))
@@ -418,6 +495,23 @@ impl SkillDef {
     pub fn usable_by(&self, class: Class) -> bool {
         self.class.is_none_or(|c| c == class)
     }
+
+    /// It moves the caster (Back Slide, Blink, Shield Charge): a travel
+    /// skill, which goes where the player walks or points.
+    pub fn travels(&self) -> bool {
+        // A blink behind a monster (Back Stab) goes where its target is.
+        self.effects.iter().any(|e| matches!(e, Effect::Move { mode, .. } if *mode != MoveMode::Behind))
+    }
+
+    /// It leaves a timed buff on whom it reaches (Blessing, Increase AGI,
+    /// Endure; not toggles, nor auras that keep a buff up while they last):
+    /// recasting it on someone who has it wastes the cast.
+    pub fn timed_buff(&self, slv: u8) -> bool {
+        self.effects
+            .iter()
+            .filter_map(Effect::act)
+            .any(|a| matches!(&a.payload, Payload::Buff(b) if !b.toggle) && !a.timing.lasting(slv))
+    }
 }
 
 /// Learned levels and the hotbar of one character (stored as JSON).
@@ -428,6 +522,10 @@ pub struct Loadout {
     /// Skill id per slot; empty = free.
     #[serde(default)]
     pub hotbar: Vec<String>,
+    /// Riding a Peco Peco (asked for; it holds while a mount skill is
+    /// learned, [`SkillBook::rides`]). Kept between sessions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mounted: bool,
 }
 
 impl Loadout {
@@ -576,13 +674,15 @@ impl SkillBook {
                 cooldown: s.cooldown,
                 sp: s.sp,
                 effects,
+                riding: s.riding,
+                weapon: weapon_kind(&s.weapon).map_err(bad)?,
             });
         }
         let mut monster = Vec::with_capacity(raw.monster_skills.len());
         for m in &raw.monster_skills {
             let bad = |why: String| SkillBookError::Bad(m.id.clone(), why);
             let effects = m.effects.iter().map(|e| RawEffect::parse(e, false)).collect::<Result<Vec<_>, String>>().map_err(bad)?;
-            if effects.is_empty() || effects.iter().any(|e| matches!(e, Effect::Pending(_) | Effect::Passive(_))) {
+            if effects.is_empty() || effects.iter().any(|e| matches!(e, Effect::Pending(_) | Effect::Passive(_) | Effect::Mount)) {
                 return Err(bad("a monster skill needs castable effects".into()));
             }
             monster.push(MonsterSkill {
@@ -707,6 +807,33 @@ impl SkillBook {
                 slot.clear();
             }
         }
+        loadout.mounted = self.rides(loadout);
+    }
+
+    /// The character rides: mounted, with a mount skill learned.
+    pub fn rides(&self, loadout: &Loadout) -> bool {
+        loadout.mounted && self.skills.iter().any(|s| s.mounts() && loadout.level(&s.id) > 0)
+    }
+
+    /// The modifiers of the learned passives whose conditions hold (riding
+    /// per [`Self::rides`], `weapon` in hand) for a character of `class`.
+    pub fn passives(&self, class: Class, loadout: &Loadout, weapon: WeaponKind) -> Mods {
+        let riding = self.rides(loadout);
+        let mut m = Mods::default();
+        for s in self.skills.iter().filter(|s| s.usable_by(class)) {
+            let lvl = loadout.level(&s.id).min(s.max_level);
+            if lvl == 0 {
+                continue;
+            }
+            for e in &s.effects {
+                if let Effect::Passive(b) = e
+                    && b.holds(riding, weapon)
+                {
+                    m.add(&b.mods(lvl));
+                }
+            }
+        }
+        m
     }
 }
 
@@ -778,6 +905,11 @@ struct RawSkill {
     cooldown: Lin,
     #[serde(default)]
     sp: Lin,
+    #[serde(default)]
+    riding: bool,
+    /// Weapon family it needs in hand (`""` = any).
+    #[serde(default)]
+    weapon: String,
     /// Parsed per type: effects the server does not cast yet may use any
     /// fields.
     #[serde(default)]
@@ -786,6 +918,14 @@ struct RawSkill {
 
 fn one() -> u8 {
     1
+}
+
+/// A weapon family by its wire id (`""`: none asked for).
+fn weapon_kind(id: &str) -> Result<Option<WeaponKind>, String> {
+    if id.is_empty() {
+        return Ok(None);
+    }
+    WeaponKind::ALL.into_iter().find(|k| k.id() == id).map(Some).ok_or_else(|| format!("unknown weapon family {id}"))
 }
 
 fn one_u32() -> u32 {
@@ -852,8 +992,20 @@ struct RawEffect {
     evil_resist: Option<Lin>,
     evil_damage: Option<Lin>,
     soul_drain: Option<Lin>,
+    double: Option<Lin>,
+    venom: Option<Lin>,
+    loot: Option<Lin>,
+    amplify: Option<Lin>,
+    #[serde(default)]
+    cloak: bool,
+    #[serde(default)]
+    ambush: bool,
     #[serde(default)]
     toggle: bool,
+    #[serde(default)]
+    riding: bool,
+    #[serde(default)]
+    weapon: String,
     // Area.
     #[serde(default)]
     shape: Shape,
@@ -896,7 +1048,7 @@ struct RawSave {
 
 /// Effect types the server casts.
 const CAST: &[&str] =
-    &["damage", "heal", "condition", "push", "buff", "ward", "barrier", "revive", "move", "sp_regen", "cure", "dispel"];
+    &["damage", "heal", "condition", "push", "buff", "ward", "barrier", "revive", "move", "sp_regen", "cure", "dispel", "mount"];
 
 fn cells(l: Option<Lin>) -> Lin {
     let l = l.unwrap_or_default();
@@ -960,14 +1112,25 @@ impl RawEffect {
                 evil_resist: self.evil_resist.unwrap_or_default(),
                 evil_damage: self.evil_damage.unwrap_or_default(),
                 soul_drain: self.soul_drain.unwrap_or_default(),
+                double: self.double.unwrap_or_default(),
+                venom: self.venom.unwrap_or_default(),
+                loot: self.loot.unwrap_or_default(),
+                amplify: self.amplify.unwrap_or_default(),
+                cloak: self.cloak,
+                ambush: self.ambush,
                 toggle: self.toggle,
+                riding: self.riding,
+                weapon: weapon_kind(&self.weapon)?,
             })
         };
         let payload = match self.kind.as_str() {
             "move" => {
                 return Ok(Effect::Move { mode: self.mode.ok_or("move without a mode")?, distance: cells(self.distance) });
             }
-            "sp_regen" | "buff" if passive => return Ok(Effect::Passive(buff()?)),
+            // A riding buff is a passive of a mounted rider even on an
+            // active skill (Peco Peco Ride's pace).
+            "sp_regen" | "buff" if passive || self.riding => return Ok(Effect::Passive(buff()?)),
+            "mount" => return Ok(Effect::Mount),
             "sp_regen" => return Err("sp_regen is a passive".into()),
             "damage" => Payload::Damage(DamageFx {
                 dice: match self.dice.as_str() {

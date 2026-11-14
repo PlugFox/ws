@@ -19,6 +19,28 @@ pub const FLAG_BOSS: u8 = 2;
 pub const FLAG_LOS: u8 = 4;
 /// A plant (`plants.rs`): rooted, harmless, immune to every condition.
 pub const FLAG_PLANT: u8 = 8;
+/// Called by a Summoner or split off a Mirror (`hub/affix.rs`): it pays no
+/// experience, zeny or loot.
+pub const FLAG_MINION: u8 = 16;
+/// Burrowed (dived underground, `hub/boss.rs` Burrow, a burrowing
+/// monster's skill): it still moves, but nothing can target, hit, push or
+/// block it, and it neither strikes nor casts. Clients draw a moving mound
+/// ([`STATUS_BURROWED`] on the wire). See [`HordeStorage::set_burrowed`].
+pub const FLAG_BURROWED: u8 = 32;
+/// Turns spells back (a scripted boss's shell, `hub/boss.rs` traits):
+/// save-based blows on it do nothing to it and hit their caster for half
+/// (`hub/cast.rs` strike).
+pub const FLAG_REFLECT: u8 = 64;
+/// The wire's status bit of a burrowed monster (`status`, past the
+/// conditions' bits; kept by [`HordeStorage::tick_conditions`]).
+pub const STATUS_BURROWED: u16 = 1 << 15;
+
+/// [`HordeStorage::affix_state`] bits (the low ones are the wire's
+/// `protocol::affix_state`).
+pub const AFFIX_FRENZIED: u8 = 1;
+pub const AFFIX_SHIELD_BROKEN: u8 = 2;
+/// A Mirror that split already (it splits once).
+pub const AFFIX_SPLIT: u8 = 8;
 
 pub struct HordeStorage {
     pub x: Vec<f32>,
@@ -51,6 +73,18 @@ pub struct HordeStorage {
     pub stagger: Vec<u8>,
     /// Ticks before it can flinch again (no endless stun-lock).
     pub stagger_guard: Vec<u8>,
+    /// Affixes (`combat::affixes::AffixFlags` bits; 0 for nearly all).
+    pub affix: Vec<u16>,
+    /// What is left of a Shielded monster's absorb shield.
+    pub shield: Vec<i32>,
+    /// Seconds an affixed monster has lived (its tricks' clock).
+    pub affix_beat: Vec<u16>,
+    /// Seconds since it last took damage (saturating).
+    pub affix_quiet: Vec<u8>,
+    /// `AFFIX_*` bits.
+    pub affix_state: Vec<u8>,
+    /// Damage taken since the last affix beat (Thorns reflects it).
+    pub affix_taken: Vec<i32>,
     /// Dense list of live slots (iteration order).
     alive: Vec<u16>,
     /// Position of a slot in `alive` (`u16::MAX` when free).
@@ -81,6 +115,12 @@ impl HordeStorage {
             taunter: vec![0; capacity],
             stagger: vec![0; capacity],
             stagger_guard: vec![0; capacity],
+            affix: vec![0; capacity],
+            shield: vec![0; capacity],
+            affix_beat: vec![0; capacity],
+            affix_quiet: vec![0; capacity],
+            affix_state: vec![0; capacity],
+            affix_taken: vec![0; capacity],
             alive: Vec::with_capacity(capacity),
             alive_pos: vec![u16::MAX; capacity],
             free: (0..capacity as u16).collect(),
@@ -128,6 +168,12 @@ impl HordeStorage {
         self.taunter[s] = 0;
         self.stagger[s] = 0;
         self.stagger_guard[s] = 0;
+        self.affix[s] = 0;
+        self.shield[s] = 0;
+        self.affix_beat[s] = 0;
+        self.affix_quiet[s] = 0;
+        self.affix_state[s] = 0;
+        self.affix_taken[s] = 0;
         self.alive_pos[s] = self.alive.len() as u16;
         self.alive.push(slot);
         Some(slot)
@@ -163,6 +209,24 @@ impl HordeStorage {
         self.stagger_guard[s] = guard;
     }
 
+    /// Under the ground ([`FLAG_BURROWED`]).
+    pub fn burrowed(&self, slot: u16) -> bool {
+        self.flags[slot as usize] & FLAG_BURROWED != 0
+    }
+
+    /// Dives (`on`) or surfaces. Use [`super::Horde::set_burrowed`], which
+    /// also keeps the query index right.
+    pub fn set_burrowed(&mut self, slot: u16, on: bool) {
+        let s = slot as usize;
+        if on {
+            self.flags[s] |= FLAG_BURROWED;
+            self.status[s] |= STATUS_BURROWED;
+        } else {
+            self.flags[s] &= !FLAG_BURROWED;
+            self.status[s] &= !STATUS_BURROWED;
+        }
+    }
+
     pub fn is_plant(&self, slot: u16) -> bool {
         self.flags[slot as usize] & FLAG_PLANT != 0
     }
@@ -190,7 +254,7 @@ impl HordeStorage {
             if self.status[s] == 0 {
                 continue;
             }
-            let mut bits = 0;
+            let mut bits = self.status[s] & STATUS_BURROWED;
             for (i, t) in self.cond[s].iter_mut().enumerate() {
                 if *t > 0 {
                     *t -= 1;

@@ -8,9 +8,10 @@ const startIn = (page: Page) => page.locator('.u-missions .u-foot').getByRole('b
 
 // Quick start (lobby.rs `quick_start`): the mission window's Start goes
 // alone at once, with the window's modifiers; a party's leader starts the
-// party's run. `?mission=` (GAME_DEV) opens a party of one, whose
-// Modifiers button opens the window without a walk to a Kafra. (The
-// leader's ready check and a member's refused start: lobby.rs tests.)
+// party's run at once (there is no ready check). `?mission=` (GAME_DEV)
+// opens a party of one, whose Modifiers button opens the window without a
+// walk to a Kafra. (A member's refused start, who stays behind:
+// lobby.rs tests; the party outliving the run: party.spec.ts.)
 test('Start in the mission window launches at once, alone or as a party leader', async ({ page }, info) => {
   const errors = watchErrors(page);
   await signUp(page, `/?mission=${MISSION}`);

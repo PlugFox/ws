@@ -2,7 +2,8 @@
 // each registers, creates and selects a character, joins the hub and walks
 // in a circle around the spawn. For load tests and for watching remote
 // interpolation from a browser. With `--party CODE` the bots join that
-// mission lobby, mark themselves ready and follow the party into the stage.
+// party and follow it into the stage when its leader starts (there is no
+// ready check).
 //
 //   dart run tool/bot.dart [--server http://127.0.0.1:8088] [--count 5] [--party CODE]
 import 'dart:async';
@@ -58,7 +59,7 @@ Future<void> _bot(Uri server, String name, int index, int count, String party) a
   double? x, y;
   double cx = 0, cy = 0;
   void send(Uint8List frame) => ws.push(frame).ignore();
-  var ready = false;
+  var joined = false;
   ws.messages.listen((m) {
     if (m.isEmpty || Snapshot.isSnapshot(m[0])) return;
     switch (ServerMsg.decode(m)) {
@@ -68,10 +69,10 @@ Future<void> _bot(Uri server, String name, int index, int count, String party) a
         cx = ex;
         cy = ey - 4;
         // Join the party once, from the hub.
-        if (party.isNotEmpty && map.kind == 'hub' && !ready) send(ClientMsg.lobbyJoin(party));
-      case LobbyState() when !ready:
-        ready = true;
-        send(ClientMsg.lobbyReady(true));
+        if (party.isNotEmpty && map.kind == 'hub' && !joined) send(ClientMsg.lobbyJoin(party));
+      case LobbyState(:final lobby) when !joined:
+        joined = true;
+        stdout.writeln('$name joined party ${lobby.code} (${lobby.members.length})');
       case StageJoined(:final stageId):
         stdout.writeln('$name entered Stage-$stageId');
       case LobbyError(:final message):

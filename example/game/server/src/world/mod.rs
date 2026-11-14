@@ -4,6 +4,7 @@
 pub mod chat;
 pub mod combat;
 pub mod directory;
+pub mod environment;
 pub mod friends;
 pub mod horde;
 pub mod hub;

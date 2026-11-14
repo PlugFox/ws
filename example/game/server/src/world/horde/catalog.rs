@@ -33,6 +33,10 @@ struct RawDirector {
     weight: u32,
     #[serde(default)]
     xp_reward: u32,
+    /// Missions whose roster it belongs to (`missions.rs`); absent: the
+    /// original Poring Island roster ([`crate::world::missions::LEGACY_ROSTER`]).
+    #[serde(default)]
+    missions: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +138,9 @@ pub struct MonsterDef {
     /// Plants: the hits it takes to fell one, `(min, max)`, rolled per
     /// plant; (0, 0) for everything else.
     pub hits: (u16, u16),
+    /// Mission ids whose roster it is in (recipe `director.missions`);
+    /// empty: the legacy Poring Island roster (`missions::roster`).
+    pub missions: Vec<String>,
 }
 
 impl MonsterDef {
@@ -218,6 +225,7 @@ impl MonsterCatalog {
                 skills: m.skills.into_iter().map(|s| s.id).collect(),
                 evil: matches!(m.stats.race.as_str(), "undead" | "demon"),
                 hits: m.stats.hits.map_or((0, 0), |[a, b]| (a, b)),
+                missions: m.director.missions,
             })
             .collect();
         Self::new(defs)
@@ -274,6 +282,7 @@ pub(crate) fn test_def(id: &str, speed: f32, cost: u32, unlock: f32, boss: bool)
         evil: false,
         drops: Vec::new(),
         hits: (0, 0),
+        missions: Vec::new(),
     }
 }
 

@@ -7,20 +7,12 @@ import 'package:game_client/src/classes.dart';
 import 'package:game_client/src/contacts.dart';
 import 'package:game_client/src/engine.dart';
 import 'package:game_client/src/online.dart';
-import 'package:game_client/src/protocol.dart' show Look;
+import 'package:game_client/src/protocol.dart' show Look, weaponFamilyOf;
 import 'package:game_client/src/version.dart';
 import 'package:web/web.dart' as web;
 
 /// Character slots per account (the server enforces the same limit).
 const maxCharacters = 6;
-
-/// Friendly place names for the slot cards.
-const _places = {
-  'izlude': 'Izlude',
-  'izlude_in': 'Izlude',
-  'hub_central': 'Izlude',
-  'prt_fild08': 'Poring Island',
-};
 
 /// The engine's sign-in window, then its character slots and creation
 /// screens. Completes with the selected character once the server has it
@@ -53,13 +45,26 @@ Future<Map<String, Object?>> runLogin(
   // The server's pulse under the panels while on these screens only.
   final pulse = OnlinePoller(() => api.json('/api/online'), (s) => view.setServerStatus(jsonEncode(s.toJson())))..start();
   try {
-    // Back from the world with a session: straight to the characters.
-    if (api.token == null) await _signIn(api, view, notice: notice);
-    if (!_customization) {
-      await view.loadCustomization('$assetsBase/client/customization/').toDart;
-      _customization = true;
+    for (;;) {
+      // Back from the world with a session: straight to the characters.
+      if (api.token == null) await _signIn(api, view, notice: notice);
+      notice = null;
+      if (!_customization) {
+        await view.loadCustomization('$assetsBase/client/customization/').toDart;
+        _customization = true;
+      }
+      try {
+        final chosen = await _chooseCharacter(api, view);
+        if (chosen != null) return chosen;
+        // Log out: the server revoked the session; sign in again.
+        view.closeScreen();
+      } on SessionExpired catch (e) {
+        // The session could not be renewed: sign in again, saying why.
+        api.forget();
+        view.closeScreen();
+        notice = e.message;
+      }
     }
-    return await _chooseCharacter(api, view);
   } finally {
     pulse.stop();
     view.setServerStatus('');
@@ -119,8 +124,21 @@ Future<void> _signIn(Api api, GameView view, {String? notice}) {
   return done.future;
 }
 
-Future<Map<String, Object?>> _chooseCharacter(Api api, GameView view) {
-  final done = Completer<Map<String, Object?>>();
+/// The character slots: completes with the chosen character, or null when
+/// the player logs out (the session is revoked by then). Throws
+/// [SessionExpired] when the session ended under it.
+/// What a stored character wears that the paper doll draws: the held
+/// weapon's family and the headgear (equipment slots 0..2 and 4 of its
+/// `inventory.equip`; refines and cards trimmed off the ids).
+Map<String, Object> _wornLook(Map<String, Object?> c) {
+  final equip = ((c['inventory'] as Map?)?['equip'] as List?)?.map((e) => '$e'.split(RegExp(r'[+\[]')).first).toList() ?? const [];
+  final hats = [for (var i = 0; i < 3 && i < equip.length; i++) if (equip[i].isNotEmpty) equip[i]];
+  final weapon = equip.length > 4 ? weaponFamilyOf(equip[4]) : null;
+  return {'headgear': ?(hats.isEmpty ? null : hats), 'weapon': ?weapon};
+}
+
+Future<Map<String, Object?>?> _chooseCharacter(Api api, GameView view) {
+  final done = Completer<Map<String, Object?>?>();
   var chars = <Map<String, Object?>>[];
   int? selected;
 
@@ -135,11 +153,12 @@ Future<Map<String, Object?>> _chooseCharacter(Api api, GameView view) {
               'archetype': c['archetype'],
               'title': ?((c['stats'] as Map<String, Object?>?)?['title']),
               'level': c['level'],
-              'location': _places[c['last_location_id']] ?? c['last_location_id'],
+              'location': placeName(c),
               'look': {
                 ...Look.fromJson(c['look']).toUi(),
                 // The class body at the character's tier.
                 'job': bodyJob('${c['archetype']}', tierOfLevel((c['level'] as num?)?.toInt() ?? 1)),
+                ..._wornLook(c),
               },
             },
         ],
@@ -167,11 +186,24 @@ Future<Map<String, Object?>> _chooseCharacter(Api api, GameView view) {
     if (lines != null) _classLines = ((await lines)['classes']! as List).cast<Map<String, Object?>>();
   }
 
+  // A request failed: an ended session goes back to the sign-in, anything
+  // else shows on the screen.
+  void failed(Object err) {
+    if (done.isCompleted) return;
+    if (err is SessionExpired) return done.completeError(err);
+    show(error: '$err');
+  }
+
   view.onUiEvent(
     ((String json) {
       if (done.isCompleted) return;
       final e = jsonDecode(json) as Map<String, Object?>;
       switch (e['type']) {
+        case 'char_logout':
+          show(busy: true);
+          api.logout().whenComplete(() {
+            if (!done.isCompleted) done.complete(null);
+          });
         case 'char_select':
           final id = (e['id']! as num).toInt();
           selected = id;
@@ -182,7 +214,7 @@ Future<Map<String, Object?>> _chooseCharacter(Api api, GameView view) {
                 view.closeScreen();
                 done.complete(chars.firstWhere((c) => (c['id']! as num).toInt() == id));
               })
-              .catchError((Object err) => show(error: '$err'));
+              .catchError(failed);
         case 'char_create':
           show(busy: true);
           api
@@ -201,11 +233,19 @@ Future<Map<String, Object?>> _chooseCharacter(Api api, GameView view) {
                 await refresh();
                 show();
               })
-              .catchError((Object err) => show(error: '$err'));
+              .catchError(failed);
       }
     }).toJS,
   );
 
-  refresh().then((_) => show(create: chars.isEmpty)).catchError((Object err) => show(error: '$err'));
+  refresh().then((_) => show(create: chars.isEmpty)).catchError(failed);
   return done.future;
+}
+
+/// The slot card's place: the server's display name of the character's
+/// last location (`last_location_name`, from the map's manifest), else the
+/// map id.
+String placeName(Map<String, Object?> character) {
+  final name = character['last_location_name'];
+  return name is String && name.isNotEmpty ? name : '${character['last_location_id'] ?? ''}';
 }

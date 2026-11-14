@@ -144,7 +144,8 @@ const SW: u8 = 1 << Class::Swordsman as u8;
 const AR: u8 = 1 << Class::Archer as u8;
 const MG: u8 = 1 << Class::Mage as u8;
 const AC: u8 = 1 << Class::Acolyte as u8;
-pub const ALL_CLASSES: u8 = SW | AR | MG | AC;
+const TH: u8 = 1 << Class::Thief as u8;
+pub const ALL_CLASSES: u8 = SW | AR | MG | AC | TH;
 
 /// What a worn item adds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -195,12 +196,14 @@ const fn save(s: Save, n: i8) -> Bonus {
 
 /// Potions, armour and accessories (weapons are [`WEAPONS`]).
 pub const ITEMS: &[Item] = &[
-    // Potions: 5e's potions of healing (common, greater, superior, supreme).
-    potion("red_potion", "Red Potion", Effect::Heal(Dice::new(2, 4, 2)), 50, "A potion made from grinded Red Herbs."),
-    potion("orange_potion", "Orange Potion", Effect::Heal(Dice::new(4, 4, 4)), 200, "Red and Yellow Herbs, ground together."),
-    potion("yellow_potion", "Yellow Potion", Effect::Heal(Dice::new(8, 4, 8)), 550, "A potion made from grinded Yellow Herbs."),
-    potion("white_potion", "White Potion", Effect::Heal(Dice::new(10, 4, 20)), 1200, "A potion made from grinded White Herbs."),
-    potion("blue_potion", "Blue Potion", Effect::Spirit(Dice::new(4, 4, 4)), 800, "A potion made from grinded Blue Herbs."),
+    // Potions: 5e's potions of healing (common, greater, superior,
+    // supreme), doubled so a drink matters in a horde; the Blue Potion
+    // refills a caster's fight (about a level-10 mage's whole SP).
+    potion("red_potion", "Red Potion", Effect::Heal(Dice::new(4, 4, 4)), 50, "A potion made from grinded Red Herbs."),
+    potion("orange_potion", "Orange Potion", Effect::Heal(Dice::new(8, 4, 8)), 200, "Red and Yellow Herbs, ground together."),
+    potion("yellow_potion", "Yellow Potion", Effect::Heal(Dice::new(16, 4, 16)), 550, "A potion made from grinded Yellow Herbs."),
+    potion("white_potion", "White Potion", Effect::Heal(Dice::new(20, 4, 40)), 1200, "A potion made from grinded White Herbs."),
+    potion("blue_potion", "Blue Potion", Effect::Spirit(Dice::new(10, 4, 15)), 800, "A potion made from grinded Blue Herbs."),
     potion("green_potion", "Green Potion", Effect::Cure, 40, "A potion made from grinded Green Herbs."),
     // Body armour: light 11–12 + class defence, medium 12–15 + defence up
     // to +2, heavy 16–18 flat (5e).
@@ -208,17 +211,17 @@ pub const ITEMS: &[Item] = &[
     item("jacket", "Leather Jacket", Kind::Armour(Weight::Light, 11), 200, ALL_CLASSES, hp(6), "A sturdy jacket of tanned leather."),
     item("adventurers_suit", "Adventurer's Suit", Kind::Armour(Weight::Light, 12), 1000, ALL_CLASSES, Bonus::NONE, "Comfortable clothes for long journeys."),
     item("silk_robe", "Silk Robe", Kind::Armour(Weight::Light, 11), 1500, MG | AC, sp(10), "A robe of fine silk that helps a caster focus."),
-    item("tights", "Tights", Kind::Armour(Weight::Light, 12), 4000, AR, save(Save::Reflex, 1), "Close-fitting clothes that never catch on a branch."),
+    item("tights", "Tights", Kind::Armour(Weight::Light, 12), 4000, AR | TH, save(Save::Reflex, 1), "Close-fitting clothes that never catch on a branch."),
     item("silver_robe", "Silver Robe", Kind::Armour(Weight::Light, 12), 6000, MG, sp(20), "A robe woven with silver thread."),
-    item("wooden_mail", "Wooden Mail", Kind::Armour(Weight::Medium, 12), 1200, SW | AR | AC, Bonus::NONE, "Armour of hardened wooden plates."),
-    item("coat", "Coat", Kind::Armour(Weight::Medium, 13), 2500, SW | AR | AC, Bonus::NONE, "A long coat with leather padding."),
+    item("wooden_mail", "Wooden Mail", Kind::Armour(Weight::Medium, 12), 1200, SW | AR | AC | TH, Bonus::NONE, "Armour of hardened wooden plates."),
+    item("coat", "Coat", Kind::Armour(Weight::Medium, 13), 2500, SW | AR | AC | TH, Bonus::NONE, "A long coat with leather padding."),
     item("saints_robe", "Saint's Robe", Kind::Armour(Weight::Medium, 13), 5000, AC, save(Save::Mind, 1), "A blessed robe for servants of God."),
-    item("padded_armor", "Padded Armor", Kind::Armour(Weight::Medium, 14), 6000, SW | AR | AC, Bonus::NONE, "Thick layers of quilted cloth."),
+    item("padded_armor", "Padded Armor", Kind::Armour(Weight::Medium, 14), 6000, SW | AR | AC | TH, Bonus::NONE, "Thick layers of quilted cloth."),
     item("holy_robe", "Holy Robe", Kind::Armour(Weight::Medium, 15), 14000, AC, save(Save::Mind, 1), "Vestments that turn evil aside."),
     item("chain_mail", "Chain Mail", Kind::Armour(Weight::Heavy, 16), 9000, SW, Bonus::NONE, "Interlocking rings of steel."),
     item("full_plate", "Full Plate", Kind::Armour(Weight::Heavy, 18), 30000, SW, Bonus::NONE, "Shaped steel plates over the whole body."),
     // Shields: +2 AC (5e), not with a two-handed weapon.
-    item("guard", "Guard", Kind::Shield, 50, SW | MG | AC, ac(2), "A small round shield."),
+    item("guard", "Guard", Kind::Shield, 50, SW | MG | AC | TH, ac(2), "A small round shield."),
     item("buckler", "Buckler", Kind::Shield, 1500, SW | AC, Bonus { ac: 2, save: Some((Save::Reflex, 1)), ..Bonus::NONE }, "A light shield that turns blows aside."),
     item("shield", "Shield", Kind::Shield, 9000, SW, Bonus { ac: 2, hp: 15, ..Bonus::NONE }, "A heavy shield of iron."),
     item("mirror_shield", "Mirror Shield", Kind::Shield, 16000, SW | AC, Bonus { ac: 2, save: Some((Save::Mind, 1)), ..Bonus::NONE }, "A polished shield that throws spells back."),
@@ -228,7 +231,7 @@ pub const ITEMS: &[Item] = &[
     item("hat", "Hat", Kind::Headgear(Slot::UpperHead), 1000, ALL_CLASSES, hp(8), "A hat with a broad brim."),
     item("biretta", "Biretta", Kind::Headgear(Slot::UpperHead), 3000, AC, save(Save::Mind, 1), "A square cap of the clergy."),
     item("circlet", "Circlet", Kind::Headgear(Slot::UpperHead), 3000, MG | AC, sp(12), "A thin band of metal around the brow."),
-    item("cap", "Cap", Kind::Headgear(Slot::UpperHead), 4000, SW | AR | AC, ac(1), "A leather cap with metal studs."),
+    item("cap", "Cap", Kind::Headgear(Slot::UpperHead), 4000, SW | AR | AC | TH, ac(1), "A leather cap with metal studs."),
     item("helm", "Helm", Kind::Headgear(Slot::UpperHead), 12000, SW, Bonus { ac: 1, hp: 10, ..Bonus::NONE }, "A steel helmet."),
     item("sunglasses", "Sunglasses", Kind::Headgear(Slot::MidHead), 2000, ALL_CLASSES, save(Save::Reflex, 1), "Keeps the glare out of your eyes."),
     item("geek_glasses", "Geek Glasses", Kind::Headgear(Slot::MidHead), 2000, ALL_CLASSES, save(Save::Mind, 1), "Thick lenses for thick books."),
@@ -236,28 +239,35 @@ pub const ITEMS: &[Item] = &[
     // Garments, shoes, accessories.
     item("hood", "Hood", Kind::Garment, 300, ALL_CLASSES, hp(5), "A hooded cape."),
     item("muffler", "Muffler", Kind::Garment, 2500, ALL_CLASSES, save(Save::Body, 1), "A warm scarf."),
-    item("manteau", "Manteau", Kind::Garment, 8000, SW | AR | AC, ac(1), "A thick cloak that takes a blow."),
+    item("manteau", "Manteau", Kind::Garment, 8000, SW | AR | AC | TH, ac(1), "A thick cloak that takes a blow."),
     item("sandals", "Sandals", Kind::Shoes, 300, ALL_CLASSES, hp(4), "Simple sandals."),
     item("shoes", "Shoes", Kind::Shoes, 2000, ALL_CLASSES, hp(10), "Leather shoes."),
-    item("boots", "Boots", Kind::Shoes, 7000, SW | AR | AC, hp(18), "Sturdy boots for long marches."),
+    item("boots", "Boots", Kind::Shoes, 7000, SW | AR | AC | TH, hp(18), "Sturdy boots for long marches."),
     item("clip", "Clip", Kind::Accessory, 1500, ALL_CLASSES, sp(10), "A hair clip that clears the mind."),
     item("rosary", "Rosary", Kind::Accessory, 2500, ALL_CLASSES, save(Save::Mind, 1), "Prayer beads."),
     item("ring", "Ring", Kind::Accessory, 2500, ALL_CLASSES, save(Save::Body, 1), "A plain iron ring."),
     item("earring", "Earring", Kind::Accessory, 2500, ALL_CLASSES, save(Save::Reflex, 1), "A small silver earring."),
     item("brooch", "Brooch", Kind::Accessory, 3000, ALL_CLASSES, hp(12), "A pin with a red stone."),
-    // Herbs and food from drops: the same regeneration as potions, weaker
-    // (a running potion is never replaced by one).
-    potion("apple", "Apple", Effect::Heal(Dice::new(1, 4, 0)), 15, "A juicy red apple."),
-    potion("carrot", "Carrot", Effect::Heal(Dice::new(1, 4, 0)), 15, "A crunchy carrot, a Lunatic's favourite."),
-    potion("red_herb", "Red Herb", Effect::Heal(Dice::new(1, 6, 1)), 18, "A common herb that soothes small wounds."),
-    potion("yellow_herb", "Yellow Herb", Effect::Heal(Dice::new(2, 4, 2)), 40, "A bitter herb that closes cuts."),
-    potion("white_herb", "White Herb", Effect::Heal(Dice::new(4, 4, 4)), 120, "A rare herb with a strong healing scent."),
+    // Food (drops, and the Food Vendor's stock): the same regeneration as
+    // potions, weaker and cheaper (a running potion is never replaced by
+    // one); grapes are the cheap SP.
+    potion("apple", "Apple", Effect::Heal(Dice::new(2, 4, 0)), 15, "A juicy red apple."),
+    potion("carrot", "Carrot", Effect::Heal(Dice::new(2, 4, 0)), 15, "A crunchy carrot, a Lunatic's favourite."),
+    potion("banana", "Banana", Effect::Heal(Dice::new(2, 4, 1)), 18, "A sweet yellow banana."),
+    potion("orange", "Orange", Effect::Heal(Dice::new(2, 4, 2)), 20, "A ripe orange, juicy and a little sour."),
+    potion("sweet_potato", "Sweet Potato", Effect::Heal(Dice::new(3, 4, 2)), 25, "A roasted sweet potato, still warm."),
+    potion("meat", "Meat", Effect::Heal(Dice::new(3, 4, 4)), 35, "A hearty cut of grilled meat."),
+    potion("grape", "Grape", Effect::Spirit(Dice::new(2, 4, 2)), 30, "A bunch of fresh grapes that clears the mind."),
+    // Herbs from drops, doubled with the potions.
+    potion("red_herb", "Red Herb", Effect::Heal(Dice::new(2, 6, 2)), 18, "A common herb that soothes small wounds."),
+    potion("yellow_herb", "Yellow Herb", Effect::Heal(Dice::new(4, 4, 4)), 40, "A bitter herb that closes cuts."),
+    potion("white_herb", "White Herb", Effect::Heal(Dice::new(8, 4, 8)), 120, "A rare herb with a strong healing scent."),
     potion("green_herb", "Green Herb", Effect::Antidote, 20, "A herb that draws poison out of the blood."),
     // Field plants' harvest (COMBAT.md §4.10): the Blue Herb is the only
     // drop that restores SP; honey and the berry come from Shining Plants.
-    potion("blue_herb", "Blue Herb", Effect::Spirit(Dice::new(1, 6, 2)), 60, "A cool herb that clears a tired mind."),
-    potion("honey", "Honey", Effect::Heal(Dice::new(2, 6, 2)), 100, "Thick golden honey hidden in a Shining Plant."),
-    potion("yggdrasil_berry", "Yggdrasil Berry", Effect::Heal(Dice::new(10, 4, 20)), 2500, "A berry of the World Tree; one bite mends nearly anything."),
+    potion("blue_herb", "Blue Herb", Effect::Spirit(Dice::new(2, 6, 4)), 60, "A cool herb that clears a tired mind."),
+    potion("honey", "Honey", Effect::Heal(Dice::new(4, 6, 4)), 100, "Thick golden honey hidden in a Shining Plant."),
+    potion("yggdrasil_berry", "Yggdrasil Berry", Effect::Heal(Dice::new(20, 4, 40)), 2500, "A berry of the World Tree; one bite mends nearly anything."),
     // Loot (Etc): sold at any merchant for half the price.
     item("jellopy", "Jellopy", Kind::Etc, 6, 0, Bonus::NONE, "A small crystal left behind by Porings."),
     item("flower", "Flower", Kind::Etc, 4, 0, Bonus::NONE, "A small field flower. It smells of spring."),
@@ -288,11 +298,13 @@ pub const ITEMS: &[Item] = &[
 /// Merchants and what they sell (`shop` of a `"shop"` NPC).
 pub const SHOPS: &[(&str, &[&str])] = &[
     ("tool", &["red_potion", "orange_potion", "yellow_potion", "white_potion", "blue_potion", "green_potion"]),
+    // Izlude's Food Vendor: the cheap early HP, and grapes for SP.
+    ("food", &["apple", "banana", "orange", "carrot", "sweet_potato", "meat", "grape"]),
     (
         "weapon",
         &[
             "knife", "cutter", "main_gauche", "sword", "falchion", "katana", "javelin", "pike", "axe", "battle_axe", "club", "mace",
-            "bow", "composite_bow", "rod", "wand", "bible",
+            "bow", "composite_bow", "rod", "wand", "bible", "jur", "katar",
         ],
     ),
     (
@@ -675,7 +687,7 @@ impl Class {
     /// light armour in full and to medium up to +2.
     pub const fn defence(self) -> i32 {
         match self {
-            Class::Swordsman | Class::Archer => 3,
+            Class::Swordsman | Class::Archer | Class::Thief => 3,
             Class::Acolyte => 2,
             Class::Mage => 0,
         }
@@ -937,7 +949,8 @@ mod tests {
             }
         }
         assert!(find("sword").unwrap().desc.contains("1d8 slashing"));
-        assert!(find("red_potion").unwrap().desc.contains("2d4+2"));
+        assert!(find("red_potion").unwrap().desc.contains("4d4+4"));
+        assert!(find("blue_potion").unwrap().desc.contains("**10d4+15** SP"));
     }
 
     /// The starting kit gives the AC each class had before items

@@ -386,7 +386,8 @@ fn bursting_a_channel_breaks_the_song() {
     // Phase two opens with the Song of Rousing (a channel).
     wound(&mut stage, slot, 55);
     let mut msgs = Vec::new();
-    for _ in 0..120 {
+    // The opener waits out the running ability and its pause.
+    for _ in 0..240 {
         msgs.extend(run(&mut stage, 1));
         if fight(&stage).channel.is_some() {
             break;
@@ -480,6 +481,43 @@ fn eclipse_charges_through_and_lands_where_the_line_ends() {
     run(&mut stage, z.delay_ms / 50 + 2);
     let x = stage.horde_mut().unwrap().store().x[slot as usize];
     assert!(x < 24.0, "it charged through, past the player ({x})");
+}
+
+#[test]
+fn eclipse_leaps_are_flagged_and_it_lands_on_them() {
+    use crate::world::protocol::zone_flags;
+    let mut stage = arena(11);
+    stand(&mut stage, 30.0, 20.0);
+    let k = kind(&mut stage, "eclipse");
+    let slot = stage.horde_mut().unwrap().spawn(k, 36.0, 20.0).unwrap();
+    let mut out = Vec::new();
+    let mut leap = None;
+    for _ in 0..2400 {
+        out.clear();
+        stage.tick(&mut out);
+        for m in controls(&out) {
+            if let ServerMsg::BossZones { ability, zones, .. } = m {
+                // A charge slides; only leaps land on their zones.
+                let lands = zones.iter().all(|z| z.flags & zone_flags::LANDS != 0);
+                match ability.as_str() {
+                    "boss_moon_charge" => assert!(zones.iter().all(|z| z.flags & zone_flags::LANDS == 0)),
+                    "boss_moon_pounce" | "boss_moon_bound" => {
+                        assert!(lands, "{ability}: {zones:?}");
+                        leap = zones.iter().max_by_key(|z| z.delay_ms).copied();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if leap.is_some() {
+            break;
+        }
+    }
+    let z = leap.expect("a pounce or a bounding run");
+    run(&mut stage, z.delay_ms / 50 + 2);
+    let store = stage.horde_mut().unwrap().store();
+    let (x, y) = (store.x[slot as usize], store.y[slot as usize]);
+    assert!((x - z.area.x).abs() < 0.2 && (y - z.area.y).abs() < 0.2, "it lands on the last zone: ({x}, {y}) vs {:?}", z.area);
 }
 
 #[test]

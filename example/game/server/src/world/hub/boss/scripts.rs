@@ -36,6 +36,11 @@ pub(crate) struct Script {
     pub abilities: &'static [Ability],
 }
 
+/// The shortest pause a phase may leave between abilities: the party gets
+/// to read the ground and hit back between patterns, even when enraged.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const MIN_GAP_SECS: f32 = 2.0;
+
 #[derive(Debug)]
 pub(crate) struct Phase {
     pub below: u8,
@@ -45,7 +50,8 @@ pub(crate) struct Phase {
     pub opener: Option<u8>,
     /// Ability indices, in order, round and round.
     pub rotation: &'static [u8],
-    /// Seconds between the end of one ability and the next.
+    /// Seconds between the last beat of one ability and the next wind-up
+    /// (at least [`MIN_GAP_SECS`]).
     pub gap: f32,
     /// Wind-up multiplier (0.8 = 20 % faster).
     pub haste: f32,
@@ -69,15 +75,22 @@ pub(crate) struct Ability {
     /// Telegraph look of its zones.
     pub look: u8,
     pub action: Action,
+    /// Camera shake as its first beat lands (0 = none; 1..=255 strength).
+    pub shake: u8,
 }
 
 /// Where an ability lands.
+/// [`Anchor::Each`] for a whole party (up to its most members).
+const EVERYONE: u8 = crate::world::missions::PARTY_MAX;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Anchor {
     /// On the monster, aimed at the nearest player.
     Boss,
     /// On the nearest standing player.
     Nearest,
+    /// On the farthest standing player (charges at the back line).
+    Farthest,
     /// On one standing player picked by the stage's dice.
     Marked,
     /// On each standing player, up to this many (scales with the party).
@@ -111,6 +124,34 @@ pub(crate) enum Pattern {
     /// A nova of radius `r` on the monster; `safe` sanctuaries of `safe_r`
     /// stand `dist` away around it, and whoever is inside one is spared.
     Sanctuary { r: f32, safe: u8, safe_r: f32, dist: f32 },
+    /// A nova of radius `r` on the monster that spares whoever stands in
+    /// a lit light of the map (`lit_r` around each of the nearest lit
+    /// braziers, at most four); with fewer than `min` lit, moonlit
+    /// sanctuaries of `safe_r`, `dist` away, make up the rest.
+    LitSanctuary { r: f32, lit_r: f32, min: u8, safe_r: f32, dist: f32 },
+    /// Fox-fire spiral: `arms` arms of `steps` circles of radius `r` from
+    /// the anchor outward, the first `first` out and each next `step`
+    /// farther and turned `turn` degrees; the arms unroll one step every
+    /// `every` (walk between the arms, against the spin).
+    Spiral { arms: u8, steps: u8, first: f32, step: f32, turn: f32, r: f32, every: f32 },
+    /// Marching ranks: `count` bars `len` long and `width` deep across the
+    /// aim, the first `first` ahead of the anchor and each next `advance`
+    /// farther, `every` apart; each bar leaves a `gap` wide opening at a
+    /// spot the stage's dice pick (step into the gap).
+    Bars { count: u8, len: f32, width: f32, gap: f32, first: f32, advance: f32, every: f32 },
+    /// A grasping zone of radius `r` on each anchored player that follows
+    /// them and bites `count` times, `every` apart, wherever they are by
+    /// then (keep moving, lead it away from the others).
+    Chase { count: u8, r: f32, every: f32 },
+    /// Fire between the monster and each of its mirror images (every pair,
+    /// `width` wide) and from each of them `len` toward the nearest player;
+    /// with no images left, three bars `len` long from it, 120° apart.
+    Crossfire { width: f32, len: f32 },
+    /// A trail of lasting puddles behind each anchored player: one of radius
+    /// `r` dropped where they stand every `every` (`count` of them), each
+    /// arming `fuse` later and biting every `pulse` for `secs` (keep going
+    /// straight, never double back; the others keep off the trail).
+    Trail { count: u8, r: f32, every: f32, fuse: f32, secs: f32, pulse: f32 },
 }
 
 /// What a beat does to a player inside.
@@ -151,6 +192,23 @@ pub(crate) enum Action {
     /// A shield absorbing `pct` % of its HP (per player) through the
     /// wind-up; breaking it cancels the beats.
     Shield { pct: u8 },
+    /// It splits: `count` mirror images of `kind` (+ `per_player` each)
+    /// appear around it, and while any of them stands it takes no damage.
+    Mirror { kind: &'static str, count: u8, per_player: u8 },
+    /// It dives underground as the cast starts ([`crate::world::horde::Horde::set_burrowed`]:
+    /// untargetable, a moving mound on clients) and tunnels after its
+    /// anchor at `speed` cells/s; it bursts up under each beat of the
+    /// pattern (a [`Pattern::Chase`] following the anchored player) and
+    /// tunnels on to the next anchor, surfacing for good at the last.
+    Burrow { speed: f32 },
+    /// It lays objects (a plant monster such as an egg) around itself:
+    /// `count` + `per_player` each, `ring` cells out; each hatches into
+    /// `hatch_count` of `hatch` after `hatch_secs` unless broken.
+    Lay { kind: &'static str, count: u8, per_player: u8, ring: f32, hatch: &'static str, hatch_count: u8, hatch_secs: f32 },
+    /// A channel of `secs` (broken by `break_pct` % burst like
+    /// [`Action::Channel`]); when it completes, every object of the stage
+    /// within `radius` hatches at once and it heals `heal` % per one.
+    HatchAll { secs: f32, radius: f32, heal: u8, break_pct: u8 },
 }
 
 const NO_HURT: Hurt = Hurt { dice: (0, 0), kind: DamageType::Physical, rider: None, save: false, ranged: false };
@@ -160,11 +218,39 @@ const fn hurt(n: u8, s: u8, kind: DamageType) -> Hurt {
 }
 
 const fn ability(id: &'static str, name: &'static str, wind: f32, anchor: Anchor, pattern: Pattern, hurt: Hurt, look: u8) -> Ability {
-    Ability { id, name, wind, shout: "", anchor, stagger: 0.0, pattern, hurt, look, action: Action::None }
+    Ability { id, name, wind, shout: "", anchor, stagger: 0.0, pattern, hurt, look, action: Action::None, shake: 0 }
 }
 
+mod culvert;
+mod payon;
+mod sograt;
+
 /// The scripted monsters.
-pub(crate) static SCRIPTS: &[Script] = &[ECLIPSE, VOCAL, MASTERING, ANGELING];
+pub(crate) static SCRIPTS: &[Script] = &[ECLIPSE, VOCAL, MASTERING, ANGELING, sograt::SIROCCO, sograt::SAND_COLOSSUS, sograt::PHREEONI, payon::WEEPING_BRIDE, payon::JIANGSHI_GENERAL, payon::MOONLIGHT_FLOWER, culvert::THIEF_BUG_QUEEN, culvert::RAT_KING, culvert::GOLDEN_THIEF_BUG];
+
+/// Traits of a scripted monster beyond its rotation (its body, not its
+/// abilities): spell reflection, a cracked shell, coins spilled.
+#[derive(Debug)]
+pub(crate) struct Traits {
+    pub monster: &'static str,
+    /// Spells (save-based blows) on it are turned back at half on their
+    /// caster while its phase index is under this (0 = never).
+    pub reflect_until: u8,
+    /// From this phase index on it takes `vulnerable_pct` % more damage
+    /// (0 = never; phase 0 cannot be vulnerable).
+    pub vulnerable_from: u8,
+    pub vulnerable_pct: u8,
+    /// From this phase index on, every `burst_every` % of HP it loses
+    /// spills `burst_zeny` (min, max) to each fighter on the map
+    /// (0 = never).
+    pub burst_from: u8,
+    pub burst_every: u8,
+    pub burst_zeny: (u32, u32),
+}
+
+pub(crate) fn traits(monster: &str) -> Option<&'static Traits> {
+    culvert::TRAITS.iter().find(|t| t.monster == monster)
+}
 
 pub(crate) fn find(monster: &str) -> Option<&'static Script> {
     SCRIPTS.iter().find(|s| s.monster == monster)
@@ -181,9 +267,9 @@ const ECLIPSE: Script = Script {
     enrage: "Too slow! The moon won't wait for you!",
     death: "The moon... sets...",
     phases: &[
-        Phase { below: 100, shout: "", opener: None, rotation: &[0, 1, 0, 2], gap: 1.6, haste: 1.0 },
-        Phase { below: 60, shout: "Faster! FASTER!", opener: Some(2), rotation: &[3, 1, 0, 2, 0], gap: 1.2, haste: 0.9 },
-        Phase { below: 25, shout: "Lunar frenzy! Hop, hop, HOP!", opener: Some(4), rotation: &[4, 3, 0, 2], gap: 0.9, haste: 0.8 },
+        Phase { below: 100, shout: "", opener: None, rotation: &[0, 1, 0, 2], gap: 3.2, haste: 1.0 },
+        Phase { below: 60, shout: "Faster! FASTER!", opener: Some(2), rotation: &[3, 1, 0, 2, 0], gap: 2.5, haste: 0.9 },
+        Phase { below: 25, shout: "Lunar frenzy! Hop, hop, HOP!", opener: Some(4), rotation: &[4, 3, 0, 2], gap: 2.0, haste: 0.8 },
     ],
     abilities: &[
         // 0: a telegraphed line charge at the nearest player.
@@ -228,7 +314,7 @@ const ECLIPSE: Script = Script {
         Ability {
             stagger: 0.7,
             action: Action::Leap,
-            ..ability("boss_lunar_frenzy", "Lunar Frenzy", 1.2, Anchor::Each(4), Pattern::Circle { r: 2.8 }, hurt(3, 6, DamageType::Physical), look::DARK)
+            ..ability("boss_lunar_frenzy", "Lunar Frenzy", 1.2, Anchor::Each(EVERYONE), Pattern::Circle { r: 2.8 }, hurt(3, 6, DamageType::Physical), look::DARK)
         },
     ],
 };
@@ -244,9 +330,9 @@ const VOCAL: Script = Script {
     enrage: "The finale goes on forever!",
     death: "My... last... note...",
     phases: &[
-        Phase { below: 100, shout: "", opener: None, rotation: &[0, 1, 0, 3], gap: 1.8, haste: 1.0 },
-        Phase { below: 60, shout: "Encore! Everybody, sing along!", opener: Some(2), rotation: &[0, 4, 3, 2, 1], gap: 1.4, haste: 0.9 },
-        Phase { below: 25, shout: "FORTISSIMO!", opener: Some(4), rotation: &[0, 4, 3, 0, 2, 1], gap: 1.0, haste: 0.8 },
+        Phase { below: 100, shout: "", opener: None, rotation: &[0, 1, 0, 3], gap: 3.4, haste: 1.0 },
+        Phase { below: 60, shout: "Encore! Everybody, sing along!", opener: Some(2), rotation: &[0, 4, 3, 2, 1], gap: 2.8, haste: 0.9 },
+        Phase { below: 25, shout: "FORTISSIMO!", opener: Some(4), rotation: &[0, 4, 3, 0, 2, 1], gap: 2.2, haste: 0.8 },
     ],
     abilities: &[
         // 0: sound waves on the beat; stand in the quiet between them.
@@ -303,9 +389,9 @@ const MASTERING: Script = Script {
     enrage: "I'm getting BIGGER!",
     death: "Pop...",
     phases: &[
-        Phase { below: 100, shout: "", opener: Some(1), rotation: &[0, 3, 4, 2, 1], gap: 1.8, haste: 1.0 },
-        Phase { below: 55, shout: "Everyone, gather round!", opener: Some(1), rotation: &[4, 3, 0, 2, 1], gap: 1.4, haste: 0.9 },
-        Phase { below: 25, shout: "Pop me? I'll just split!", opener: Some(5), rotation: &[3, 0, 2, 4, 1], gap: 1.1, haste: 0.85 },
+        Phase { below: 100, shout: "", opener: Some(1), rotation: &[0, 3, 4, 2, 1], gap: 3.4, haste: 1.0 },
+        Phase { below: 55, shout: "Everyone, gather round!", opener: Some(1), rotation: &[4, 3, 0, 2, 1], gap: 2.8, haste: 0.9 },
+        Phase { below: 25, shout: "Pop me? I'll just split!", opener: Some(5), rotation: &[3, 0, 2, 4, 1], gap: 2.3, haste: 0.85 },
     ],
     abilities: &[
         // 0: a jelly slam on a marked player.
@@ -329,7 +415,7 @@ const MASTERING: Script = Script {
         // 3: slime rain: a sticky pool under every player.
         Ability {
             hurt: Hurt { rider: Some((Condition::Slowed, 1.5)), save: false, ..hurt(1, 6, DamageType::Poison) },
-            ..ability("boss_slime_rain", "Slime Rain", 1.2, Anchor::Each(4), Pattern::Pool { r: 2.6, secs: 8.0, pulse: 1.0 }, NO_HURT, look::SWAMP)
+            ..ability("boss_slime_rain", "Slime Rain", 1.2, Anchor::Each(EVERYONE), Pattern::Pool { r: 2.6, secs: 8.0, pulse: 1.0 }, NO_HURT, look::SWAMP)
         },
         // 4: big bounce: three heavy hops toward the nearest player.
         Ability {
@@ -363,16 +449,16 @@ const ANGELING: Script = Script {
     enrage: "Enough! Heaven's patience is at an end!",
     death: "This... is not... the end...",
     phases: &[
-        Phase { below: 100, shout: "", opener: None, rotation: &[0, 2, 0, 1, 5], gap: 1.6, haste: 1.0 },
-        Phase { below: 70, shout: "Rise, my children! Defend your angel!", opener: Some(4), rotation: &[0, 3, 6, 2, 5, 1], gap: 1.4, haste: 1.0 },
-        Phase { below: 40, shout: "Behold the light of heaven!", opener: Some(7), rotation: &[8, 0, 1, 4, 2, 6, 3, 7], gap: 1.2, haste: 0.9 },
-        Phase { below: 15, shout: "I will NOT fall to the likes of you!", opener: Some(8), rotation: &[8, 0, 2, 0, 1, 6], gap: 0.9, haste: 0.8 },
+        Phase { below: 100, shout: "", opener: None, rotation: &[0, 2, 0, 1, 5], gap: 3.2, haste: 1.0 },
+        Phase { below: 70, shout: "Rise, my children! Defend your angel!", opener: Some(4), rotation: &[0, 3, 6, 2, 5, 1], gap: 2.8, haste: 1.0 },
+        Phase { below: 40, shout: "Behold the light of heaven!", opener: Some(7), rotation: &[8, 0, 1, 4, 2, 6, 3, 7], gap: 2.5, haste: 0.9 },
+        Phase { below: 15, shout: "I will NOT fall to the likes of you!", opener: Some(8), rotation: &[8, 0, 2, 0, 1, 6], gap: 2.0, haste: 0.8 },
     ],
     abilities: &[
         // 0: holy bolts: a line at every player; step aside.
         Ability {
             hurt: Hurt { ranged: true, ..hurt(2, 8, DamageType::Radiant) },
-            ..ability("boss_holy_bolts", "Holy Bolts", 0.9, Anchor::Each(4), Pattern::Line { len: 24.0, width: 1.6 }, NO_HURT, look::HOLY)
+            ..ability("boss_holy_bolts", "Holy Bolts", 0.9, Anchor::Each(EVERYONE), Pattern::Line { len: 24.0, width: 1.6 }, NO_HURT, look::HOLY)
         },
         // 1: halo of judgement: only its feet are safe.
         Ability {
@@ -411,7 +497,7 @@ const ANGELING: Script = Script {
             "boss_consecrate",
             "Consecrate",
             1.2,
-            Anchor::Each(4),
+            Anchor::Each(EVERYONE),
             Pattern::Pool { r: 3.0, secs: 10.0, pulse: 1.0 },
             Hurt { save: false, ..hurt(1, 8, DamageType::Radiant) },
             look::HOLY,
@@ -457,7 +543,7 @@ mod tests {
                 assert!(w[1].below < w[0].below, "{}: phases go down in HP", s.monster);
             }
             for p in s.phases {
-                assert!(!p.rotation.is_empty() && p.haste > 0.0 && p.gap >= 0.0);
+                assert!(!p.rotation.is_empty() && p.haste > 0.0 && p.gap >= MIN_GAP_SECS);
                 for &i in p.rotation.iter().chain(p.opener.iter()) {
                     assert!((i as usize) < s.abilities.len(), "{}: ability {i} out of range", s.monster);
                 }
