@@ -568,6 +568,7 @@ impl ServerCertVerifier for AcceptAnyCertificate {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::path::Path;
 
     use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, PublicKeyData};
@@ -679,7 +680,7 @@ mod tests {
     #[test]
     fn an_aborted_os_verification_returns_at_once() {
         let (result, elapsed, _) = offloaded(3000, Some(100));
-        assert!(matches!(result, Err(rustls::Error::General(ref m)) if m == "aborted"));
+        assert_matches!(result, Err(rustls::Error::General(ref m)) if m == "aborted");
         assert!(
             elapsed < std::time::Duration::from_millis(600),
             "{elapsed:?}"

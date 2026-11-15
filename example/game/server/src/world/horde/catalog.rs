@@ -119,6 +119,10 @@ pub struct MonsterDef {
     pub spawn_cost: u32,
     /// Seconds into the stage before the director may spawn it.
     pub unlock_secs: f32,
+    /// Seconds into the stage after which the director buys no more of it
+    /// (a mission's act is over: `missions::RosterEntry::retire`); those on
+    /// the field stay. Infinite: never retires.
+    pub retire_secs: f32,
     /// Relative pick weight among affordable kinds.
     pub weight: u32,
     pub xp: u32,
@@ -220,6 +224,7 @@ impl MonsterCatalog {
                 speed: m.stats.move_speed,
                 spawn_cost: m.director.spawn_cost,
                 unlock_secs: m.director.min_wave_time,
+                retire_secs: f32::INFINITY,
                 weight: m.director.weight,
                 xp: m.director.xp_reward,
                 skills: m.skills.into_iter().map(|s| s.id).collect(),
@@ -274,6 +279,7 @@ pub(crate) fn test_def(id: &str, speed: f32, cost: u32, unlock: f32, boss: bool)
         size: if boss { Size::Large } else { Size::Small },
         spawn_cost: cost,
         unlock_secs: unlock,
+        retire_secs: f32::INFINITY,
         weight: 10,
         xp: 1,
         boss,

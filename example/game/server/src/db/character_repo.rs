@@ -5,7 +5,7 @@ use crate::world::protocol::Look;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
-use sqlx::FromRow;
+use sqlx::{AssertSqlSafe, FromRow};
 
 #[derive(Clone, Debug, Serialize, Deserialize, FromRow)]
 pub struct CharacterRecord {
@@ -31,13 +31,15 @@ pub struct CharacterRecord {
     /// The ten equipment slots (`combat::Bag::equip`); `None` = never set.
     pub equipment: Option<Json<Vec<String>>>,
     pub zeny: i64,
+    /// The Merchant line's homunculus (`hub::HomSave`); `None` = never chosen.
+    pub homunculus: Option<Json<crate::world::hub::HomSave>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 /// Columns of [`CharacterRecord`].
 const COLUMNS: &str = "id, user_id, name, archetype, level, base_exp, stats, unlocked_skills, inventory, last_location_id, \
-     gender, hair_style, hair_color, body_color, weapon, loadout, equipment, zeny, created_at, updated_at";
+     gender, hair_style, hair_color, body_color, weapon, loadout, equipment, zeny, homunculus, created_at, updated_at";
 
 impl CharacterRecord {
     /// Stored appearance; out-of-range values (hand-edited rows) fall back
@@ -83,12 +85,12 @@ impl CharacterRepo {
         bag: &Bag,
         level: u32,
     ) -> Result<CharacterRecord, sqlx::Error> {
-        sqlx::query_as::<_, CharacterRecord>(&format!(
+        sqlx::query_as::<_, CharacterRecord>(AssertSqlSafe(format!(
             "INSERT INTO characters (user_id, name, archetype, level, last_location_id, \
                  gender, hair_style, hair_color, body_color, inventory, equipment, zeny, weapon) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
              RETURNING {COLUMNS}"
-        ))
+        )))
         .bind(i64::from(user_id))
         .bind(name)
         .bind(archetype)
@@ -114,21 +116,21 @@ impl CharacterRepo {
     }
 
     pub async fn list_by_user_id(pool: &Db, user_id: u32) -> Result<Vec<CharacterRecord>, sqlx::Error> {
-        sqlx::query_as::<_, CharacterRecord>(&format!("SELECT {COLUMNS} FROM characters WHERE user_id = $1 ORDER BY id"))
+        sqlx::query_as::<_, CharacterRecord>(AssertSqlSafe(format!("SELECT {COLUMNS} FROM characters WHERE user_id = $1 ORDER BY id")))
             .bind(i64::from(user_id))
             .fetch_all(pool)
             .await
     }
 
     pub async fn find_by_id(pool: &Db, id: u32) -> Result<Option<CharacterRecord>, sqlx::Error> {
-        sqlx::query_as::<_, CharacterRecord>(&format!("SELECT {COLUMNS} FROM characters WHERE id = $1"))
+        sqlx::query_as::<_, CharacterRecord>(AssertSqlSafe(format!("SELECT {COLUMNS} FROM characters WHERE id = $1")))
             .bind(i64::from(id))
             .fetch_optional(pool)
             .await
     }
 
     pub async fn find_by_user_and_id(pool: &Db, user_id: u32, id: u32) -> Result<Option<CharacterRecord>, sqlx::Error> {
-        sqlx::query_as::<_, CharacterRecord>(&format!("SELECT {COLUMNS} FROM characters WHERE user_id = $1 AND id = $2"))
+        sqlx::query_as::<_, CharacterRecord>(AssertSqlSafe(format!("SELECT {COLUMNS} FROM characters WHERE user_id = $1 AND id = $2")))
             .bind(i64::from(user_id))
             .bind(i64::from(id))
             .fetch_optional(pool)
@@ -190,12 +192,13 @@ impl CharacterRepo {
         look: Look,
         loadout: &Loadout,
         bag: &Bag,
+        homunculus: Option<&crate::world::hub::HomSave>,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "UPDATE characters SET level = $1, base_exp = $2, stats = $3, unlocked_skills = $4, inventory = $5, \
                  last_location_id = $6, gender = $7, hair_style = $8, hair_color = $9, body_color = $10, \
-                 loadout = $11, equipment = $12, zeny = $13, weapon = $14, updated_at = now() \
-             WHERE id = $15",
+                 loadout = $11, equipment = $12, zeny = $13, weapon = $14, homunculus = $15, updated_at = now() \
+             WHERE id = $16",
         )
         .bind(level.min(i32::MAX as u32) as i32)
         .bind(base_exp.min(i64::MAX as u64) as i64)
@@ -211,6 +214,7 @@ impl CharacterRepo {
         .bind(Json(&bag.equip))
         .bind(bag.zeny as i64)
         .bind(bag.weapon())
+        .bind(homunculus.map(Json))
         .bind(i64::from(character_id))
         .execute(pool)
         .await

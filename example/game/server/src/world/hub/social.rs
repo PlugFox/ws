@@ -56,6 +56,7 @@ impl HubInstance {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use super::super::test_support::*;
     use super::super::tests::{profile, quiet};
     use super::super::{HubEvent, HubInstance, Outgoing};
@@ -127,6 +128,6 @@ mod tests {
         out.clear();
         hub.party_invite(1, 103, "M".into(), 30_000, &mut out);
         assert!(controls(&out, 3).is_empty(), "the house is another map");
-        assert!(matches!(&controls(&out, 1)[..], [ServerMsg::LobbyError { code, .. }] if code == "no_such_player"));
+        assert_matches!(&controls(&out, 1)[..], [ServerMsg::LobbyError { code, .. }] if code == "no_such_player");
     }
 }

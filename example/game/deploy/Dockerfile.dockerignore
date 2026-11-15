@@ -29,6 +29,8 @@ example/game/client/test/
 
 # Image tools
 !example/assets/pipeline/webp_pass.py
+!example/assets/pipeline/pyproject.toml
+!example/assets/pipeline/uv.lock
 !example/game/deploy/precompress.sh
 
 # The baked pack, without what the game never requests:

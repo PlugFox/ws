@@ -24,7 +24,7 @@
 use super::monster::Archetype;
 use crate::world::modifiers::Modifiers;
 use crate::world::protocol::{AffixInfo, ServerMsg};
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// The affixes of one monster, one bit each ([`AFFIXES`] maps ids to bits).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -373,14 +373,14 @@ impl AffixRules {
     /// Rolls a fresh monster's affixes (none most of the time).
     pub fn roll(&self, archetype: Archetype, rng: &mut impl Rng) -> AffixFlags {
         let chance = self.chance(archetype);
-        if chance == 0 || rng.gen_range(0..1000) >= chance {
+        if chance == 0 || rng.random_range(0..1000) >= chance {
             return AffixFlags::NONE;
         }
         let most = max_stars(archetype, self.tier);
         let mut stars = 1;
-        if most >= 2 && rng.gen_range(0..1000) < self.second {
+        if most >= 2 && rng.random_range(0..1000) < self.second {
             stars = 2;
-            if most >= 3 && rng.gen_range(0..1000) < self.third {
+            if most >= 3 && rng.random_range(0..1000) < self.third {
                 stars = 3;
             }
         }
@@ -402,7 +402,7 @@ impl AffixRules {
             if n == 0 {
                 break;
             }
-            let k = rng.gen_range(0..n);
+            let k = rng.random_range(0..n);
             if let Some(a) = AFFIXES.iter().filter(open).nth(k) {
                 got.insert(a.flag);
             }

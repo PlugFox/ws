@@ -2,7 +2,7 @@
 //! Sirocco the pack alpha, the Sand Colossus and Phreeoni. Distances are
 //! cells (2 per metre), times seconds, as in the parent module.
 
-use super::{ability, hurt, Ability, Action, Anchor, Hurt, Pattern, Phase, Rank, Script, EVERYONE, NO_HURT};
+use super::{ability, hurt, Ability, Action, Anchor, Hurt, Pattern, Phase, Rank, Script, Traits, EVERYONE, NO_HURT};
 use crate::world::combat::{Condition, DamageType};
 use crate::world::protocol::look;
 
@@ -88,7 +88,7 @@ pub(super) const SAND_COLOSSUS: Script = Script {
         // 0: a sand vortex under every player: it sucks at the feet and grinds.
         Ability {
             hurt: Hurt { rider: Some((Condition::Mired, 1.5)), save: false, ..hurt(1, 6, DamageType::Earth) },
-            ..ability("boss_sand_vortex", "Sand Vortex", 1.2, Anchor::Each(EVERYONE), Pattern::Pool { r: 5.0, secs: 5.0, pulse: 1.0 }, NO_HURT, look::SAND)
+            ..ability("boss_sand_vortex", "Sand Vortex", 1.2, Anchor::Each(EVERYONE), Pattern::Pool { r: 5.0, secs: 5.0, pulse: 1.0, pull: 0.0 }, NO_HURT, look::SAND)
         },
         // 1: three dunes rolling out from it; stand in the troughs.
         Ability {
@@ -220,3 +220,6 @@ pub(super) const PHREEONI: Script = Script {
         },
     ],
 };
+
+/// No traited bodies here.
+pub(super) const TRAITS: &[Traits] = &[];

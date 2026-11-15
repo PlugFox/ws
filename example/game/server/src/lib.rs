@@ -159,7 +159,7 @@ pub async fn create_app_with_skills(
     let hub = world.map(|w| {
         // Player trades settle against the sessions' characters and the database.
         let vault: Arc<dyn world::trade::TradeVault> = Arc::new(session::trade::SessionVault::new(pool.clone(), session_registry.clone()));
-        let dir = HubDirectory::with_vault(Arc::new(w), config.hub.clone(), Some(vault));
+        let dir = HubDirectory::with_vault(Arc::new(w), config.hub.clone(), Some(vault), Arc::clone(&skills));
         let _reaper = dir.spawn_reaper(Duration::from_secs(10));
         dir
     });

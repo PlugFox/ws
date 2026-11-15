@@ -83,6 +83,12 @@ pub mod family {
     pub const THIEF_BUG: u8 = 2;
     pub const DESERT_PACK: u8 = 3;
     pub const RESTLESS_DEAD: u8 = 4;
+    // The ladder from 60 to 99 (docs/locations/ladder_60_99.md).
+    pub const WARBAND: u8 = 5;
+    pub const TOYBOX: u8 = 6;
+    pub const FALLEN_CAPITAL: u8 = 7;
+    pub const EMBER: u8 = 8;
+    pub const MEMORY: u8 = 9;
 }
 
 /// Effects beyond [`Mods`], read by the stage at its existing branches.
@@ -404,7 +410,6 @@ use Rarity::{Common, Mythic, Rare, Uncommon};
 const P: Procs = Procs::NONE;
 const N: Mods = Mods::NONE;
 
-#[allow(clippy::too_many_arguments)]
 const fn c(
     id: &'static str,
     monster: &'static str,
@@ -440,6 +445,7 @@ pub const CARDS: &[Card] = &[
     c("eclipse_card", "eclipse", "Eclipse Card", S::Shoes, Rare, Suffix("the Moon Hare"), "a moonlit clearing", Procs { fresh: 6, ..P }),
     c("vocal_card", "vocal", "Vocal Card", S::Head, Rare, Suffix("the Encore"), "a stage of mushrooms under starlight", Procs { free_cd: 10, ..P }),
     Card { family: family::SLIME, ..c("mastering_card", "mastering", "Mastering Card", S::Accessory, Rare, Prefix("Regal"), "a jelly throne on a sunny hill", Procs { feast: 50, ..P }) },
+    c("toad_card", "toad", "Toad Card", S::Weapon, Rare, Prefix("Tonguelash"), "a lily pond under weeping willows", Procs { reach: 1, leech: 6, ..P }),
     Card { family: family::SLIME, ..c("angeling_card", "angeling", "Angeling Card", S::Body, Mythic, Prefix("Seraphic"), "golden clouds and light beams", Procs { last_stand: true, ..P }) },
     // --- Prontera Culvert --------------------------------------------
     Card { family: family::THIEF_BUG, ..c("thief_bug_larva_card", "thief_bug_larva", "Thief Bug Larva Card", S::Head, Common, Prefix("Grubby"), "a mossy sewer pipe", Procs { zeny_pct: 15, ..P }) },
@@ -451,6 +457,7 @@ pub const CARDS: &[Card] = &[
     c("drainliar_card", "drainliar", "Drainliar Card", S::Weapon, Common, Prefix("Sanguine"), "a dark vaulted ceiling", Procs { leech: 8, ..P }),
     Card { family: family::THIEF_BUG, ..c("thief_bug_queen_card", "thief_bug_queen", "Thief Bug Queen Card", S::Garment, Rare, Suffix("the Brood"), "a nest of eggs in a warm sewer chamber", Procs { brood: true, ..P }) },
     c("rat_king_card", "rat_king", "Rat King Card", S::Head, Rare, Prefix("Crowned"), "a throne of junk in the sewers", Procs { elite_bane: 2, elite_zeny: 30, ..P }),
+    c("vampire_bat_card", "vampire_bat", "Vampire Bat Card", S::Garment, Rare, Suffix("the Night"), "a dark vaulted ceiling over the sewer", Procs { dodge: 8, blind_back: 15, ..P }),
     c("golden_bug_card", "golden_bug", "Golden Thief Bug Card", S::Shield, Mythic, Prefix("Gilded"), "a hoard of gold in a hidden vault", Procs { gilded: 20, ..P }),
     Card { family: family::THIEF_BUG, hp: 15, ..c("thief_bug_egg_card", "thief_bug_egg", "Thief Bug Egg Card", S::Accessory, Common, Prefix("Brood-egg"), "a cosy nest of straw", P) },
     // --- Sograt Desert -----------------------------------------------
@@ -465,6 +472,7 @@ pub const CARDS: &[Card] = &[
     c("sand_man_card", "sand_man", "Sandman Card", S::Body, Uncommon, Suffix("Shifting Sands"), "a swirling sandstorm", Procs { veil: 8, ..P }),
     Card { family: family::DESERT_PACK, exclusive: ELEMENT, ..c("sirocco_card", "sirocco", "Sirocco Card", S::Weapon, Rare, Suffix("the Simoom"), "a scorching heat haze over dunes", Procs { endow: Some(DamageType::Fire), ..P }) },
     c("sand_colossus_card", "sand_colossus", "Sand Colossus Card", S::Shield, Rare, Prefix("Monolithic"), "ancient desert ruins", Procs { colossus: true, ..P }),
+    c("scorpion_king_card", "scorpion_king", "Scorpion King Card", S::Body, Rare, Prefix("Venomguard"), "a sun-bleached rock throne among dunes", Procs { thorns: 6, immune: bits(&[Condition::Poisoned]), ..P }),
     c("phreeoni_card", "phreeoni", "Phreeoni Card", S::Weapon, Mythic, Prefix("Devouring"), "a vast desert under a red sun", Procs { growth: 6, ..P }),
     // --- Payon Caves -------------------------------------------------
     Card { family: family::RESTLESS_DEAD, ..c("zombie_card", "zombie", "Zombie Card", S::Body, Common, Prefix("Deathless"), "a lantern-lit cave tunnel", Procs { deathless: true, ..P }) },
@@ -478,7 +486,97 @@ pub const CARDS: &[Card] = &[
     c("nine_tail_card", "nine_tail", "Nine Tail Card", S::Accessory, Common, Prefix("Foxfire"), "an autumn forest at the cave mouth", Procs { free_every: 9, ..P }),
     c("weeping_bride_card", "weeping_bride", "Weeping Bride Card", S::Head, Rare, Suffix("the Veil"), "a ruined wedding hall with petals", Procs { desperate_ac: 3, ..P }),
     Card { family: family::RESTLESS_DEAD, ..c("jiangshi_general_card", "jiangshi_general", "Jiangshi General Card", S::Body, Rare, Prefix("Warlord's"), "a war camp of banners in a cavern", Procs { blow_cap: 35, ..P }) },
+    Card { family: family::RESTLESS_DEAD, ..c("skeleton_captain_card", "skeleton_captain", "Skeleton Captain Card", S::Shield, Rare, Prefix("Shieldwall"), "a ruined guard post in a cave", Procs { riposte: 8, pack: 1, ..P }) },
     c("moonlight_flower_card", "moonlight_flower", "Moonlight Flower Card", S::Garment, Mythic, Suffix("the Ninth Moon"), "a cherry-blossom grove under the moon", Procs { moon: 20, ..P }),
+    // >>> orc_village (agent ORC) >>>
+    // --- Orc Village -------------------------------------------------
+    c("orc_baby_card", "orc_baby", "Orc Baby Card", S::Shoes, Common, Suffix("the Runt"), "a trampled meadow by a thatched hut", Procs { flee_speed: 15, ..P }),
+    Card { family: family::WARBAND, ..c("ork_warrior_card", "ork_warrior", "Orc Warrior Card", S::Weapon, Common, Prefix("Orcish"), "a wooden palisade with red banners", Procs { size_bane: [0, 2, 0], ..P }) },
+    c("goblin_1_card", "goblin_1", "Goblin Card", S::Weapon, Common, Prefix("Cutthroat"), "a goblin camp of tents and loot sacks", Procs { crit_zeny: true, ..P }),
+    c("savage_card", "savage", "Savage Card", S::Body, Uncommon, Prefix("Bristling"), "a muddy wallow at the edge of a forest", Procs { thorns: 6, ..P }),
+    Card { family: family::WARBAND, ..c("orc_lady_card", "orc_lady", "Orc Lady Card", S::Garment, Uncommon, Suffix("the Clan"), "a cooking fire in an orc village", Procs { pack: 1, ..P }) },
+    c("orc_archer_card", "orc_archer", "Orc Archer Card", S::Accessory, Uncommon, Suffix("the Volley"), "a lookout platform over the war camp", Procs { reach: 1, fresh: 6, ..P }),
+    c("zenorc_card", "zenorc", "Zenorc Card", S::Weapon, Uncommon, Prefix("Festering"), "a dim hut full of smoke and bones", Procs { venom_long: true, afflicted_bane: 2, ..P }),
+    Card { family: family::WARBAND, ..c("high_orc_card", "high_orc", "High Orc Card", S::Shield, Uncommon, Prefix("Ironhide"), "a forge glowing in a war camp", Procs { riposte: 8, ..P }) },
+    c("steam_goblin_card", "steam_goblin", "Goblin Steamrider Card", S::Shoes, Rare, Prefix("Steam-driven"), "a dusty track through the hills", Procs { ride_speed: 12, dodge_rush: true, ..P }),
+    c("goblin_leader_card", "goblin_leader", "Goblin Leader Card", S::Head, Rare, Prefix("Ringleader's"), "a hideout piled with stolen treasure", Procs { elite_zeny: 25, zeny_pct: 8, ..P }),
+    Card { family: family::WARBAND, ..c("ork_hero_card", "ork_hero", "Orc Hero Card", S::Weapon, Rare, Prefix("Heroic"), "a duelling ring of stakes and banners", Procs { elite_bane: 4, counter: 2, ..P }) },
+    Card { family: family::WARBAND, ..c("orc_lord_card", "orc_lord", "Orc Lord Card", S::Body, Mythic, Suffix("the Warlord"), "the steps of a chief's hall with war drums", Procs { blow_cap: 30, pack: 2, ..P }) },
+    // <<< orc_village <<<
+    // >>> toy_factory (agent TOY) >>>
+    // --- Toy Factory -------------------------------------------------
+    c("cookie_card", "cookie", "Cookie Card", S::Accessory, Common, Suffix("Sweets"), "a gingerbread workshop shelf", Procs { potion_cd: 10, ..P }),
+    Card { family: family::TOYBOX, ..c("mystcase_card", "mystcase", "Myst Case Card", S::Accessory, Common, Prefix("Gift-wrapped"), "a pile of wrapped presents under a tree", Procs { zeny_pct: 6, ..P }) },
+    c("cookie_xmas_card", "cookie_xmas", "Christmas Cookie Card", S::Head, Common, Prefix("Frosted"), "a frosted window with snowflakes", Procs { cond_short: 15, ..P }),
+    Card { family: family::TOYBOX, ..c("cruiser_card", "cruiser", "Cruiser Card", S::Weapon, Uncommon, Prefix("Sharpshooter's"), "a toy-soldier parade ground of building blocks", Procs { reach: 1, crit_die: 6, ..P }) },
+    Card { family: family::TOYBOX, hp: 12, ..c("teddy_bear_card", "teddy_bear", "Teddy Bear Card", S::Body, Uncommon, Prefix("Stuffed"), "a cosy toy shelf with a patchwork quilt", Procs { still_regen: 4, ..P }) },
+    Card { exclusive: ELEMENT, ..c("chepet_card", "chepet", "Chepet Card", S::Weapon, Uncommon, Suffix("Matches"), "a snowy street lit by a single match", Procs { endow: Some(DamageType::Fire), ignite: 10, ..P }) },
+    c("marionette_card", "marionette", "Marionette Card", S::Garment, Uncommon, Prefix("Stringless"), "a puppet theatre stage with red curtains", Procs { immune: bits(&[Condition::Rooted]), dodge: 4, ..P }),
+    Card { family: family::TOYBOX, ..c("alarm_card", "alarm", "Alarm Card", S::Shoes, Uncommon, Prefix("Wound-up"), "a clockmaker's bench full of gears", Procs { rank_speed: 2, ..P }) },
+    c("clock_card", "clock", "Clock Card", S::Shield, Uncommon, Suffix("the Hour"), "a dusty clock tower room", Procs { still_ac: 2, ..P }),
+    Card { exclusive: ELEMENT, ..c("garm_baby_card", "garm_baby", "Baby Hatii Card", S::Weapon, Uncommon, Suffix("Frostbite"), "a frozen ice cave", Procs { endow: Some(DamageType::Cold), chill: 10, ..P }) },
+    c("antonio_card", "antonio", "Antonio Card", S::Garment, Rare, Prefix("Pilfered"), "a moonlit rooftop with a sack of gifts", Procs { magnet: 40, elite_zeny: 20, ..P }),
+    c("foreman_card", "foreman", "The Foreman Card", S::Accessory, Rare, Suffix("Overtime"), "a factory floor of conveyor belts and gears", Procs { free_cd: 6, ..P }),
+    c("hatii_card", "hatii", "Hatii Card", S::Shoes, Rare, Prefix("Glacial"), "a glacier under the northern lights", Procs { immune: bits(&[Condition::Frozen, Condition::Slowed]), slow_back: 15, ..P }),
+    Card { family: family::TOYBOX, ..c("knight_of_windstorm_card", "knight_of_windstorm", "Stormy Knight Card", S::Weapon, Mythic, Prefix("Stormcaller's"), "a raging blizzard in a frozen hall", Procs { free_every: 6, chill: 15, ..P }) },
+    // <<< toy_factory <<<
+    // >>> glast_heim (agent GLAST) >>>
+    // --- Glast Heim Churchyard ---------------------------------------
+    c("ghoul_card", "ghoul", "Ghoul Card", S::Body, Common, Prefix("Graveborn"), "a churchyard of tilted gravestones at night", Procs { immune: bits(&[Condition::Poisoned]), thorns: 4, ..P }),
+    c("whisper_card", "whisper", "Whisper Card", S::Garment, Common, Prefix("Whispering"), "a misty graveyard under a pale moon", Procs { dodge: 6, ..P }),
+    c("hunter_fly_card", "hunter_fly", "Hunter Fly Card", S::Weapon, Common, Prefix("Bloodthirsty"), "a crumbling chapel wall buzzing with flies", Procs { leech: 8, ..P }),
+    c("skel_prisoner_card", "skel_prisoner", "Skeleton Prisoner Card", S::Weapon, Uncommon, Suffix("Chains"), "a dungeon cell of rusty chains", Procs { held_bane: 4, ..P }),
+    c("raydric_archer_card", "raydric_archer", "Raydric Archer Card", S::Accessory, Uncommon, Suffix("the Black Fletcher"), "a ruined castle rampart at dusk", Procs { crit_die: 8, reach: 1, ..P }),
+    c("evil_druid_card", "evil_druid", "Evil Druid Card", S::Body, Uncommon, Prefix("Hexproof"), "a gnarled dead tree among graves", Procs { immune: bits(&[Condition::Blinded, Condition::Silenced]), cond_short: 15, ..P }),
+    Card { family: family::FALLEN_CAPITAL, ..c("raydric_card", "raydric", "Raydric Card", S::Garment, Uncommon, Prefix("Hollow"), "a hall of empty armour stands", Procs { gilded: 10, ..P }) },
+    c("wraith_card", "wraith", "Wraith Card", S::Shoes, Uncommon, Suffix("the Wraith"), "a foggy moor with will-o'-the-wisps", Procs { immune: bits(&[Condition::Feared]), flee_speed: 12, ..P }),
+    c("dark_priest_card", "dark_priest", "Dark Priest Card", S::Head, Uncommon, Prefix("Profane"), "a desecrated altar with black candles", Procs { feast: 40, ..P }),
+    Card { family: family::FALLEN_CAPITAL, ..c("khalitzburg_card", "khalitzburg", "Khalitzburg Card", S::Shield, Uncommon, Prefix("Bulwark"), "a broken castle gate", Procs { riposte: 10, still_ac: 1, ..P }) },
+    Card { family: family::FALLEN_CAPITAL, ..c("knight_of_abyss_card", "knight_of_abyss", "Abysmal Knight Card", S::Weapon, Rare, Prefix("Abyssal"), "a dark castle courtyard with a black banner", Procs { elite_bane: 5, ..P }) },
+    c("zombie_master_card", "zombie_master", "Zombie Master Card", S::Accessory, Rare, Suffix("the Gravekeeper"), "an open grave under a lantern", Procs { deathless: true, ..P }),
+    c("dark_illusion_card", "dark_illusion", "Dark Illusion Card", S::Head, Rare, Suffix("Shadows"), "a violet void of drifting shadows", Procs { veil: 25, ..P }),
+    Card { family: family::FALLEN_CAPITAL, ..c("bloody_knight_card", "bloody_knight", "Bloody Knight Card", S::Weapon, Rare, Prefix("Bloodied"), "a blood-red throne room of a fallen castle", Procs { cull: true, fresh: 8, ..P }) },
+    Card { family: family::FALLEN_CAPITAL, hp: 15, ..c("dark_lord_card", "dark_lord", "Dark Lord Card", S::Shoes, Mythic, Suffix("the Abyss"), "a ruined chapel under an eclipsed moon", Procs { last_stand: true, ..P }) },
+    // <<< glast_heim <<<
+    // >>> thor_volcano (agent THOR) >>>
+    // --- Thor Volcano ------------------------------------------------
+    c("magmaring_card", "magmaring", "Magmaring Card", S::Shoes, Common, Prefix("Firewalker's"), "a glowing magma pool between black rocks", Procs { immune: bits(&[Condition::Burning]), ..P }),
+    Card { family: family::EMBER, ..c("explosion_card", "explosion", "Explosion Card", S::Weapon, Common, Suffix("Sparks"), "a smoky volcanic sky full of sparks", Procs { ignite: 8, ..P }) },
+    c("gig_card", "gig", "Gig Card", S::Weapon, Common, Prefix("Searing"), "a scorched rock ledge over lava", Procs { afflicted_bane: 2, ..P }),
+    Card { family: family::EMBER, ..c("kaho_card", "kaho", "Kaho Card", S::Accessory, Uncommon, Prefix("Kindled"), "a cavern lit by floating fire wisps", Procs { wisp: 5, ..P }) },
+    c("deleter_card", "deleter_", "Deleter Card", S::Body, Uncommon, Prefix("Dragonscale"), "a dragon's nest of warm black stones", Procs { gilded: 8, ..P }),
+    c("imp_card", "imp", "Imp Card", S::Garment, Uncommon, Prefix("Impish"), "a crack of glowing lava in dark rock", Procs { dodge: 5, dodge_rush: true, ..P }),
+    Card { family: family::EMBER, exclusive: ELEMENT, ..c("blazzer_card", "blazzer", "Blazer Card", S::Weapon, Uncommon, Suffix("Blazes"), "a wall of flame across a volcanic cave", Procs { endow: Some(DamageType::Fire), ignite: 12, ..P }) },
+    c("lava_golem_card", "lava_golem", "Lava Golem Card", S::Shield, Uncommon, Prefix("Molten"), "a river of lava under a dark cave roof", Procs { thorns: 8, colossus: true, ..P }),
+    c("nightmare_terror_card", "nightmare_terror", "Nightmare Terror Card", S::Head, Uncommon, Prefix("Dreamless"), "a smoky volcanic plain under a red moon", Procs { immune: bits(&[Condition::Feared, Condition::Stunned]), ..P }),
+    c("byorgue_card", "byorgue", "Byorgue Card", S::Weapon, Rare, Prefix("Backstabber's"), "a shadowy mine tunnel with rails", Procs { cull: true, crit_sting: true, ..P }),
+    c("sky_deleter_card", "sky_deleter", "Sky Deleter Card", S::Garment, Rare, Suffix("the Updraft"), "hot updrafts over a volcano crater", Procs { ride_speed: 10, flee_speed: 10, ..P }),
+    c("salamander_card", "salamander", "Salamander Card", S::Body, Rare, Prefix("Salamander-hide"), "a bubbling magma chamber", Procs { cond_short: 30, still_regen: 5, ..P }),
+    Card { family: family::EMBER, ..c("kasa_card", "kasa", "Kasa Card", S::Accessory, Rare, Suffix("Wildfire"), "a ring of blue-white wildfire", Procs { free_cd: 8, ..P }) },
+    Card { family: family::EMBER, ..c("ifrit_card", "ifrit", "Ifrit Card", S::Accessory, Mythic, Suffix("the Inferno"), "the heart of an erupting volcano", Procs { growth: 8, ignite: 20, ..P }) },
+    // <<< thor_volcano <<<
+    // >>> thanatos_tower (agent TOWER) >>>
+    // --- Thanatos Tower ----------------------------------------------
+    // (the five Prismatic plasma cards share exclusive group 29: one per item)
+    c("deathword_card", "deathword", "Death Word Card", S::Accessory, Common, Suffix("the Last Page"), "a haunted library of flapping books", Procs { free_every: 10, ..P }),
+    c("ancient_mimic_card", "ancient_mimic", "Ancient Mimic Card", S::Accessory, Common, Prefix("Greedy"), "a museum vault of open treasure chests", Procs { zeny_pct: 10, magnet: 20, ..P }),
+    Card { exclusive: ELEMENT, ..c("owl_duke_card", "owl_duke", "Owl Duke Card", S::Weapon, Uncommon, Suffix("Thunder"), "a stormy tower balcony at night", Procs { endow: Some(DamageType::Lightning), fresh: 6, ..P }) },
+    Card { exclusive: 29, ..c("plasma_r_card", "plasma_r", "Red Plasma Card", S::Body, Uncommon, Prefix("Crimson"), "a glowing red specimen tube in a laboratory", Procs { gilded: 6, immune: bits(&[Condition::Burning]), ..P }) },
+    Card { exclusive: 29, ..c("plasma_b_card", "plasma_b", "Blue Plasma Card", S::Body, Uncommon, Prefix("Azure"), "a glowing blue specimen tube in a laboratory", Procs { gilded: 6, immune: bits(&[Condition::Slowed]), ..P }) },
+    Card { exclusive: 29, ..c("plasma_g_card", "plasma_g", "Green Plasma Card", S::Body, Uncommon, Prefix("Verdant"), "a glowing green specimen tube in a laboratory", Procs { gilded: 6, immune: bits(&[Condition::Rooted]), ..P }) },
+    Card { exclusive: 29, ..c("plasma_p_card", "plasma_p", "Purple Plasma Card", S::Body, Uncommon, Prefix("Violet"), "a glowing purple specimen tube in a laboratory", Procs { gilded: 6, immune: bits(&[Condition::Blinded]), ..P }) },
+    Card { exclusive: 29, ..c("plasma_y_card", "plasma_y", "Yellow Plasma Card", S::Body, Uncommon, Prefix("Amber"), "a glowing yellow specimen tube in a laboratory", Procs { gilded: 6, immune: bits(&[Condition::Stunned]), ..P }) },
+    c("retribution_card", "retribution", "Baroness of Retribution Card", S::Weapon, Uncommon, Prefix("Vengeful"), "a dark marble sanctum with black feathers", Procs { counter: 3, ..P }),
+    c("solace_card", "solace", "Lady Solace Card", S::Head, Uncommon, Suffix("Solace"), "a moonlit chapel with a golden harp", Procs { cond_short: 25, ..P }),
+    c("shelter_card", "shelter", "Mistress of Shelter Card", S::Shield, Uncommon, Suffix("Shelter"), "a white sanctum under a dome of light", Procs { veil: 30, ..P }),
+    c("observation_card", "observation", "Dame of Sentinel Card", S::Head, Rare, Prefix("Watchful"), "a tower gallery of angel statues", Procs { still_ac: 2, crit_die: 6, ..P }),
+    c("curator_card", "curator", "The Curator Card", S::Garment, Rare, Suffix("the Archive"), "a museum hall of glass cases and old books", Procs { combo_secs: 3, rank_speed: 2, ..P }),
+    Card { family: family::MEMORY, ..c("tha_odium_card", "tha_odium", "Odium of Thanatos Card", S::Weapon, Rare, Prefix("Hateful"), "a red-lit tower hall full of cracked masks", Procs { elite_bane: 5, reach: 1, ..P }) },
+    Card { family: family::MEMORY, ..c("tha_despero_card", "tha_despero", "Despero of Thanatos Card", S::Body, Rare, Suffix("Despair"), "a grey hall of falling ash", Procs { desperate_ac: 4, last_stand: true, ..P }) },
+    Card { family: family::MEMORY, ..c("tha_dolor_card", "tha_dolor", "Dolor of Thanatos Card", S::Weapon, Rare, Prefix("Agonising"), "a violet-lit crypt of broken chains", Procs { crit_sting: true, afflicted_bane: 3, ..P }) },
+    Card { family: family::MEMORY, ..c("tha_maero_card", "tha_maero", "Maero of Thanatos Card", S::Shoes, Rare, Suffix("Sorrow's Tread"), "a pale hall of still water and tears", Procs { slow_back: 20, still_regen: 6, ..P }) },
+    c("thanatos_card", "thanatos", "Thanatos Card", S::Weapon, Mythic, Suffix("Memory"), "the broken summit of a haunted tower", Procs { moon: 15, growth: 8, ..P }),
+    // <<< thanatos_tower <<<
     // --- Flora -------------------------------------------------------
     Card { exclusive: ELEMENT, mods: Mods { light: 1.0, ..N }, ..c("shining_plant_card", "shining_plant", "Shining Plant Card", S::Weapon, Rare, Suffix("Radiance"), "a glowing grove with golden pollen", Procs { endow: Some(DamageType::Radiant), ..P }) },
     Card { mods: Mods { potion: 0.2, ..N }, ..c("black_mushroom_card", "black_mushroom", "Black Mushroom Card", S::Accessory, Common, Prefix("Sporecap"), "a shady forest floor", Procs { spore_cure: true, ..P }) },
@@ -515,6 +613,39 @@ pub const SETS: &[Set] = &[
             (4, Mods { evil_damage: 2, ..N }, "+2 damage to undead and demons"),
         ],
     },
+    // >>> orc_village: set (agent ORC) >>>
+    Set { family: family::WARBAND, name: "Warband", tiers: &[(3, Mods { ac: 1, ..N }, "+1 AC")] },
+    // <<< orc_village: set <<<
+    // >>> toy_factory: set (agent TOY) >>>
+    Set { family: family::TOYBOX, name: "Toybox", tiers: &[(3, Mods { speed: 0.05, ..N }, "+5% walking speed")] },
+    // <<< toy_factory: set <<<
+    // >>> glast_heim: set (agent GLAST) >>>
+    Set {
+        family: family::FALLEN_CAPITAL,
+        name: "Fallen Capital",
+        // The design's "+5 % non-physical resist" is an all-round resist:
+        // no per-type mod.
+        tiers: &[(3, Mods { ac: 1, resist: 0.05, ..N }, "+1 AC, −5% damage taken")],
+    },
+    // <<< glast_heim: set <<<
+    // >>> thor_volcano: set (agent THOR) >>>
+    Set {
+        family: family::EMBER,
+        name: "Ember Court",
+        // The design's "fire damage taken −15 %" needs a per-type resistance
+        // the mods do not have: a potion bonus and a small all-round one.
+        tiers: &[(2, Mods { potion: 0.2, ..N }, "Potions and food restore 20% more"), (3, Mods { resist: 0.06, ..N }, "−6% damage taken")],
+    },
+    // <<< thor_volcano: set <<<
+    // >>> thanatos_tower: set (agent TOWER) >>>
+    Set {
+        family: family::MEMORY,
+        name: "Memories of Thanatos",
+        // The four fragments of the dead hero's mind (the design's "+10 %
+        // non-physical resist" is an all-round resist: no per-type mod).
+        tiers: &[(2, Mods { to_hit: 1, ..N }, "+1 to hit"), (4, Mods { to_hit: 1, resist: 0.08, ..N }, "+1 more to hit, −8% damage taken")],
+    },
+    // <<< thanatos_tower: set <<<
 ];
 
 pub fn card(id: &str) -> Option<&'static Card> {
@@ -581,11 +712,12 @@ pub enum CardError {
     Conflict,
 }
 
-/// The item's name with its cards: `+N Prefix Base of Suffix`, one prefix
-/// and one suffix (the rarest card of each, ties by id; keys keep cards
-/// sorted, so the order they went in never matters). A base already
-/// holding " of " joins the suffix with "and".
-pub fn item_name(base: &str, refine: u8, cards: &[String]) -> String {
+/// The item's name with its cards: `+N Prefix Base of Suffix [S]`, one
+/// prefix and one suffix (the rarest card of each, ties by id; keys keep
+/// cards sorted, so the order they went in never matters), then `[S]` for
+/// an item with S card sockets ([`slots`]). A base already holding " of "
+/// joins the suffix with "and". The client's `ItemBook.name` mirrors it.
+pub fn item_name(base: &str, refine: u8, cards: &[String], sockets: u8) -> String {
     let pick = |want_prefix: bool| {
         cards
             .iter()
@@ -608,6 +740,9 @@ pub fn item_name(base: &str, refine: u8, cards: &[String]) -> String {
     if let Some(s) = pick(false) {
         name.push_str(if base.contains(" of ") { " and " } else { " of " });
         name.push_str(s);
+    }
+    if sockets > 0 {
+        name.push_str(&format!(" [{sockets}]"));
     }
     name
 }
@@ -639,6 +774,7 @@ fn cond_label(c: Condition) -> &'static str {
         Condition::Mired => "Mired",
         Condition::Taunted => "Taunted",
         Condition::Feared => "Feared",
+        Condition::Silenced => "Silenced",
     }
 }
 
@@ -913,11 +1049,19 @@ mod tests {
     #[test]
     fn names_take_one_prefix_and_one_suffix_whatever_the_order() {
         let cards = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(item_name("Sword", 7, &cards(&["drops_card", "hornet_card"])), "+7 Stinging Sword of Kindling");
-        assert_eq!(item_name("Sword", 0, &cards(&["hornet_card", "tarou_card"])), "Stinging Sword");
-        assert_eq!(item_name("Sword", 0, &cards(&["tarou_card", "phreeoni_card"])), "Devouring Sword", "the rarer card names it");
-        assert_eq!(item_name("Mace of Dawn", 0, &cards(&["drops_card"])), "Mace of Dawn and Kindling");
-        assert_eq!(item_name("Sword", 0, &[]), "Sword");
+        assert_eq!(item_name("Sword", 7, &cards(&["drops_card", "hornet_card"]), 0), "+7 Stinging Sword of Kindling");
+        assert_eq!(item_name("Sword", 0, &cards(&["hornet_card", "tarou_card"]), 0), "Stinging Sword");
+        assert_eq!(item_name("Sword", 0, &cards(&["tarou_card", "phreeoni_card"]), 0), "Devouring Sword", "the rarer card names it");
+        assert_eq!(item_name("Mace of Dawn", 0, &cards(&["drops_card"]), 0), "Mace of Dawn and Kindling");
+        assert_eq!(item_name("Sword", 0, &[], 0), "Sword");
+    }
+
+    #[test]
+    fn names_end_with_the_socket_count() {
+        let cards = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let sword = find("sword").unwrap();
+        assert_eq!(item_name(sword.name, 0, &[], slots(sword)), "Sword [3]");
+        assert_eq!(item_name("Sword", 7, &cards(&["drops_card", "hornet_card"]), 3), "+7 Stinging Sword of Kindling [3]");
     }
 
     #[test]

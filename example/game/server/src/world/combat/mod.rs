@@ -19,6 +19,7 @@ pub mod magic;
 pub mod refine;
 pub mod monster;
 pub mod profile;
+pub mod quests;
 pub mod rules;
 pub mod skills;
 pub mod weapon;

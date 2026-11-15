@@ -26,8 +26,8 @@ impl StateFlusher {
         session: &ActiveSession,
     ) -> Result<bool, sqlx::Error> {
         let mut char_lock = session.character.write().await;
-        if let Some(ref mut character) = *char_lock {
-            if character.is_dirty {
+        if let Some(ref mut character) = *char_lock
+            && character.is_dirty {
                 CharacterRepo::update_dirty_state(
                     pool,
                     character.id,
@@ -39,6 +39,7 @@ impl StateFlusher {
                     character.look,
                     &character.loadout,
                     &character.bag,
+                    character.homunculus.as_ref(),
                 )
                 .await?;
                 LeaderboardRepo::store_record(pool, character.id, &character.record).await?;
@@ -50,7 +51,6 @@ impl StateFlusher {
                 );
                 return Ok(true);
             }
-        }
         Ok(false)
     }
 

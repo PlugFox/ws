@@ -38,7 +38,7 @@ pub(crate) struct Script {
 
 /// The shortest pause a phase may leave between abilities: the party gets
 /// to read the ground and hit back between patterns, even when enraged.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(test), expect(dead_code, reason = "the script tests check every phase against it"))]
 pub(crate) const MIN_GAP_SECS: f32 = 2.0;
 
 #[derive(Debug)]
@@ -119,8 +119,10 @@ pub(crate) enum Pattern {
     /// Bounding hops from the monster toward the anchor: `count` landing
     /// circles, the first `first` away, each hop `grow` longer.
     Hops { count: u8, first: f32, grow: f32, r: f32, every: f32 },
-    /// Lasting ground: bites every `pulse` for `secs`.
-    Pool { r: f32, secs: f32, pulse: f32 },
+    /// Lasting ground: bites every `pulse` for `secs`, and drags whoever
+    /// stands in it `pull` cells a second toward its centre (negative
+    /// pushes out; walls stop it; 0 = none) for as long as it lasts.
+    Pool { r: f32, secs: f32, pulse: f32, pull: f32 },
     /// A nova of radius `r` on the monster; `safe` sanctuaries of `safe_r`
     /// stand `dist` away around it, and whoever is inside one is spared.
     Sanctuary { r: f32, safe: u8, safe_r: f32, dist: f32 },
@@ -152,6 +154,11 @@ pub(crate) enum Pattern {
     /// arming `fuse` later and biting every `pulse` for `secs` (keep going
     /// straight, never double back; the others keep off the trail).
     Trail { count: u8, r: f32, every: f32, fuse: f32, secs: f32, pulse: f32 },
+    /// A rain of `count` circles (+ `per_player` for each fighter past the
+    /// first) of radius `r` on walkable points the stage's dice pick within
+    /// `spread` of each anchor, landing one every `every` (meteor storms,
+    /// boulders, blizzards: watch the shadows, keep moving).
+    Rain { count: u8, per_player: u8, r: f32, spread: f32, every: f32 },
 }
 
 /// What a beat does to a player inside.
@@ -166,6 +173,15 @@ pub(crate) struct Hurt {
     pub save: bool,
     /// A projectile: a ranged ward (Pneuma) turns it aside.
     pub ranged: bool,
+    /// Cells it throws whoever it hits, away from the zone (negative pulls
+    /// toward it); walls stop it. Away from: a circle's or a ring's centre,
+    /// a cone's apex, a bar's axis (sideways out of a charge).
+    pub push: f32,
+    /// A shared blow (stack up): 0 = every victim takes the full roll;
+    /// `n` = one roll divided among everyone inside, and no share is worth
+    /// more than `n` of its dice (a lone victim of a 28d6 split 8 takes 8
+    /// twenty-eighths of the roll).
+    pub split: u8,
 }
 
 /// What the monster itself does.
@@ -211,10 +227,10 @@ pub(crate) enum Action {
     HatchAll { secs: f32, radius: f32, heal: u8, break_pct: u8 },
 }
 
-const NO_HURT: Hurt = Hurt { dice: (0, 0), kind: DamageType::Physical, rider: None, save: false, ranged: false };
+const NO_HURT: Hurt = Hurt { dice: (0, 0), kind: DamageType::Physical, rider: None, save: false, ranged: false, push: 0.0, split: 0 };
 
-const fn hurt(n: u8, s: u8, kind: DamageType) -> Hurt {
-    Hurt { dice: (n, s), kind, rider: None, save: true, ranged: false }
+pub(super) const fn hurt(n: u8, s: u8, kind: DamageType) -> Hurt {
+    Hurt { dice: (n, s), kind, rider: None, save: true, ranged: false, push: 0.0, split: 0 }
 }
 
 const fn ability(id: &'static str, name: &'static str, wind: f32, anchor: Anchor, pattern: Pattern, hurt: Hurt, look: u8) -> Ability {
@@ -222,11 +238,55 @@ const fn ability(id: &'static str, name: &'static str, wind: f32, anchor: Anchor
 }
 
 mod culvert;
+mod glast;
+mod orc;
 mod payon;
 mod sograt;
+mod thanatos;
+mod thor;
+mod toy;
 
 /// The scripted monsters.
-pub(crate) static SCRIPTS: &[Script] = &[ECLIPSE, VOCAL, MASTERING, ANGELING, sograt::SIROCCO, sograt::SAND_COLOSSUS, sograt::PHREEONI, payon::WEEPING_BRIDE, payon::JIANGSHI_GENERAL, payon::MOONLIGHT_FLOWER, culvert::THIEF_BUG_QUEEN, culvert::RAT_KING, culvert::GOLDEN_THIEF_BUG];
+pub(crate) static SCRIPTS: &[Script] = &[
+    ECLIPSE,
+    VOCAL,
+    MASTERING,
+    ANGELING,
+    sograt::SIROCCO,
+    sograt::SAND_COLOSSUS,
+    sograt::PHREEONI,
+    payon::WEEPING_BRIDE,
+    payon::JIANGSHI_GENERAL,
+    payon::MOONLIGHT_FLOWER,
+    culvert::THIEF_BUG_QUEEN,
+    culvert::RAT_KING,
+    culvert::GOLDEN_THIEF_BUG,
+    // >>> orc_village (agent ORC) >>>
+    orc::GOBLIN_LEADER,
+    orc::ORC_HERO,
+    orc::ORC_LORD,
+    // <<< orc_village <<<
+    // >>> toy_factory (agent TOY) >>>
+    toy::FOREMAN,
+    toy::HATII,
+    toy::STORMY_KNIGHT,
+    // <<< toy_factory <<<
+    // >>> glast_heim (agent GLAST) >>>
+    glast::DARK_ILLUSION,
+    glast::BLOODY_KNIGHT,
+    glast::DARK_LORD,
+    // <<< glast_heim <<<
+    // >>> thor_volcano (agent THOR) >>>
+    thor::SALAMANDER,
+    thor::KASA,
+    thor::IFRIT,
+    // <<< thor_volcano <<<
+    // >>> thanatos_tower (agent TOWER) >>>
+    thanatos::ODIUM,
+    thanatos::DESPERO,
+    thanatos::THANATOS,
+    // <<< thanatos_tower <<<
+];
 
 /// Traits of a scripted monster beyond its rotation (its body, not its
 /// abilities): spell reflection, a cracked shell, coins spilled.
@@ -248,8 +308,12 @@ pub(crate) struct Traits {
     pub burst_zeny: (u32, u32),
 }
 
+/// Every script file's [`Traits`] table (a file without traited
+/// monsters has an empty one).
+const TRAITS: &[&[Traits]] = &[culvert::TRAITS, payon::TRAITS, sograt::TRAITS, orc::TRAITS, toy::TRAITS, glast::TRAITS, thor::TRAITS, thanatos::TRAITS];
+
 pub(crate) fn traits(monster: &str) -> Option<&'static Traits> {
-    culvert::TRAITS.iter().find(|t| t.monster == monster)
+    TRAITS.iter().flat_map(|t| t.iter()).find(|t| t.monster == monster)
 }
 
 pub(crate) fn find(monster: &str) -> Option<&'static Script> {
@@ -415,7 +479,7 @@ const MASTERING: Script = Script {
         // 3: slime rain: a sticky pool under every player.
         Ability {
             hurt: Hurt { rider: Some((Condition::Slowed, 1.5)), save: false, ..hurt(1, 6, DamageType::Poison) },
-            ..ability("boss_slime_rain", "Slime Rain", 1.2, Anchor::Each(EVERYONE), Pattern::Pool { r: 2.6, secs: 8.0, pulse: 1.0 }, NO_HURT, look::SWAMP)
+            ..ability("boss_slime_rain", "Slime Rain", 1.2, Anchor::Each(EVERYONE), Pattern::Pool { r: 2.6, secs: 8.0, pulse: 1.0, pull: 0.0 }, NO_HURT, look::SWAMP)
         },
         // 4: big bounce: three heavy hops toward the nearest player.
         Ability {
@@ -498,7 +562,7 @@ const ANGELING: Script = Script {
             "Consecrate",
             1.2,
             Anchor::Each(EVERYONE),
-            Pattern::Pool { r: 3.0, secs: 10.0, pulse: 1.0 },
+            Pattern::Pool { r: 3.0, secs: 10.0, pulse: 1.0, pull: 0.0 },
             Hurt { save: false, ..hurt(1, 8, DamageType::Radiant) },
             look::HOLY,
         ),

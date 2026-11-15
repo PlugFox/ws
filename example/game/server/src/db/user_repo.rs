@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use crate::db::Db;
 use chrono::{DateTime, Utc};
-use sqlx::FromRow;
+use sqlx::{AssertSqlSafe, FromRow};
 
 #[derive(Clone, Debug, Serialize, Deserialize, FromRow)]
 pub struct UserRecord {
@@ -51,9 +51,9 @@ impl UserRepo {
         email: Option<&str>,
         telegram: Option<&str>,
     ) -> Result<UserRecord, sqlx::Error> {
-        sqlx::query_as::<_, UserRecord>(&format!(
+        sqlx::query_as::<_, UserRecord>(AssertSqlSafe(format!(
             "INSERT INTO users (username, password_hash, email, telegram) VALUES ($1, $2, $3, $4) RETURNING {COLUMNS}"
-        ))
+        )))
         .bind(username)
         .bind(password_hash)
         .bind(email)
@@ -64,7 +64,7 @@ impl UserRepo {
 
     /// The account (if any) using `email`, in any case.
     pub async fn find_by_email(pool: &Db, email: &str) -> Result<Option<UserRecord>, sqlx::Error> {
-        sqlx::query_as::<_, UserRecord>(&format!("SELECT {COLUMNS} FROM users WHERE lower(email) = lower($1)"))
+        sqlx::query_as::<_, UserRecord>(AssertSqlSafe(format!("SELECT {COLUMNS} FROM users WHERE lower(email) = lower($1)")))
             .bind(email)
             .fetch_optional(pool)
             .await
@@ -72,7 +72,7 @@ impl UserRepo {
 
     /// The account (if any) using Telegram `name`, in any case.
     pub async fn find_by_telegram(pool: &Db, name: &str) -> Result<Option<UserRecord>, sqlx::Error> {
-        sqlx::query_as::<_, UserRecord>(&format!("SELECT {COLUMNS} FROM users WHERE lower(telegram) = lower($1)"))
+        sqlx::query_as::<_, UserRecord>(AssertSqlSafe(format!("SELECT {COLUMNS} FROM users WHERE lower(telegram) = lower($1)")))
             .bind(name)
             .fetch_optional(pool)
             .await
@@ -83,7 +83,7 @@ impl UserRepo {
     /// loses its verification mark. A taken one is a unique violation.
     pub async fn set_contacts(pool: &Db, id: u32, update: &ContactsUpdate<'_>) -> Result<Option<UserRecord>, sqlx::Error> {
         // On the right of SET, columns are the old values.
-        sqlx::query_as::<_, UserRecord>(&format!(
+        sqlx::query_as::<_, UserRecord>(AssertSqlSafe(format!(
             "UPDATE users SET \
                 email = CASE WHEN $2 THEN $3 ELSE email END, \
                 email_verified_at = CASE WHEN $2 AND lower($3) IS DISTINCT FROM lower(email) THEN NULL ELSE email_verified_at END, \
@@ -91,7 +91,7 @@ impl UserRepo {
                 telegram_verified_at = CASE WHEN $4 AND lower($5) IS DISTINCT FROM lower(telegram) THEN NULL ELSE telegram_verified_at END, \
                 updated_at = CASE WHEN $2 OR $4 THEN now() ELSE updated_at END \
              WHERE id = $1 RETURNING {COLUMNS}"
-        ))
+        )))
         .bind(i64::from(id))
         .bind(update.email.is_some())
         .bind(update.email.flatten())
@@ -105,7 +105,7 @@ impl UserRepo {
         pool: &Db,
         username: &str,
     ) -> Result<Option<UserRecord>, sqlx::Error> {
-        sqlx::query_as::<_, UserRecord>(&format!("SELECT {COLUMNS} FROM users WHERE lower(username) = lower($1)"))
+        sqlx::query_as::<_, UserRecord>(AssertSqlSafe(format!("SELECT {COLUMNS} FROM users WHERE lower(username) = lower($1)")))
         .bind(username)
         .fetch_optional(pool)
         .await
@@ -116,7 +116,7 @@ impl UserRepo {
         id: u32,
     ) -> Result<Option<UserRecord>, sqlx::Error> {
         let id_i64 = id as i64;
-        sqlx::query_as::<_, UserRecord>(&format!("SELECT {COLUMNS} FROM users WHERE id = $1"))
+        sqlx::query_as::<_, UserRecord>(AssertSqlSafe(format!("SELECT {COLUMNS} FROM users WHERE id = $1")))
         .bind(id_i64)
         .fetch_optional(pool)
         .await

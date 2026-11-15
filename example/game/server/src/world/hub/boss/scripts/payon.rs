@@ -2,7 +2,7 @@
 //! Weeping Bride, the Jiangshi General and Moonlight Flower. Distances are
 //! cells (2 per metre), times seconds, as in the parent module.
 
-use super::{ability, hurt, Ability, Action, Anchor, Hurt, Pattern, Phase, Rank, Script, EVERYONE, NO_HURT};
+use super::{ability, hurt, Ability, Action, Anchor, Hurt, Pattern, Phase, Rank, Script, Traits, EVERYONE, NO_HURT};
 use crate::world::combat::{Condition, DamageType};
 use crate::world::protocol::look;
 
@@ -55,7 +55,7 @@ pub(super) const WEEPING_BRIDE: Script = Script {
             "Tears",
             1.2,
             Anchor::Each(EVERYONE),
-            Pattern::Pool { r: 2.4, secs: 8.0, pulse: 1.0 },
+            Pattern::Pool { r: 2.4, secs: 8.0, pulse: 1.0, pull: 0.0 },
             Hurt { rider: Some((Condition::Slowed, 1.5)), save: false, ..hurt(1, 6, DamageType::Cold) },
             look::COLD,
         ),
@@ -291,3 +291,6 @@ pub(super) const MOONLIGHT_FLOWER: Script = Script {
         },
     ],
 };
+
+/// No traited bodies here.
+pub(super) const TRAITS: &[Traits] = &[];

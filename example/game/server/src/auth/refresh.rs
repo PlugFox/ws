@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::SysRng, TryRng};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -34,7 +34,7 @@ impl RefreshToken {
     /// Generates the next refresh token in the rotation chain with an incremented generation.
     pub fn generate_with_generation(session_id: Uuid, generation: u32) -> (Self, String, [u8; 32]) {
         let mut entropy = [0u8; 32];
-        OsRng.fill_bytes(&mut entropy);
+        SysRng.try_fill_bytes(&mut entropy).expect("the OS random number generator works");
 
         let token = Self {
             session_id,

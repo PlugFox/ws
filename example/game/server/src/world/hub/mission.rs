@@ -19,8 +19,10 @@ use crate::world::missions;
 use crate::world::modifiers::{self, Modifiers};
 use crate::world::protocol::{ServerMsg, MONSTER_ENTITY_BASE};
 
-/// Result screen time before everyone leaves (seconds).
-const VICTORY_SECS: f32 = 12.0;
+/// Time from the end of a run, won or lost, until everyone is sent back to
+/// town (seconds): the client counts it down on its "Return to town" call
+/// and the result screen stays readable in town.
+const VICTORY_SECS: f32 = 5.0;
 const DEFEAT_SECS: f32 = 5.0;
 /// The boss bar is resent at most this often (ticks).
 const BOSS_EVERY: u32 = 4;
@@ -159,6 +161,11 @@ impl HubInstance {
         if let Some(b) = self.boss.take() {
             self.send_boss(map, b.slot, String::new(), 0, 0, out);
         }
+        if victory {
+            // A mission cleared together: Bond for the homunculi out.
+            let owners: Vec<u32> = self.players.iter().filter(|p| p.map == map).map(|p| p.profile.user_id).collect();
+            self.companions.bond_out(&owners, super::companion::BOND_MISSION);
+        }
         let mods = self.modifiers();
         let chest = if victory { self.chest_tables() } else { Vec::new() };
         // The clear bonus is paid at the mission band's floor at least.
@@ -256,14 +263,22 @@ impl HubInstance {
         if elites.is_empty() { pick(false) } else { elites }
     }
 
-    /// Everyone on the map leaves through the stage exit.
+    /// Everyone on the map leaves through the stage exit; a map without
+    /// one (no walk-out portal) sends them to town's mission return point
+    /// (`Transfer` with an empty `target_map`).
     pub(super) fn leave_stage(&mut self, map: MapIdx, out: &mut Outgoing) {
         let exit = (0..self.world.map(map).manifest.portals.len())
             .find(|&i| matches!(self.world.link(map, i), PortalLink::External { .. }));
-        let Some(portal) = exit else { return };
         let leaving: Vec<usize> = (0..self.players.len()).filter(|&i| self.players[i].map == map).collect();
         for idx in leaving.into_iter().rev() {
-            self.use_portal(idx, portal, out);
+            match exit {
+                Some(portal) => self.use_portal(idx, portal, out),
+                None => {
+                    let user_id = self.players[idx].profile.user_id;
+                    self.remove(user_id, out);
+                    out.push((user_id, HubEvent::Transfer { target_map: String::new(), arrival: (0.0, 0.0) }));
+                }
+            }
         }
     }
 
@@ -318,27 +333,31 @@ impl HubInstance {
         let hz = self.config.tick_hz.max(1);
         for p in self.players.iter_mut().filter(|p| p.map == map) {
             let Some(f) = p.fighter.as_mut() else { continue };
-            let sig = f.buff_signature() ^ f.regen_signature();
+            let sig = f.buff_signature() ^ f.regen_signature() ^ f.cond_signature(now, hz);
             if sig == f.buffs_sent {
                 continue;
             }
             f.buffs_sent = sig;
             let mut buffs: Vec<(String, u32)> = f
                 .buff_list(now)
-                .filter(|&(skill, _)| (skill as usize) < self.skills.len() || super::bonus::buff_id(skill).is_some())
+                .filter(|&(skill, _)| (skill as usize) < self.skills.len() || super::bonus::buff_id(skill).is_some() || super::companion::buff_id(skill).is_some())
                 .map(|(skill, left)| {
                     // Toggles run until cast again: 0 = no timer.
                     let ms = if left > u32::MAX / 4 { 0 } else { left.saturating_mul(1000) / hz };
                     // A pickup bonus's own buff: `bonus:<id>`.
-                    let id = match super::bonus::buff_id(skill) {
-                        Some(b) => format!("bonus:{b}"),
-                        None => self.skills.get(skill).id.clone(),
+                    // A homunculus's buff on its owner: `hom:<skill>`.
+                    let id = match (super::bonus::buff_id(skill), super::companion::buff_id(skill)) {
+                        (Some(b), _) => format!("bonus:{b}"),
+                        (None, Some(h)) => h.to_string(),
+                        (None, None) => self.skills.get(skill).id.clone(),
                     };
                     (id, ms)
                 })
                 .collect();
             // Potion regenerations: `item:<id>`.
             buffs.extend(f.regen_list().map(|(id, left)| (id, left.saturating_mul(1000) / hz)));
+            // Conditions on the player (poisoned, feared…): `cond:<id>`.
+            buffs.extend(f.cond_list().map(|(c, left)| (format!("cond:{}", c.id()), left.saturating_mul(1000) / hz)));
             out.push((p.profile.user_id, HubEvent::Control(ServerMsg::Buffs { buffs })));
         }
     }

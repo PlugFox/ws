@@ -156,7 +156,7 @@ pub struct NpcDef {
     pub name: String,
     /// What talking to the NPC opens: `"kafra"` (missions, skill reset,
     /// restyle), `"mission_board"`, `"stylist"`, `"skill_master"`,
-    /// `"changelog"`, `"talk"`.
+    /// `"changelog"`, `"hatter"` (hat recipes), `"talk"`.
     #[serde(default = "NpcDef::default_kind")]
     pub kind: String,
     /// What a `"shop"` NPC sells (`combat::items::SHOPS` id).
@@ -406,7 +406,7 @@ pub struct Heightmap {
 
 impl Heightmap {
     pub fn decode_png(bytes: &[u8], bounds: HeightBounds) -> Result<Self, MapError> {
-        let decoder = png::Decoder::new(bytes);
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
         let mut reader = decoder
             .read_info()
             .map_err(|e| MapError::Heightmap(e.to_string()))?;
@@ -418,7 +418,10 @@ impl Heightmap {
             )));
         }
         let (width, height) = (info.width, info.height);
-        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let size = reader
+            .output_buffer_size()
+            .ok_or_else(|| MapError::Heightmap(format!("{width}x{height} does not fit in memory")))?;
+        let mut buf = vec![0u8; size];
         let frame = reader
             .next_frame(&mut buf)
             .map_err(|e| MapError::Heightmap(e.to_string()))?;
@@ -548,11 +551,10 @@ impl MapData {
             }
         }
         let (_, mut sx, mut sy) = best.expect("main component is non-empty");
-        if let Some([ax, ay]) = manifest.spawn {
-            if ax < walk.width() && ay < walk.height() && component_of[(ay * walk.width() + ax) as usize] == main_component {
+        if let Some([ax, ay]) = manifest.spawn
+            && ax < walk.width() && ay < walk.height() && component_of[(ay * walk.width() + ax) as usize] == main_component {
                 (sx, sy) = (ax, ay);
             }
-        }
 
         Ok(Self {
             manifest,
@@ -613,6 +615,7 @@ impl MapData {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use super::*;
 
     fn manifest(id: &str, w: u32, h: u32, portals: Vec<PortalDef>) -> LocationManifest {
@@ -730,7 +733,7 @@ mod tests {
             r#"{"type":"free","pitch":-45.0,"min_zoom":12.0,"max_zoom":40.0,"default_zoom":24.0}"#,
         )
         .unwrap();
-        assert!(matches!(free, CameraConstraint::Free { .. }));
+        assert_matches!(free, CameraConstraint::Free { .. });
         let fixed: CameraConstraint =
             serde_json::from_str(r#"{"type":"fixed","yaw":0.0,"pitch":-45.0,"zoom":18.0}"#).unwrap();
         assert_eq!(fixed, CameraConstraint::Fixed { yaw: 0.0, pitch: -45.0, zoom: 18.0 });

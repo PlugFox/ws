@@ -37,11 +37,13 @@ test('Start in the mission window launches at once, alone or as a party leader',
   await expect(page.locator('body')).toContainText(/· Stage-\d+ ·/);
   await expect(page.locator('.ge-tl .mods i.tier')).toHaveText('T2');
   await expect(page.locator('.ge-tl .mods i')).toHaveCount(2);
-  // Toasts stack under the run's timeline, never over it.
-  await expect(page.locator('.u-toast').first()).toBeVisible();
-  const tl = await page.locator('.ge-tl').boundingBox();
-  const toasts = await page.locator('.u-toasts').boundingBox();
-  expect(toasts!.y).toBeGreaterThanOrEqual(tl!.y + tl!.height);
+  // Toasts stack under the run's timeline, never over it (loot has its
+  // own feed now: the run's opening toast may be gone by this point).
+  if (await page.locator('.u-toast').count()) {
+    const tl = await page.locator('.ge-tl').boundingBox();
+    const toasts = await page.locator('.u-toasts').boundingBox();
+    expect(toasts!.y).toBeGreaterThanOrEqual(tl!.y + tl!.height);
+  }
   await page.screenshot({ path: info.outputPath('stage.png') });
   expect(errors).toEqual([]);
 });

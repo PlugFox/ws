@@ -353,13 +353,19 @@ impl ShopOrder {
     /// Applies a [checked](Self::check) order to `bag`: every sale, then
     /// every purchase. All or nothing: on an error `bag` is untouched.
     pub fn apply(&self, bag: &mut Bag) -> Result<Receipt, ItemError> {
+        self.apply_at(bag, items::Haggle::default())
+    }
+
+    /// [`Self::apply`] at the prices the buyer's haggling makes (Discount,
+    /// Overcharge: `SkillBook::haggle`, read by the hub off the loadout).
+    pub fn apply_at(&self, bag: &mut Bag, haggle: items::Haggle) -> Result<Receipt, ItemError> {
         let mut next = bag.clone();
         let mut receipt = Receipt::default();
         for (id, n) in &self.sell {
-            receipt.earned += next.sell(id, *n)?;
+            receipt.earned += next.sell_at(id, *n, haggle)?;
         }
         for (id, n) in &self.buy {
-            receipt.spent += next.buy(id, *n, &[id.as_str()])?;
+            receipt.spent += next.buy_at(id, *n, &[id.as_str()], haggle)?;
         }
         *bag = next;
         Ok(receipt)
@@ -536,8 +542,7 @@ mod tests {
         let mut b = start.clone();
         assert_eq!(order(&[], &[("knife", 1)]).apply(&mut b), Err(ItemError::NotInBag));
         // Selling frees the room a full bag needs for a purchase.
-        let mut full = Bag::default();
-        full.zeny = price("red_potion");
+        let mut full = Bag { zeny: price("red_potion"), ..Bag::default() };
         let others: Vec<&str> = items::catalogue().iter().map(|e| e.id).filter(|id| *id != "red_potion").take(3).collect();
         full.items = (0..MAX_STACKS).map(|i| Stack { id: others[i % 3].into(), count: 1, attrs: Attrs { refine: (i / 3) as u8, ..Attrs::default() } }).collect();
         let key = full.items[0].key();

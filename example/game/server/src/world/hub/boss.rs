@@ -29,7 +29,8 @@ use crate::world::horde::storage::{FLAG_FULL, FLAG_REFLECT};
 use crate::world::horde::Horde;
 use crate::world::map::WalkGrid;
 use crate::world::protocol::{cast_flags, zone_flags, BossBarInfo, BossZone, HitEvent, ServerMsg, Telegraph, MONSTER_ENTITY_BASE};
-use scripts::{Ability, Action, Anchor, Hurt, Pattern, Rank, Script, Traits};
+pub(super) use scripts::Hurt;
+use scripts::{Ability, Action, Anchor, Pattern, Rank, Script, Traits};
 use std::f32::consts::TAU;
 
 /// Adds a fight remembers (to swallow them, or to count them).
@@ -120,7 +121,6 @@ fn circle(x: f32, y: f32, r: f32) -> Zone {
 /// stands (lines and hops start there); `anchor`: where it lands; `aim`:
 /// unit direction of patterns centred on the monster; `spin`: turns of the
 /// sanctuaries (the stage's dice); `pace`: multiplier of the beat spacing.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn expand(
     pattern: &Pattern,
     action: &Action,
@@ -227,6 +227,8 @@ pub(super) fn expand(
         Pattern::Crossfire { .. } | Pattern::LitSanctuary { .. } => {}
         // Dropped behind the player as the ability runs (`Deed::Puddle`).
         Pattern::Trail { .. } => {}
+        // Needs the stage's dice: [`rain`], at cast time (`Bosses::start`).
+        Pattern::Rain { .. } => {}
         Pattern::Sanctuary { r, safe, safe_r, dist } => {
             push(circle(ax, ay, r), 0.0, false, None);
             for i in 0..safe.min(MAX_SAFE as u8) {
@@ -238,6 +240,70 @@ pub(super) fn expand(
             }
         }
     }
+}
+
+/// The most circles one anchor's [`Pattern::Rain`] drops.
+const MAX_RAIN: u32 = 24;
+/// Tries per raindrop to find walkable ground before it is skipped.
+const RAIN_TRIES: u32 = 8;
+
+/// The circles of a [`Pattern::Rain`] round one anchor: `n` of radius `r`
+/// on walkable points the dice pick, uniform over the disc of `spread`
+/// round the anchor, one every `every` (× `pace`). A drop that finds no
+/// walkable ground in a few tries is skipped (it never lands in a wall).
+pub(super) fn rain(walk: &WalkGrid, dice: &mut Rng, anchor: (f32, f32), n: u32, r: f32, spread: f32, every: f32, pace: f32, out: &mut Vec<Shape>) {
+    for i in 0..n.min(MAX_RAIN) {
+        let spot = (0..RAIN_TRIES).find_map(|_| {
+            let a = dice.die(3600) as f32 * TAU / 3600.0;
+            // sqrt: uniform over the disc, not bunched at the centre.
+            let d = spread.max(0.0) * (dice.die(1000) as f32 / 1000.0).sqrt();
+            let (x, y) = (anchor.0 + a.cos() * d, anchor.1 + a.sin() * d);
+            walk.is_walkable(x, y).then_some((x, y))
+        });
+        if let Some((x, y)) = spot {
+            out.push(Shape { zone: circle(x, y, r), delay: i as f32 * every * pace, safe: false, place: None });
+        }
+    }
+}
+
+/// Where a blow throws a body at `(x, y)` it hit: the unit direction away
+/// from the zone (a circle's or a ring's centre, a cone's apex, a bar's
+/// axis) and how far it may go toward it (a pull never overshoots).
+/// `from` breaks the tie of a body dead on the centre: away from it.
+fn push_dir(zone: &Zone, x: f32, y: f32, from: (f32, f32)) -> ((f32, f32), f32) {
+    let (cx, cy) = match *zone {
+        Zone::Ring { x, y, .. } | Zone::Area(Area::Circle { x, y, .. }) | Zone::Area(Area::Arc { x, y, .. }) => (x, y),
+        Zone::Area(Area::Rect { x: rx, y: ry, dir, .. }) => {
+            let across = (x - rx) * dir.1 - (y - ry) * dir.0;
+            let side = if across < 0.0 { -1.0 } else { 1.0 };
+            return ((dir.1 * side, -dir.0 * side), across.abs());
+        }
+    };
+    let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+    match norm(x - cx, y - cy).filter(|_| d > 0.05) {
+        Some(dir) => (dir, d),
+        None => (norm(x - from.0, y - from.1).unwrap_or((1.0, 0.0)), 0.0),
+    }
+}
+
+/// One blow on whoever stands in `zone` on map `map` (a boss beat, an
+/// event strike): damage (a save halves it; a split shares one roll),
+/// the rider, the push. Sanctuaries in `safe` spare their occupants; a
+/// ranged ward turns a projectile aside.
+pub(super) struct Blow<'a> {
+    pub zone: Zone,
+    pub hurt: Hurt,
+    pub map: MapIdx,
+    pub safe: &'a [(f32, f32, f32)],
+    /// Dice bonus: `level / 4`.
+    pub level: u32,
+    pub dc: i32,
+    /// Damage multiplier (an enraged boss).
+    pub boost: f32,
+    /// Struck by an undead or a demon (Divine Protection).
+    pub evil: bool,
+    /// Where it came from (a fear flees from there).
+    pub from: (f32, f32),
 }
 
 /// A beat waiting to land, or lasting ground biting.
@@ -267,6 +333,10 @@ struct Beat {
     /// A zone riding on a monster (a burrowing boss's ripple): it lands
     /// wherever that monster (slot, generation) is by then.
     follow_mob: Option<(u16, u8)>,
+    /// Lasting ground that drags (cells/s toward its centre; negative
+    /// pushes out) every tick from `live` to `until` ([`Pattern::Pool`]).
+    pull: f32,
+    live: u32,
 }
 
 /// Something the monster does later in an ability.
@@ -390,10 +460,13 @@ pub(super) struct Bosses {
     /// at run second, kind, count), "hatch everything near" requests
     /// (fight serial, x, y, radius, heal %), zeny spills (monster entity,
     /// x, y, min, max).
-    laid: Vec<(u16, u8, Option<(f32, u8, u8)>)>,
+    laid: Vec<Laid>,
     hatch_all: Vec<(u32, f32, f32, f32, u8)>,
     bursts: Vec<(u32, f32, f32, u32, u32)>,
 }
+
+/// An object a fight laid: slot, generation, hatch (run second, kind, count).
+type Laid = (u16, u8, Option<(f32, u8, u8)>);
 
 /// What one boss step works with.
 struct Ctx<'a> {
@@ -523,13 +596,7 @@ impl Bosses {
         if f.engaged {
             Self::gone(cx, &f);
         }
-        self.beats.retain(|b| {
-            let keep = b.fight != f.serial;
-            if !keep && b.zone_id != 0 {
-                ended.push(b.zone_id);
-            }
-            keep
-        });
+        ended.extend(self.beats.extract_if(.., |b| b.fight == f.serial).filter(|b| b.zone_id != 0).map(|b| b.zone_id));
         self.laters.retain(|l| l.fight != f.serial);
     }
 
@@ -550,13 +617,7 @@ impl Bosses {
 
     /// Calls off what is left of cast `cast` (a broken channel or shield).
     fn cancel(&mut self, cast: u32, ended: &mut Vec<u32>) {
-        self.beats.retain(|b| {
-            let keep = b.cast != cast;
-            if !keep && b.zone_id != 0 {
-                ended.push(b.zone_id);
-            }
-            keep
-        });
+        ended.extend(self.beats.extract_if(.., |b| b.cast == cast).filter(|b| b.zone_id != 0).map(|b| b.zone_id));
         self.laters.retain(|l| l.cast != cast);
     }
 
@@ -644,7 +705,7 @@ impl Bosses {
             // Its body: a shell that turns spells back, cracked it takes
             // more, and it spills coins as it bleeds.
             if let Some(t) = f.traits {
-                let reflect = (f.phase as u8) < t.reflect_until;
+                let reflect = f.phase < t.reflect_until;
                 let store = cx.horde.store_mut();
                 if reflect {
                     store.flags[s] |= FLAG_REFLECT;
@@ -728,7 +789,9 @@ impl Bosses {
 
             // The next ability.
             // Only while someone is still around (no volleys at the far end of the map).
-            let held = cx.horde.store().status_of(slot).held();
+            // Silenced elites cast nothing new (S6); a boss shrugs it off.
+            let status = cx.horde.store().status_of(slot);
+            let held = status.held() || (status.silenced() && f.script.rank != Rank::Boss);
             let (mx, my) = (cx.horde.store().x[s], cx.horde.store().y[s]);
             let leash = f.script.aggro * 1.5;
             let near = self.ups.iter().any(|&(x, y)| (x - mx).powi(2) + (y - my).powi(2) <= leash * leash);
@@ -809,8 +872,7 @@ impl Bosses {
             Action::Absorb { heal, radius, .. } => {
                 let (x, y) = (cx.horde.store().x[s], cx.horde.store().y[s]);
                 let mut eaten = 0;
-                for i in 0..f.n_adds as usize {
-                    let (m, g) = f.adds[i];
+                for &(m, g) in &f.adds[..f.n_adds as usize] {
                     let store = cx.horde.store();
                     let mi = m as usize;
                     if store.is_alive(m) && store.generation[mi] == g && (store.x[mi] - x).powi(2) + (store.y[mi] - y).powi(2) <= radius * radius {
@@ -898,6 +960,10 @@ impl Bosses {
         for (i, &anchor) in anchors[..n].iter().enumerate() {
             let before = self.shapes.len();
             expand(&a.pattern, &a.action, cx.walk, origin, anchor, aim, spin, pace, &mut self.shapes);
+            if let Pattern::Rain { count, per_player, r, spread, every } = a.pattern {
+                let n = count as u32 + per_player as u32 * cx.party.saturating_sub(1);
+                rain(cx.walk, cx.dice, anchor, n, r, spread, every, pace, &mut self.shapes);
+            }
             counts[i] = self.shapes.len() - before;
             stagger[i] = cx.ticks(a.stagger * i as f32 * pace);
             // A chain of leaps or charges: each starts where the last ended.
@@ -998,9 +1064,9 @@ impl Bosses {
             for sh in &self.shapes[j..j + count] {
                 let at = cx.now + wind + stagger[i] + cx.ticks(sh.delay);
                 last = last.max(at);
-                let lasting = match a.pattern {
-                    Pattern::Pool { secs, pulse, .. } => Some((secs, pulse)),
-                    _ => None,
+                let (lasting, pull) = match a.pattern {
+                    Pattern::Pool { secs, pulse, pull, .. } => (Some((secs, pulse)), pull),
+                    _ => (None, 0.0),
                 };
                 let zone_id = if lasting.is_some() {
                     let id = *cx.next_zone;
@@ -1037,7 +1103,7 @@ impl Bosses {
                 if let Some((x, y)) = sh.place {
                     self.laters.push(Later { fight: f.serial, cast, at, deed: Deed::Place { x, y } });
                 }
-                if sh.safe || (a.hurt.dice.0 == 0 && a.hurt.rider.is_none()) {
+                if sh.safe || (a.hurt.dice.0 == 0 && a.hurt.rider.is_none() && a.hurt.push == 0.0 && pull == 0.0) {
                     continue;
                 }
                 let (until, pulse) = match lasting {
@@ -1062,7 +1128,9 @@ impl Bosses {
                     evil,
                     from: (mx, my),
                     follow: if burrow { 0 } else { follow },
-                    follow_mob: burrow.then(|| (f.slot, f.generation)),
+                    follow_mob: burrow.then_some((f.slot, f.generation)),
+                    pull,
+                    live: at,
                 });
                 if burrow {
                     // It bursts up under this beat, then tunnels on to the next.
@@ -1251,6 +1319,8 @@ impl Bosses {
                         from: (store.x[f.slot as usize], store.y[f.slot as usize]),
                         follow: 0,
                         follow_mob: None,
+                        pull: 0.0,
+                        live: at,
                     });
                 }
                 Deed::Summon { kind, count } => {
@@ -1284,7 +1354,7 @@ impl Bosses {
 }
 
 /// One beat on every standing player inside it (and out of the sanctuaries).
-fn strike(b: &Beat, players: &mut [HubPlayer], lives: &[Live], rng: &mut Rng, hz: f32, hits: &mut Vec<HitEvent>) {
+fn strike(b: &Beat, players: &mut [HubPlayer], lives: &[Live], walk: &WalkGrid, rng: &mut Rng, hz: f32, hits: &mut Vec<HitEvent>) {
     // A chasing zone lands wherever its player is now.
     let zone = match b.zone {
         Zone::Area(Area::Circle { r, .. }) if b.follow != 0 => players
@@ -1293,25 +1363,63 @@ fn strike(b: &Beat, players: &mut [HubPlayer], lives: &[Live], rng: &mut Rng, hz
             .map_or(b.zone, |p| circle(p.x, p.y, r)),
         z => z,
     };
-    for p in players.iter_mut().filter(|p| p.map == b.map) {
+    let blow = Blow {
+        zone,
+        hurt: b.hurt,
+        map: b.map,
+        safe: &b.safe[..b.n_safe as usize],
+        level: b.level,
+        dc: b.dc,
+        boost: b.boost,
+        evil: b.evil,
+        from: b.from,
+    };
+    land(&blow, players, lives, walk, rng, hz, hits);
+}
+
+/// [`Blow`] lands on every standing player inside it.
+pub(super) fn land(b: &Blow<'_>, players: &mut [HubPlayer], lives: &[Live], walk: &WalkGrid, rng: &mut Rng, hz: f32, hits: &mut Vec<HitEvent>) {
+    let zone = b.zone;
+    let struck = |p: &HubPlayer| {
+        p.map == b.map
+            && p.fighter.as_ref().is_some_and(|f| f.is_up())
+            && zone.contains(p.x, p.y, BODY)
+            && !b.safe.iter().any(|&(sx, sy, r)| (p.x - sx).powi(2) + (p.y - sy).powi(2) <= r * r)
+    };
+    let h = b.hurt;
+    if h.dice.0 == 0 && h.rider.is_none() && h.push == 0.0 {
+        // Ground that only drags (`pull_in`).
+        return;
+    }
+    // A shared blow: one roll, divided among everyone it catches.
+    let share = if h.split > 0 && h.dice.0 > 0 {
+        let n = players.iter().filter(|p| struck(p)).count().max(1) as f32;
+        let dice = Dice::new(h.dice.0 as u32, h.dice.1 as u32, (b.level / 4) as i32);
+        let total = dice.roll(rng, false) as f32 * b.boost;
+        Some((total * (1.0 / n).min(h.split as f32 / h.dice.0 as f32)).round() as i32)
+    } else {
+        None
+    };
+    for p in players.iter_mut() {
+        if !struck(p) {
+            continue;
+        }
         let (x, y, id) = (p.x, p.y, p.profile.character_id);
         let Some(f) = p.fighter.as_mut() else { continue };
-        if !f.is_up() || !zone.contains(x, y, BODY) {
-            continue;
-        }
-        if b.safe[..b.n_safe as usize].iter().any(|&(sx, sy, r)| (x - sx).powi(2) + (y - sy).powi(2) <= r * r) {
-            continue;
-        }
-        if b.hurt.ranged && lives.iter().any(|l| l.deflects(b.map, x, y)) {
+        if h.ranged && lives.iter().any(|l| l.deflects(b.map, x, y)) {
             hits.push(HitEvent { target: id, amount: 0, flags: crate::world::protocol::hit::GUARD });
             continue;
         }
         f.quiet = 0;
-        let h = b.hurt;
         let saved = h.save && !f.status.saves_fail() && saving_throw(rng, f.save_against(h.rider.map(|r| r.0)), b.dc, 0);
         if h.dice.0 > 0 {
-            let dice = Dice::new(h.dice.0 as u32, h.dice.1 as u32, (b.level / 4) as i32);
-            let mut amount = (dice.roll(rng, false) as f32 * b.boost) as i32;
+            let mut amount = match share {
+                Some(s) => s,
+                None => {
+                    let dice = Dice::new(h.dice.0 as u32, h.dice.1 as u32, (b.level / 4) as i32);
+                    (dice.roll(rng, false) as f32 * b.boost) as i32
+                }
+            };
             if saved {
                 amount /= 2;
             }
@@ -1332,6 +1440,29 @@ fn strike(b: &Beat, players: &mut [HubPlayer], lives: &[Live], rng: &mut Rng, hz
             }
         }
         f.fall_if_spent(hz);
+        if h.push != 0.0 && f.is_up() {
+            // Thrown (or dragged in): walls stop it.
+            let (dir, room) = push_dir(&zone, x, y, b.from);
+            let (dir, dist) = if h.push > 0.0 { (dir, h.push) } else { ((-dir.0, -dir.1), (-h.push).min(room)) };
+            (p.x, p.y) = moved(walk, x, y, dir, dist, MoveMode::Slide);
+        }
+    }
+}
+
+/// Lasting ground drags every standing player inside it `step` cells
+/// toward its centre (negative: out), one small step a tick; walls stop
+/// it and it never overshoots the centre.
+fn pull_in(zone: &Zone, map: MapIdx, step: f32, players: &mut [HubPlayer], walk: &WalkGrid) {
+    for p in players.iter_mut().filter(|p| p.map == map) {
+        if !p.fighter.as_ref().is_some_and(|f| f.is_up()) || !zone.contains(p.x, p.y, BODY) {
+            continue;
+        }
+        let (away, room) = push_dir(zone, p.x, p.y, (p.x, p.y));
+        let (dir, dist) = if step > 0.0 { ((-away.0, -away.1), step.min(room)) } else { (away, -step) };
+        let (nx, ny) = (p.x + dir.0 * dist, p.y + dir.1 * dist);
+        if dist > 0.0 && walk.is_walkable(nx, ny) {
+            (p.x, p.y) = (nx, ny);
+        }
     }
 }
 
@@ -1355,6 +1486,8 @@ impl HubInstance {
         b.up_ids.clear();
         b.lights.clear();
         b.lights.extend(self.env.payon.light_spots());
+        // Calm ground (Thor's obsidian) shelters as a lit light does.
+        b.lights.extend(self.env.calm_spots(horde.director_elapsed()));
         let mut party = 0;
         for p in self.players.iter().filter(|p| p.map == map) {
             let Some(f) = p.fighter.as_ref() else { continue };
@@ -1381,13 +1514,17 @@ impl HubInstance {
         b.run(&mut cx, &mut ended);
         b.act(&mut cx);
 
-        // Beats land; lasting ground bites.
+        // Beats land; lasting ground bites (and drags).
+        let walk = &self.world.map(map).walk;
         let mut k = 0;
         while k < b.beats.len() {
             let beat = &mut b.beats[k];
             if now > beat.until {
                 b.beats.swap_remove(k);
                 continue;
+            }
+            if beat.pull != 0.0 && now >= beat.live {
+                pull_in(&beat.zone, beat.map, beat.pull / hz, &mut self.players, walk);
             }
             if now >= beat.next {
                 beat.next = if beat.pulse > 0 { now + beat.pulse } else { beat.until + 1 };
@@ -1400,7 +1537,16 @@ impl HubInstance {
                 {
                     beat.zone = circle(horde.store().x[m as usize], horde.store().y[m as usize], r);
                 }
-                strike(&beat, &mut self.players, &self.lives, &mut self.dice, hz, hits);
+                strike(&beat, &mut self.players, &self.lives, walk, &mut self.dice, hz, hits);
+                // Companions inside a beat take its dice too (a chasing
+                // zone hunts its player, not them; sanctuaries spare them).
+                let h = beat.hurt;
+                if h.dice.0 > 0 && beat.follow == 0 {
+                    let (zone, safe) = (beat.zone, &beat.safe[..beat.n_safe as usize]);
+                    let inside = |x: f32, y: f32, r: f32| zone.contains(x, y, r) && !safe.iter().any(|&(sx, sy, sr)| (x - sx).powi(2) + (y - sy).powi(2) <= sr * sr);
+                    let dice = Dice::new(h.dice.0 as u32, h.dice.1 as u32, (beat.level / 4) as i32);
+                    self.companions.zone_damage(inside, dice, beat.boost, h.save, h.kind, beat.dc, &mut self.dice, now, hits);
+                }
             }
             k += 1;
         }

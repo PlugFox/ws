@@ -38,6 +38,16 @@
 //!   becomes the party's), with the window's modifiers; anyone else in a
 //!   party cannot.
 //!
+//! - The Kafra's party list (`public_parties`, `join_public`): every
+//!   public party with someone online, in town or on a run. Joining one
+//!   with room adds the player; a party on a mission takes them along at
+//!   once, into the running stage beside a member (a late join,
+//!   `StageDirectory::late_ticket`), as long as the mission's player limit
+//!   allows. A member back in town early rejoins their party's run the
+//!   same way. The leader lists or hides the party (`set_public`); a party
+//!   formed by invitation starts private, one from the mission window as
+//!   chosen there.
+//!
 //! - Mission modifiers (`modifiers.rs`): the leader sets the difficulty
 //!   tier and curses; every member sees them (`MODIFIERS` after each
 //!   `LOBBY_STATE`) and the launch carries them into the stage. A curse
@@ -51,12 +61,12 @@
 use super::hub::PlayerProfile;
 use super::missions::{self, MissionInfo, PARTY_MAX};
 use super::modifiers::{self, Modifiers};
-use super::protocol::{LobbyInfo, LobbyMemberInfo, ServerMsg};
+use super::protocol::{party_state, ListedMember, LobbyInfo, LobbyMemberInfo, PartyListing, ServerMsg};
 use super::stage::{StageDirectory, StageTicket};
 use crate::db::party_repo::{MemberRow, PartyRepo, PartyRow, StoredCharacter, StoredMods};
 use crate::db::{Db, PartyWriter};
 use chrono::{DateTime, Utc};
-use rand::Rng;
+use rand::RngExt;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -75,9 +85,11 @@ pub const INVITE_TTL: Duration = Duration::from_secs(30);
 const INVITES_PER_PLAYER: usize = 4;
 /// An offline leader keeps the lead this long (a reload, a character
 /// switch), then the oldest online member takes over.
-pub const LEADER_GRACE: Duration = Duration::from_secs(5 * 60);
+pub const LEADER_GRACE: Duration = Duration::from_mins(5);
 /// A member offline this long leaves the party on their own.
 pub const MEMBER_TTL: Duration = Duration::from_secs(14 * 24 * 3600);
+/// Parties on the Kafra's list at most.
+pub const PARTY_LIST_MAX: usize = 40;
 
 /// What a lobby sends to a member's socket task.
 #[derive(Clone, Debug)]
@@ -200,6 +212,9 @@ struct Lobby {
     members: Vec<Member>,
     /// The leader's difficulty and curses.
     mods: Modifiers,
+    /// The stage of the party's last launch (running or over: the stage
+    /// directory knows); late joiners go there.
+    stage: Option<u32>,
 }
 
 impl Lobby {
@@ -228,7 +243,7 @@ impl Lobby {
     }
 
     fn broadcast(&self) {
-        let msg = ServerMsg::LobbyState { lobby: self.info(Utc::now()) };
+        let msg = ServerMsg::LobbyState { lobby: Box::new(self.info(Utc::now())) };
         let mods = self.mods.state_msg(modifiers::scope::LOBBY);
         for m in &self.members {
             m.send(LobbyEvent::Msg(msg.clone()));
@@ -325,7 +340,7 @@ impl LobbyState {
         let id = self.next_id;
         let code = self.new_code();
         self.by_code.insert(code.clone(), id);
-        self.lobbies.insert(id, Lobby { id, code, mission, public, members: Vec::new(), mods: Modifiers::NONE });
+        self.lobbies.insert(id, Lobby { id, code, mission, public, members: Vec::new(), mods: Modifiers::NONE, stage: None });
         self.touch(id);
         id
     }
@@ -380,10 +395,10 @@ impl LobbyState {
     }
 
     fn new_code(&self) -> String {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         loop {
             let code: String =
-                (0..CODE_LEN).map(|_| CODE_ALPHABET[rng.gen_range(0..CODE_ALPHABET.len())] as char).collect();
+                (0..CODE_LEN).map(|_| CODE_ALPHABET[rng.random_range(0..CODE_ALPHABET.len())] as char).collect();
             if !self.by_code.contains_key(&code) {
                 return code;
             }
@@ -430,7 +445,7 @@ impl LobbyDirectory {
             }
             st.by_code.insert(row.code.clone(), row.id);
             st.next_id = st.next_id.max(row.id);
-            st.lobbies.insert(row.id, Lobby { id: row.id, code: row.code, mission, public: row.public, members, mods });
+            st.lobbies.insert(row.id, Lobby { id: row.id, code: row.code, mission, public: row.public, members, mods, stage: None });
             // Boot time becomes the offline mark of who was online.
             st.touch(row.id);
         }
@@ -789,6 +804,7 @@ impl LobbyDirectory {
             super::stage::StageError::Full => LobbyError::StageFull,
             _ => LobbyError::MissionUnavailable(lobby.mission.name.into()),
         })?;
+        lobby.stage = Some(ticket.stage_id);
         for &i in &going {
             let m = &mut lobby.members[i];
             m.away = m.send(LobbyEvent::Launch(ticket.clone()));
@@ -933,6 +949,128 @@ impl LobbyDirectory {
         self.state.lock().unwrap().invites.retain(|i| i.from.user_id != user_id);
     }
 
+    /// The Kafra's party list for `user_id`: every public party with a
+    /// member online, and their own (first); each with its mission and
+    /// whether it is in town or on a run (and for how long).
+    pub fn public_parties(&self, user_id: u32) -> Vec<PartyListing> {
+        let st = self.state.lock().unwrap();
+        let mine = st.by_user.get(&user_id).copied();
+        let mut list: Vec<PartyListing> = st
+            .lobbies
+            .values()
+            .filter(|l| Some(l.id) == mine || (l.public && l.members.iter().any(Member::online)))
+            .map(|l| {
+                let running = self.running_stage(l);
+                PartyListing {
+                    lobby_id: l.id,
+                    mission: l.mission.id.into(),
+                    mission_name: l.mission.name.into(),
+                    capacity: l.capacity() as u8,
+                    state: if running.is_some() { party_state::ON_MISSION } else { party_state::FORMING },
+                    elapsed_secs: running.map_or(0, |(_, age)| age.as_secs().min(u32::MAX as u64) as u32),
+                    mine: Some(l.id) == mine,
+                    members: l
+                        .members
+                        .iter()
+                        .map(|m| ListedMember { name: m.who.name.clone(), archetype: m.who.archetype.clone(), level: m.who.level, online: m.online() })
+                        .collect(),
+                }
+            })
+            .collect();
+        // Their own first, then the ones still in town, the newest last.
+        list.sort_by_key(|p| (!p.mine, p.state, p.lobby_id));
+        list.truncate(PARTY_LIST_MAX);
+        list
+    }
+
+    /// The stage party `l` is playing now (and for how long), if any.
+    fn running_stage(&self, l: &Lobby) -> Option<(u32, Duration)> {
+        let stage = l.stage?;
+        self.stages.age(stage).map(|age| (stage, age))
+    }
+
+    /// Joins the public party `lobby_id` from the Kafra's list (or, for a
+    /// member, their own party): room, the run's curse levels and the
+    /// public flag are checked. A party on a mission takes the joiner
+    /// along at once: they get a ticket into the running stage and enter
+    /// beside a member (`StageDirectory::late_ticket`).
+    pub fn join_public(
+        &self,
+        profile: PlayerProfile,
+        session_id: Uuid,
+        lobby_id: u32,
+        tx: mpsc::Sender<LobbyEvent>,
+    ) -> Result<u32, LobbyError> {
+        let user_id = profile.user_id;
+        self.locked(|st| {
+            st.tidy(lobby_id, Utc::now());
+            let own = match st.by_user.get(&user_id) {
+                Some(&mine) if mine == lobby_id => true,
+                Some(_) => return Err(LobbyError::AlreadyInLobby),
+                None => false,
+            };
+            let lobby = st.lobbies.get(&lobby_id).ok_or(LobbyError::NoSuchLobby)?;
+            if !own {
+                if !lobby.public {
+                    return Err(LobbyError::NoSuchLobby);
+                }
+                if !lobby.has_room() {
+                    return Err(LobbyError::LobbyFull);
+                }
+            }
+            let away = lobby.position(user_id).is_some_and(|i| lobby.members[i].away);
+            // The run under way, if any: a ticket first, so a refusal
+            // changes nothing.
+            let ticket = match self.running_stage(lobby) {
+                Some((stage, _)) if !away => {
+                    lobby.mods.check_level(profile.level).map_err(|e| LobbyError::BadModifier(format!("{}: {e}", profile.name)))?;
+                    Some(self.stages.late_ticket(stage, user_id).map_err(|e| match e {
+                        super::stage::StageError::Full => LobbyError::MissionFull(lobby.mission.name.into(), lobby.mission.max_players),
+                        _ => LobbyError::OnMission,
+                    })?)
+                }
+                _ => None,
+            };
+            if own {
+                self.relink(st, user_id, who(&profile), session_id, tx.clone(), None);
+            } else {
+                st.invites.retain(|i| i.from.user_id != user_id);
+                self.add(st, lobby_id, &profile, session_id, tx.clone());
+                info!("Party {lobby_id}: {} joined from the party list", profile.name);
+            }
+            if let Some(ticket) = ticket {
+                let lobby = st.lobbies.get_mut(&lobby_id).ok_or(LobbyError::NoSuchLobby)?;
+                let i = lobby.position(user_id).ok_or(LobbyError::NotInLobby)?;
+                let m = &mut lobby.members[i];
+                m.away = m.send(LobbyEvent::Launch(ticket.clone()));
+                if !m.away {
+                    self.stages.abandon(ticket.stage_id, user_id);
+                }
+                lobby.broadcast();
+                st.touch(lobby_id);
+            }
+            Ok(lobby_id)
+        })
+    }
+
+    /// The leader lists the party on the Kafra's board (`true`) or hides
+    /// it (reachable by its code only).
+    pub fn set_public(&self, user_id: u32, session_id: Uuid, public: bool) -> Result<(), LobbyError> {
+        self.locked(|st| {
+            let lobby = st.lobby_of(user_id, session_id)?;
+            if !lobby.leader_is(user_id) {
+                return Err(LobbyError::NotLeader);
+            }
+            if lobby.public != public {
+                lobby.public = public;
+                lobby.broadcast();
+                let id = lobby.id;
+                st.touch(id);
+            }
+            Ok(())
+        })
+    }
+
     pub fn open_lobbies(&self) -> usize {
         self.state.lock().unwrap().lobbies.len()
     }
@@ -941,3 +1079,7 @@ impl LobbyDirectory {
 #[cfg(test)]
 #[path = "lobby_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "lobby_party_list_tests.rs"]
+mod party_list_tests;

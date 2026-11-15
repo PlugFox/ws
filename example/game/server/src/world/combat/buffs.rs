@@ -74,6 +74,23 @@ pub struct Mods {
     pub heal_power: i32,
     /// Potions and food restore this fraction more.
     pub potion: f32,
+    /// Percent of melee blows parried; each parry readies a riposte: the
+    /// next basic swing comes at once, with advantage and one more weapon
+    /// die on its first blow (Parry).
+    pub parry: u32,
+    /// Armed to catch the next melee blow (Blade Stop): no damage, and the
+    /// attacker and every monster within this many cells are Stunned for
+    /// `catch_secs`; the buff ends with it. 0 = not armed.
+    pub catch: f32,
+    pub catch_secs: f32,
+    /// Conditions that do not take hold (bits of `Condition::bit`; Full
+    /// Chemical Protection).
+    pub immune: u16,
+    /// Weapon dice roll their maximum (Maximize Power).
+    pub maximize: bool,
+    /// SP spent per second while it lasts (a toggle that drains: Maximize
+    /// Power); out of SP, the toggle ends.
+    pub sp_drain: f32,
 }
 
 impl Mods {
@@ -111,6 +128,12 @@ impl Mods {
         spell_power: 0,
         heal_power: 0,
         potion: 0.0,
+        parry: 0,
+        catch: 0.0,
+        catch_secs: 0.0,
+        immune: 0,
+        maximize: false,
+        sp_drain: 0.0,
     };
 }
 
@@ -152,6 +175,22 @@ impl Mods {
         self.spell_power += o.spell_power;
         self.heal_power += o.heal_power;
         self.potion += o.potion;
+        self.parry += o.parry;
+        self.catch = self.catch.max(o.catch);
+        self.catch_secs = self.catch_secs.max(o.catch_secs);
+        self.immune |= o.immune;
+        self.maximize |= o.maximize;
+        self.sp_drain += o.sp_drain;
+    }
+
+    /// The weapon's dice as this swing rolls them: at their maximum under
+    /// Maximize Power (one-sided dice carrying the rest as a bonus, so a
+    /// critical adds only the count).
+    pub fn weapon_dice(&self, d: Dice) -> Dice {
+        if !self.maximize || d.sides <= 1 {
+            return d;
+        }
+        Dice { count: d.count, sides: 1, bonus: d.bonus + (d.count * (d.sides - 1)) as i32 }
     }
 
     /// Multiplier of the basic attack interval (never below a third).

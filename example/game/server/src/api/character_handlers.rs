@@ -107,6 +107,9 @@ pub(crate) fn class_stats(archetype: &str, level: i64, bag: &Bag) -> serde_json:
     let held = Weapon::held(class, bag.weapon());
     let (dice, kind) = held.damage(class, level);
     let gear = bag.gear(class);
+    // Saves with what is worn (`Fighter::save_against`): the class save gets
+    // the full proficiency, the others half.
+    let save = |s: combat::Save| class.save_bonus(level, s) + gear.saves[s as usize];
     json!({
         "title": class.title(level),
         "tier": combat::tier(level),
@@ -115,13 +118,24 @@ pub(crate) fn class_stats(archetype: &str, level: i64, bag: &Bag) -> serde_json:
         "ac": gear.ac_at(level),
         "zeny": bag.zeny,
         "proficiency": combat::proficiency(level),
+        "class_mod": combat::class_mod(level),
+        // The cantrip multiplier: skill dice marked (k) roll k times.
+        "k": combat::cantrip_k(level),
+        // Spell save DC with the gear's "+N to your spell save DC" (hub/cast.rs).
+        "save_dc": combat::save_dc(level) + gear.mods.spell_dc,
+        "saves": {
+            "body": save(combat::Save::Body),
+            "reflex": save(combat::Save::Reflex),
+            "mind": save(combat::Save::Mind),
+        },
         "attacks": class.attacks_per_action(level),
         "skill_points": Class::skill_points(level),
         "exp_to_next": combat::exp_to_next(level),
         "weapon": {
             "id": held.id,
             "name": held.name,
-            "to_hit": held.to_hit(level),
+            // The attack bonus with the gear's and cards' "+N to hit" (no buffs, no skills).
+            "to_hit": held.to_hit(level) + gear.mods.to_hit,
             "damage": format!("{}d{}{:+}", dice.count, dice.sides, dice.bonus),
             "damage_type": kind.ro_element(),
             "interval_ms": held.interval_ms,
@@ -318,6 +332,7 @@ pub async fn select_character(
         state.skills.sanitize(class, &mut loadout);
     }
     char_state.loadout = loadout;
+    char_state.homunculus = record.homunculus.as_ref().map(|h| h.0.clone());
     // The leaderboard counters (a read failure starts them from zero only
     // in memory; the stored ones are overwritten on the next save, so
     // refuse instead).
@@ -355,5 +370,117 @@ mod tests {
         };
         assert_eq!(reach(Class::Swordsman), 2.75, "a sword");
         assert_eq!(reach(Class::Archer), 32.0, "a bow");
+    }
+
+    /// The Equipment window's and the glossary's numbers (COMBAT.md §2.1).
+    #[test]
+    fn stats_carry_dc_saves_and_k() {
+        let mage = class_stats("mage", 1, &Bag::starting(Class::Mage, ""));
+        assert_eq!((mage["save_dc"].as_i64(), mage["class_mod"].as_i64(), mage["k"].as_i64()), (Some(13), Some(3), Some(1)));
+        assert_eq!((mage["saves"]["body"].as_i64(), mage["saves"]["reflex"].as_i64(), mage["saves"]["mind"].as_i64()), (Some(1), Some(1), Some(2)));
+        let sword = class_stats("swordsman", 1, &Bag::starting(Class::Swordsman, ""));
+        assert_eq!((sword["saves"]["body"].as_i64(), sword["saves"]["reflex"].as_i64(), sword["saves"]["mind"].as_i64()), (Some(2), Some(1), Some(1)));
+        assert_eq!(sword["weapon"]["to_hit"].as_i64(), Some(5), "proficiency 2 + class 3");
+        assert_eq!(sword["ac"].as_i64(), Some(16), "Cotton Shirt 11 + class defence 3 + Guard 2");
+        let high = class_stats("mage", 30, &Bag::starting(Class::Mage, ""));
+        assert_eq!((high["save_dc"].as_i64(), high["k"].as_i64()), (Some(16), Some(3)));
+        // Gear counts: a Wand of the War Mage (+1 DC), a Ring of Protection (+1 every save).
+        let mut bag = Bag::starting(Class::Mage, "");
+        bag.equip[combat::Slot::Weapon as usize] = "war_mage_wand".into();
+        bag.equip[combat::Slot::Accessory1 as usize] = "protection_ring".into();
+        let geared = class_stats("mage", 1, &bag);
+        assert_eq!(geared["save_dc"].as_i64(), Some(14));
+        assert_eq!(geared["saves"]["mind"].as_i64(), Some(3));
+    }
+
+    /// The glossary's numbers (`assets/glossary.toml` `checks`, baked into
+    /// dist/client/glossary.json) against the real rules, and its element
+    /// wheel against `Element::affinity`: a rules change that leaves the
+    /// player-facing explanation behind fails here.
+    #[test]
+    fn glossary_checks() {
+        use combat::{Archetype, DamageType, Element, MonsterBlock, Save};
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/dist/client/glossary.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("glossary_checks: no {} (bake the glossary)", path.display());
+            return;
+        };
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let class = |v: &serde_json::Value| Class::from_id(v.as_str().unwrap()).unwrap();
+        let int = |v: &serde_json::Value| v.as_i64().unwrap();
+        let save_of = |v: &serde_json::Value| match v.as_str().unwrap() {
+            "body" => Save::Body,
+            "reflex" => Save::Reflex,
+            _ => Save::Mind,
+        };
+        // d20 + bonus against a target, in %: a natural 1 misses, a natural 20 hits.
+        let hit_pct = |bonus: i64, target: i64| (1..=20).filter(|&r| r == 20 || (r != 1 && r + bonus >= target)).count() as i64 * 5;
+        let mut n = 0;
+        for t in doc["terms"].as_array().unwrap() {
+            for row in t["checks"].as_array().into_iter().flatten() {
+                let r = row.as_array().unwrap();
+                let (kind, args, want) = (r[0].as_str().unwrap(), &r[1..r.len() - 1], int(&r[r.len() - 1]));
+                let lvl = |i: usize| int(&args[i]) as u32;
+                let got: i64 = match kind {
+                    "proficiency" => combat::proficiency(lvl(0)).into(),
+                    "class_mod" => combat::class_mod(lvl(0)).into(),
+                    "k" => combat::cantrip_k(lvl(0)).into(),
+                    "dc" => combat::save_dc(lvl(0)).into(),
+                    "defence" => class(&args[0]).defence().into(),
+                    "save_bonus" => class(&args[0]).save_bonus(lvl(1), save_of(&args[2])).into(),
+                    "attacks" => class(&args[0]).attacks_per_action(lvl(1)).into(),
+                    "hit_die" => class(&args[0]).hit_die_at(lvl(1)).into(),
+                    "to_hit" => (combat::proficiency(lvl(0)) + combat::class_mod(lvl(0)) + int(&args[1]) as i32 - 1).into(),
+                    "monster_ac" => MonsterBlock::new(lvl(0), Archetype::from_id(args[1].as_str().unwrap()), 1).ac.into(),
+                    "monster_attack" => MonsterBlock::new(lvl(0), Archetype::Swarm, 1).attack.into(),
+                    "monster_save" => MonsterBlock::new(lvl(0), Archetype::from_id(args[1].as_str().unwrap()), 1).save.into(),
+                    "hit_pct" => hit_pct(int(&args[0]), int(&args[1])),
+                    "save_pct" => (1..=20).filter(|&r| r + int(&args[0]) >= int(&args[1])).count() as i64 * 5,
+                    "crit_pct_x100" => {
+                        let confirm = (2..=20).filter(|&r| r + int(&args[0]) >= int(&args[1]) + combat::rules::CRIT_CONFIRM_MARGIN as i64).count() as i64;
+                        5 * confirm * 5
+                    }
+                    "avg_x2" => {
+                        let m: Vec<i64> = args[0].as_str().unwrap().split(['d', '+']).map(|x| x.parse().unwrap()).collect();
+                        combat::Dice::new(m[0] as u32, m[1] as u32, *m.get(2).unwrap_or(&0) as i32).average_x2().into()
+                    }
+                    "refine_damage" => combat::refine::bonus(combat::items::find("sword").unwrap(), int(&args[0]) as u8).damage.into(),
+                    "safe_limit" => {
+                        let id = match int(&args[0]) {
+                            1 => "sword",
+                            2 => "falchion",
+                            _ => "blade",
+                        };
+                        let e = combat::items::find(id).unwrap();
+                        assert_eq!(e.weapon.map(|w| w.level as i64), Some(int(&args[0])), "{id} is a level {} weapon", int(&args[0]));
+                        combat::refine::safe_limit(e).into()
+                    }
+                    other => panic!("glossary check {other:?} is unknown here (glossary.py CHECKS)"),
+                };
+                assert_eq!(got, want, "glossary term {}: check {row}", t["id"]);
+                n += 1;
+            }
+        }
+        assert!(n > 30, "the glossary's checks ran ({n})");
+        // The wheel, cell by cell (rows not listed are plain).
+        let wheel = &doc["wheel"];
+        let kinds = ["physical", "fire", "cold", "lightning", "earth", "poison", "radiant", "necrotic", "force"];
+        for el in wheel["order"].as_array().unwrap() {
+            let el = el.as_str().unwrap();
+            let row = &wheel[el];
+            for kind in kinds {
+                let has = |k: &str| row[k].as_array().is_some_and(|a| a.iter().any(|x| x == kind));
+                let listed = if has("weak") {
+                    combat::Affinity::Vulnerable
+                } else if has("resist") {
+                    combat::Affinity::Resistant
+                } else if has("immune") {
+                    combat::Affinity::Immune
+                } else {
+                    combat::Affinity::Normal
+                };
+                assert_eq!(Element::from_id(el).affinity(DamageType::from_id(kind).unwrap()), listed, "glossary wheel: {el} vs {kind}");
+            }
+        }
     }
 }

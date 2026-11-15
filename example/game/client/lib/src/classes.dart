@@ -15,6 +15,7 @@ const classBodies = <String, List<String>>{
   'archer': ['archer', 'hunter', 'sniper'],
   'acolyte': ['acolyte', 'priest', 'high_priest'],
   'thief': ['thief', 'assassin', 'assassin_cross'],
+  'merchant': ['merchant', 'alchemist', 'creator'],
 };
 
 /// Body slug of a class (`archetype`, the character's class id) at a tier
@@ -43,7 +44,6 @@ String riderJob(String archetype, int tier, {required bool riding}) {
 /// Bodies of the class lines not playable yet (shown locked at creation),
 /// by the all-bodies pack's id (`client/bodies/sprites/<id>_<m|f>.json`).
 const lockedBodies = <String, String>{
-  'merchant': 'merchant',
   'super_novice': 'super_novice',
   'ninja': 'ninja',
   'gunslinger': 'gunslinger',

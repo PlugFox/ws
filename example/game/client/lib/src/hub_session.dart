@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:game_client/src/api.dart';
+import 'package:game_client/src/auto_use.dart';
 import 'package:game_client/src/contacts.dart';
 import 'package:game_client/src/changelog.dart';
 import 'package:game_client/src/leaderboard.dart';
@@ -20,9 +21,11 @@ import 'package:game_client/src/input_devices.dart';
 import 'package:game_client/src/interpolation.dart';
 import 'package:game_client/src/key_bindings.dart';
 import 'package:game_client/src/prediction.dart';
+import 'package:game_client/src/parties.dart';
 import 'package:game_client/src/protocol.dart';
 import 'package:game_client/src/refine.dart';
 import 'package:game_client/src/tips.dart';
+import 'package:game_client/src/update.dart';
 import 'package:game_client/src/version.dart';
 import 'package:game_client/src/walk_grid.dart';
 import 'package:web/web.dart' as web;
@@ -30,6 +33,10 @@ import 'package:ws/ws.dart';
 
 /// Input slot bit of the travel key (server `cast::TRAVEL_SLOT`).
 const travelSlot = 15;
+
+/// After a finished run's countdown, how long the client waits for the
+/// server to send it home before asking itself (`STAGE_LEAVE`), ms.
+const returnGraceMs = 2500;
 
 final class _Npc {
   _Npc(this.index, Map<String, Object?> j)
@@ -149,28 +156,28 @@ int statusRowFlags(int status) =>
     (status & MobStatus.burning != 0 ? Row.flagBurning : 0) |
     (status & MobStatus.poisoned != 0 ? Row.flagPoisoned : 0) |
     (status & MobStatus.taunted != 0 ? Row.flagTaunted : 0) |
-    (status & MobStatus.burrowed != 0 ? Row.flagBurrowed : 0);
+    (status & MobStatus.silenced != 0 ? Row.flagSilenced : 0) |
+    (status & MobStatus.burrowed != 0 ? Row.flagBurrowed : 0) |
+    (status & MobStatus.cloaked != 0 ? Row.flagCloaked : 0);
 
 final class _Peer {
-  _Peer(this.name, this.archetype, this.look);
+  _Peer(this.name, this.archetype, this.appearance);
   final String name;
   final String archetype;
-  Look look;
 
-  /// Class tier (body sprite); 1 until the wire carries other players' tier.
-  int tier = 1;
+  /// How it is drawn, whole (`PlayerInfo.appearance`, then
+  /// `player_appearance`): body tier, look, weapon, headgear, mount.
+  Appearance appearance;
+
+  Look get look => appearance.look;
+  int get tier => appearance.tier;
+  bool get riding => appearance.riding;
 
   /// Character level (`PlayerInfo.level`), for the player menu.
   int level = 1;
 
-  /// Held weapon id (`sword`, `bow`; `PlayerInfo.weapon` / `PlayerGear`).
-  String weapon = '';
-
   /// Their connection dropped (`player_link`): still on the stage, marked.
   bool linkDead = false;
-
-  /// On a Peco Peco (`player_mount`): drawn with the mounted body.
-  bool riding = false;
 
   /// Town pets (`pet:<sprite>`) are drawn with a location sprite, no look.
   String? get petSprite => archetype.startsWith('pet:') ? archetype.substring(4) : null;
@@ -228,6 +235,13 @@ final class HubSession {
   /// window, which then lists the item under its new key).
   ({String id, String name})? _refiner;
   String? _refining;
+
+  /// The Hatter whose recipe window is open (NPC id), and a craft in flight.
+  String? _hatter;
+  bool _crafting = false;
+
+  /// The Kafra's party list was asked for: the answer opens it.
+  bool _partiesAsked = false;
   bool _styling = false;
   String _channel = '-';
 
@@ -238,7 +252,11 @@ final class HubSession {
   final _newCards = <String>[];
 
   /// Players online (beside the town's minimap, the Ranking tab's footer).
-  late final _pulse = OnlinePoller(() => api.json('/api/online'), (_) => _showOnline(), every: const Duration(seconds: 30));
+  late final _pulse = OnlinePoller(
+    () => api.json('/api/online'),
+    (_) => _showOnline(),
+    every: const Duration(seconds: 30),
+  );
 
   /// Pages of the Ranking tab (`leaderboard_query`).
   late final _board = LeaderboardClient(
@@ -274,9 +292,15 @@ final class HubSession {
   ModifierDefs? _modDefs;
   ModifierState? _lobbyMods;
   (int tier, int mask)? _pendingMods;
+
   /// The last mission's end and party statistics, until `RUN_REWARDS`
   /// completes the result screen.
   StageEnd? _stageEnd;
+
+  /// The end-of-run "Return to town" call is up (until the hub takes us),
+  /// and the backstop that asks to leave if the server's own move is late.
+  bool _returnCall = false;
+  Timer? _returnTimer;
   RunStats? _runStats;
 
   /// The last mission briefing (the loading screen's tips).
@@ -318,6 +342,48 @@ final class HubSession {
 
   /// Own state from the vitals: 0 up, 1 downed, 2 dead.
   int get _myState => _vitals[_me]?.state ?? 0;
+
+  /// Merchant-line companions on the map (`COMPANIONS` records) by entity
+  /// id: homunculi walk in the snapshot rows, plants and sphere mines stand
+  /// where their record says ([_rootedRows]).
+  final _companions = <int, CompanionInfo>{};
+
+  /// When each record arrived (wall clock): a rooted one's `expiresMs`
+  /// counts from there.
+  final _companionSince = <int, double>{};
+
+  /// A companion's flinch after a hit on it, and its death (the fall plays,
+  /// then a rooted one goes; a homunculus leaves the snapshots).
+  final _hitUntil = <int, double>{};
+  final _companionDown = <int, double>{};
+
+  /// The last row of each rooted companion (sprite, action, facing packed).
+  final _rootedSent = <int, int>{};
+
+  /// The own homunculus panel (`COMPANION_STATE`) and when it came.
+  CompanionState? _homState;
+  double _homStateAt = 0;
+  double _homDrawn = 0;
+
+  /// Its name and look while it is not out (no record to read them from).
+  String _homName = '';
+  bool _homEvolved = false;
+
+  /// When the own Call Homunculus slot was last pressed (the chooser opens
+  /// when the server answers that no type is chosen yet).
+  double _callHomAt = -10;
+  bool _callHomHeld = false;
+  bool _homChooser = false;
+
+  /// The chooser is open to change the type (it stays open while panels
+  /// with the current type come in).
+  bool _homChanging = false;
+
+  /// The companions pack is asked for (once a session).
+  bool _companionsAsked = false;
+
+  /// The entities whose Pushcarts the engine draws (appearance `cart`).
+  final Set<int> _carts = {};
 
   /// Light radius of the stage before buffs (cells), and the row flags last
   /// sent per remote player (conditions).
@@ -373,6 +439,19 @@ final class HubSession {
     _ws.push(ClientMsg.castPrefs(manualAim: prefs.$1, auto: prefs.$2)).ignore();
   }
 
+  /// `USE_PREFS` as last sent on this connection (`(hp, sp)` percent).
+  (int, int)? _sentUsePrefs;
+
+  /// Settings → Auto-use potions: the thresholds the server drinks at
+  /// ([usePrefsOf]); sent on connect and on change.
+  void _syncUsePrefs() {
+    if (_ws.state is! WebSocketState$Open) return;
+    final prefs = usePrefsOf(_settings);
+    if (prefs == _sentUsePrefs) return;
+    _sentUsePrefs = prefs;
+    _ws.push(ClientMsg.usePrefs(hp: prefs.$1, sp: prefs.$2)).ignore();
+  }
+
   /// Own skills (`skills` message) and the last pointer position (aim).
   Skills? _skills;
   (double, double)? _pointer;
@@ -386,10 +465,24 @@ final class HubSession {
   /// Entities sitting (players, townsfolk), from `pose` messages.
   final _sitting = <int>{};
 
-  /// The own character rides (`player_mount`), [_rideSpeed] percent faster;
+  /// Arrows nocked by archers on the stage (Arrow Change; `quiver`):
+  /// damage type ids, the plain arrow left out.
+  final _quivers = <int, int>{};
+
+  /// The own running buffs (`buffs`), redrawn with the arrow chip.
+  List<({String skill, int ms})> _buffs = const [];
+
+  /// The own arrow, kept between stages (Arrow Change nocks it again).
+  int _myArrow = 0;
+
+  /// The own character's appearance as the server states it (after every
+  /// `map_enter`, then on changes); null until the first one.
+  Appearance? _mine;
+
+  /// The own character rides, [_rideSpeed] percent faster (from [_mine]);
   /// [_statusPace] is what conditions leave of the pace (slowed, held).
-  bool _riding = false;
-  int _rideSpeed = 0;
+  bool get _riding => _mine?.riding ?? false;
+  int get _rideSpeed => _mine?.speed ?? 0;
   double _statusPace = 1;
 
   /// A gamepad / touch press of the mount slot was down last tick (edges).
@@ -456,8 +549,9 @@ final class HubSession {
   Resumable? _resumeOffer;
 
   /// Close codes after which reconnecting would only repeat the refusal:
-  /// 4008 kicked, 4009 signed in elsewhere (or taken over by a newer tab).
-  static const _finalCloseCodes = {4008, 4009};
+  /// 4008 kicked, 4009 signed in elsewhere (or taken over by a newer tab),
+  /// 4010 another build (`update.dart`: reload).
+  static const _finalCloseCodes = {4008, 4009, closeUpdateRequired};
 
   static double _now() => web.window.performance.now() / 1000;
 
@@ -475,7 +569,8 @@ final class HubSession {
           // every fourth after (a renewal rotates the refresh token, so not
           // on every attempt while the server is away).
           final token = await api.freshToken(force: attempt == 1 || (attempt > 0 && attempt % 4 == 0));
-          return WebSocketRequest(url.replace(queryParameters: {'token': token}));
+          // The server refuses another build (`update.dart`).
+          return WebSocketRequest(url.replace(queryParameters: {'token': token, 'build': clientBuildId}));
         },
         reconnect: WebSocketReconnect(
           maxDelay: const Duration(seconds: 8),
@@ -621,11 +716,14 @@ final class HubSession {
         _goOffline(attempt);
       case WebSocketState$Connecting(:final attempt) when attempt > 0 && _wasOpen:
         _goOffline(attempt);
-      case WebSocketState$Disconnected(:final closeCode, :final error) when !_stopped:
+      case WebSocketState$Disconnected(:final closeCode, :final closeReason, :final error) when !_stopped:
         // Not retried: the session cannot go on here.
         final expired = error?.cause is SessionExpired;
+        final refused = refusedBy(closeCode, closeReason);
+        if (refused != null) pageUpdates?.refused(refused);
         _end(switch (closeCode) {
           _ when expired => '${error!.cause}',
+          closeUpdateRequired => 'A new version of the game is out: reload the page to play.',
           4009 => 'You signed in somewhere else, so this tab was disconnected.',
           4008 => 'You were disconnected by the server.',
           _ => 'The connection to the server was lost.',
@@ -715,6 +813,8 @@ final class HubSession {
         this.serverVersion = serverVersion;
         // A new connection knows nothing of how we cast yet.
         _sentCastPrefs = null;
+        _sentUsePrefs = null;
+        _syncUsePrefs();
       case null || HubChannels():
         break;
       case final FeedbackResult r:
@@ -728,10 +828,23 @@ final class HubSession {
       case final Skills s:
         _skills = s;
         _renderSkills();
+        _syncCart();
       case final Cast c:
         _onCast(c);
       case ZoneEnd(:final id):
+        _predictor?.drift.remove(id);
         view.endZone(id);
+      case final SkillStrikes s:
+        view.skillStrikes(
+          jsonEncode({
+            'caster': s.caster,
+            'skill': s.skill,
+            'radius': s.radius,
+            'strikes': [
+              for (final p in s.strikes) {'x': p.x, 'y': p.y, 'delayMs': p.delayMs},
+            ],
+          }),
+        );
       case final StageEnd e:
         _onStageEnd(e);
       case final Boss b:
@@ -739,11 +852,10 @@ final class HubSession {
         _renderMarks();
         view.setBoss(b.hp <= 0 ? '' : jsonEncode({'id': b.entityId, 'name': b.name, 'hp': b.hp, 'maxHp': b.maxHp}));
       case Buffs(:final buffs):
-        view.setBuffs(
-          jsonEncode([
-            for (final b in buffs) {'skill': b.skill, 'ms': b.ms},
-          ]),
-        );
+        _buffs = buffs;
+        _renderBuffs();
+      case Quiver(:final entityId, :final element):
+        _onQuiver(entityId, element);
       case final Progress pr:
         final before = _progress?.level;
         _progress = pr;
@@ -764,6 +876,12 @@ final class HubSession {
           }),
         );
       case final BossZones z:
+        // Belts (drifting ground): the local prediction rides them too.
+        for (final a in z.zones) {
+          if (!a.drift || a.area.id == 0) continue;
+          final t = a.area;
+          _predictor?.drift.put(t.id, circle: t.shape == 0, x: t.x, y: t.y, dir: t.dir, along: t.a, across: t.b, speed: a.driftSpeed);
+        }
         view.bossZones(
           jsonEncode({
             'caster': z.caster,
@@ -785,6 +903,10 @@ final class HubSession {
         for (final e in events) {
           view.affixEvent(e.entity.toDouble(), e.name, e.x, e.y);
         }
+      case Companions(:final list):
+        _onCompanions(list);
+      case final CompanionState s:
+        _onCompanionState(s);
       case MonsterHp(:final bars):
         // The bars under elites and bosses; the engine keeps each until
         // its plate shows (or the monster is gone: NaN).
@@ -805,6 +927,7 @@ final class HubSession {
         _backOnline();
         _resumeOffer = null;
         _me = entityId;
+        _syncCart();
         view.setChat(true);
         _channel = channelName;
         _tickHz = tickRate;
@@ -815,6 +938,8 @@ final class HubSession {
         view.setBossBar('');
         _bossId = null;
         _affixes.clear();
+        _buffs = const [];
+        _quivers.clear();
         view.setBuffs('[]');
         view.setCombo(0, 0, 0, 0);
         _combo = 0;
@@ -822,6 +947,7 @@ final class HubSession {
         view.setMissionClock('', 0, false);
         view.setMissionModifiers(jsonEncode({'scope': 'stage'}));
         _vitals.clear();
+        _hideReturnCall();
         if (_inStage) {
           _inStage = false;
           // The cards found on the run, the first one turned over.
@@ -844,6 +970,7 @@ final class HubSession {
         _backOnline();
         _resumeOffer = null;
         _me = msg.entityId;
+        _syncCart();
         view.setChat(true);
         _channel = 'Stage-${msg.stageId}';
         _tickHz = msg.tickRate;
@@ -852,7 +979,12 @@ final class HubSession {
         _stageMission = msg.mission;
         _vitals.clear();
         // A fresh arrival carries no timed effect (COMBAT.md §4.6).
+        _buffs = const [];
+        _quivers.clear();
         view.setBuffs('[]');
+        // The arrow nocked on the last stage, nocked again (the server
+        // ignores it without Arrow Change).
+        if (_myArrow != 0) _send(ClientMsg.quiver(_myArrow));
         _baseLight = msg.lightRadius;
         view.setLightRadius(msg.lightRadius);
         _inStage = true;
@@ -914,6 +1046,9 @@ final class HubSession {
       case HubError(:final message) when _shopNpc != null:
         view.shopNote(message);
         view.toast(message);
+      case HubError(:final message) when _crafting && _hatter != null:
+        _crafting = false;
+        view.recipesResult(jsonEncode({'error': message}));
       case HubError(:final message) when _refining != null && _refiner != null:
         // The attempt did not go through (no ore, too far): the window says so.
         _refining = null;
@@ -958,10 +1093,41 @@ final class HubSession {
             ],
           }),
         );
-      case Shop(:final npc, :final name, :final items):
+      case Shop(:final npc, :final name, :final items, :final buyPct, :final sellPct):
         view.closeDialog();
         _shopNpc = npc;
-        view.showShop(jsonEncode({'npc': npc, 'name': name, 'items': items}));
+        // Discount / Overcharge: the window strikes the shop's price out.
+        view.showShop(jsonEncode({'npc': npc, 'name': name, 'items': items, 'buyPct': buyPct, 'sellPct': sellPct}));
+      case Recipes(:final npc, :final name, :final recipes):
+        view.closeDialog();
+        _hatter = npc;
+        _crafting = false;
+        // A recipe book of a skill (the Alchemist's Pharmacy) has no NPC
+        // to walk away from: it stays open until closed.
+        final giver = _npcs.where((n) => n.id == npc).firstOrNull;
+        _npcDialog = giver != null;
+        view.showRecipes(
+          jsonEncode({
+            'npc': npc,
+            'name': name,
+            'text': ?giver?.text,
+            if (giver == null) ...{'kind': 'Recipe book', 'made': 'Brewed: {item}. It is in your bag.'},
+            'recipes': [for (final r in recipes) r.toJson()],
+          }),
+        );
+      case Crafted(:final item):
+        _crafting = false;
+        if (_hatter != null) {
+          view.recipesResult(jsonEncode({'crafted': item}));
+        } else {
+          view.toast('Made: ${_itemDefs[item]?.name ?? item}.');
+        }
+      case Parties(:final parties):
+        if (!_partiesAsked || _inStage) return;
+        _partiesAsked = false;
+        final meAway = _lobby?.members.any((m) => m.entityId == _me && m.away) ?? false;
+        _npcDialog = true;
+        view.showDialog(jsonEncode(partiesDialog(parties, lobby: _lobby, leading: _leading, meAway: meAway)));
       case ShopDone(:final spent, :final earned):
         view.shopDone(spent, earned);
       case Refined(:final item, :final ok, :final refine, :final slip):
@@ -970,13 +1136,21 @@ final class HubSession {
         if (row == null || _refiner == null) {
           // The window was closed meanwhile: a toast tells how it went.
           final name = _itemDefs[splitKey(item).id]?.name ?? item;
-          view.toast(ok ? 'Success! Your $name is now +$refine.' : 'The hammer slipped... your $name fell back to +$refine.');
+          view.toast(
+            ok ? 'Success! Your $name is now +$refine.' : 'The hammer slipped... your $name fell back to +$refine.',
+          );
           return;
         }
         // `<slot | b>:<key>`: the level before, and the row it is now.
         final i = row.indexOf(':');
         view.refineResult(
-          jsonEncode({'ok': ok, 'item': item, 'from': splitKey(row.substring(i + 1)).refine, 'to': refine, 'slip': slip}),
+          jsonEncode({
+            'ok': ok,
+            'item': item,
+            'from': splitKey(row.substring(i + 1)).refine,
+            'to': refine,
+            'slip': slip,
+          }),
         );
         _showRefiner(select: '${row.substring(0, i)}:$item');
       case Carded(:final inserted, :final item, :final card):
@@ -986,26 +1160,13 @@ final class HubSession {
       case ItemUsed(:final item):
         final d = _itemDefs[item];
         if (d != null) view.toast('${d.name}: ${d.desc.split('\n').first.replaceAll('**', '')}');
-      case PlayerGear(:final entityId, :final weapon):
-        _setWeapon(entityId, weapon);
-      case PlayerHeadgear(:final entityId, :final items):
-        view.setHeadgear(entityId.toDouble(), items.join(','));
       case Loot(:final entityId, :final x, :final y, :final item, :final count, :final rare):
+        // The engine floats it from the monster and adds it to the loot
+        // feed (merged repeats; rare drops highlighted) and the chat's
+        // loot log: no toast.
         view.showLoot(entityId.toDouble(), x, y, item, count, rare);
-        if (rare) {
-          final def = _itemDefs[item];
-          final name = def?.name ?? item;
-          final what = def?.kind == 9
-              ? 'Monster card'
-              : switch (def?.rarity ?? 0) {
-                  2 => 'Rare magic item',
-                  1 => 'Magic item',
-                  _ => 'Rare drop',
-                };
-          view.toast('$what: ${count > 1 ? '$count × ' : ''}$name!');
-          // A card is turned over back in town (not in the fight).
-          if (def?.kind == 9 && _inStage && !_newCards.contains(item)) _newCards.add(item);
-        }
+        // A card is turned over back in town (not in the fight).
+        if (rare && _itemDefs[item]?.kind == 9 && _inStage && !_newCards.contains(item)) _newCards.add(item);
       case Combo(:final count, :final rank, :final windowMs, :final leftMs):
         _combo = count;
         view.setCombo(count, rank, windowMs, leftMs);
@@ -1020,8 +1181,8 @@ final class HubSession {
         // Taken by [entityId] (its burst and name over them) or burst.
         view.takeBonus(id.toDouble(), entityId.toDouble());
         _bonusAt.remove(id);
-      case PlayerLook(:final entityId, :final look):
-        _onPlayerLook(entityId, look);
+      case PlayerAppearance(:final entityId, :final appearance):
+        _onAppearance(entityId, appearance);
       case final MapEnter enter:
         _onMapEnter(enter).catchError((Object e, StackTrace st) {
           view.endLoading();
@@ -1048,8 +1209,6 @@ final class HubSession {
         } else {
           _sitting.remove(entityId);
         }
-      case final PlayerMount m:
-        _onMount(m);
       case FlagPing(:final entityId, :final flag, :final x, :final y):
         view.showFlag(entityId.toDouble(), flag, x, y, entityId == _me ? _myName : (_peers[entityId]?.name ?? ''));
       case MissionBriefing(:final brief):
@@ -1143,7 +1302,11 @@ final class HubSession {
         t = _tracks[id] = RemoteTrack(id);
         // Back from beyond the fog: its name and look were dropped with it.
         final peer = _peers[id];
-        if (peer != null) _showPeer(id, peer);
+        if (peer != null) {
+          _showPeer(id, peer);
+        } else if (_companions.containsKey(id)) {
+          _showCompanion(id);
+        }
       }
       t.push(s.tick, s.xs[i], s.ys[i], s.facings[i]);
       _lastSeen[id] = now;
@@ -1196,10 +1359,63 @@ final class HubSession {
 
   // ------------------------------------------------------------ combat
 
+  /// An archer nocked another arrow (`quiver`): its shots and arrow skills
+  /// fly with that tip; the own one shows by the buffs.
+  void _onQuiver(int entityId, int element) {
+    if (element == 0) {
+      _quivers.remove(entityId);
+    } else {
+      _quivers[entityId] = element;
+    }
+    view.setQuiver(entityId.toDouble(), Quiver.names[element] ?? '');
+    if (entityId == _me) {
+      _myArrow = element;
+      _renderBuffs();
+    }
+  }
+
+  /// The own buff icons, and the arrow nocked (when not the plain one) as
+  /// a chip of its colour.
+  /// What a homunculus puts on its owner (server `companion::buff_id`):
+  /// the skill whose icon stands for it, and its name.
+  static const _homBuffs = {
+    'hom:urgent_escape': ('increase_agi', 'Urgent Escape (homunculus): faster'),
+    'hom:bulwark': ('endure', 'Amistr Bulwark (homunculus): AC +4'),
+  };
+
+  void _renderBuffs() {
+    final arrow = _quivers[_me];
+    view.setBuffs(
+      jsonEncode([
+        for (final b in _buffs)
+          if (_homBuffs[b.skill] case (final icon, final title))
+            {'skill': icon, 'ms': b.ms, 'title': title, 'source': 'your homunculus'}
+          else
+            // Skills, `item:` potions, `bonus:` pickups, `cond:` conditions.
+            {'skill': b.skill, 'ms': b.ms},
+        if (arrow != null)
+          {
+            'skill': 'arrow_change',
+            'ms': 0,
+            'tint': Quiver.tints[arrow],
+            'title': Quiver.labels[arrow],
+            'desc': 'Your basic attacks shoot this arrow: its element and effect.',
+            'source': 'the arrows in your quiver',
+          },
+      ]),
+    );
+  }
+
   void _onVitals(PlayerVitals v) {
     final before = _vitals[v.entityId];
     final wasUp = (before?.state ?? 0) == 0;
     _vitals[v.entityId] = v;
+    // A thief coming up out of the ground: the burst of earth of the
+    // burrowing monsters (sinking in, Hiding's own puff plays).
+    const veil = MobStatus.burrowed;
+    if (before != null && before.status & veil != 0 && v.status & veil == 0) {
+      view.unitSound(v.entityId.toDouble(), 'emerge');
+    }
     // The party window's health bars, at most four times a second.
     if (_inStage && before?.hp != v.hp) {
       final now = _now();
@@ -1209,10 +1425,13 @@ final class HubSession {
       }
     }
     _applyHealth(v);
+    if (_companions.containsKey(v.entityId)) {
+      _onCompanionVitals(v, wasUp);
+      return;
+    }
     // A level gained mid-fight: the burst (the server healed and threw
     // the monsters around back).
     if (before != null && before.level > 0 && v.level > before.level) view.levelUp(v.entityId.toDouble());
-    if (v.level > 0) _peers[v.entityId]?.tier = tierOfLevel(v.level);
     if (v.entityId == _me) {
       if (_inStage && (before?.light ?? 0) != v.light) view.setLightRadius(_baseLight + v.light);
       // Predict what the server does: held or rooted stand, slowed walk at
@@ -1220,6 +1439,8 @@ final class HubSession {
       // prediction, the corrections carry the player.
       final wasFeared = (before?.status ?? 0) & MobStatus.feared != 0;
       if (v.status & MobStatus.feared != 0 && !wasFeared) view.toast('You are terrified! You flee and cannot fight.');
+      final wasSilenced = (before?.status ?? 0) & MobStatus.silenced != 0;
+      if (v.status & MobStatus.silenced != 0 && !wasSilenced) view.toast('You are silenced! No skills, basic attacks only.');
       _statusPace = v.status & (MobStatus.held | MobStatus.rooted | MobStatus.feared) != 0
           ? 0
           : v.status & MobStatus.slowed != 0
@@ -1246,7 +1467,9 @@ final class HubSession {
       // (staves and books are clubs, monsters strike on contact); ranged
       // damage comes from skills, which bring their own effects.
       if (s.target != 0 && mob == null && (weaponFamily(s.entityId) == 'bow' || _defaultBow(s.entityId))) {
-        view.projectile(s.entityId.toDouble(), s.target.toDouble(), 'arrow');
+        // The nocked arrow (Arrow Change) flies with its element's tip.
+        final tip = Quiver.names[_quivers[s.entityId] ?? 0];
+        view.projectile(s.entityId.toDouble(), s.target.toDouble(), tip == null ? 'arrow' : 'arrow_$tip');
       }
       if (mob != null) {
         mob
@@ -1262,7 +1485,20 @@ final class HubSession {
     for (final h in c.hits) {
       final isMob = h.target >= monsterEntityBase;
       view.showDamage(h.target.toDouble(), h.amount, h.flags, !isMob);
-      if (!isMob) continue;
+      if (!isMob) {
+        // A companion flinches and falls like a monster.
+        if (_companions.containsKey(h.target) && !h.isMiss && h.flags & 8 == 0) {
+          if (h.isKill) {
+            if (!_companionDown.containsKey(h.target)) view.unitSound(h.target.toDouble(), 'die');
+            _companionDown[h.target] ??= now;
+          } else {
+            view.unitSound(h.target.toDouble(), 'hit');
+            _hitUntil[h.target] = now + 0.3;
+          }
+          _tracks[h.target]?.resetSent();
+        }
+        continue;
+      }
       final mob = _mobs[h.target - monsterEntityBase];
       if (mob == null) continue;
       if (h.isKill) {
@@ -1281,14 +1517,14 @@ final class HubSession {
 
   /// Character action: lying while down, the swing for a moment after an
   /// attack, otherwise walk / idle.
-  /// Weapon family a character holds (null: the class's starting one).
-  String? weaponFamily(int id) => _weapons[id];
+  /// Weapon family a character holds (its appearance; null: unknown).
+  String? weaponFamily(int id) {
+    final w = (id == _me ? _mine : _peers[id]?.appearance)?.weapon ?? '';
+    return w.isEmpty ? null : w.split(':').first;
+  }
 
   /// An archer whose weapon the server has not named yet holds the class's bow.
-  bool _defaultBow(int id) => _weapons[id] == null && _peers[id]?.archetype == 'archer';
-
-  /// Weapon families by entity, as the server reports them.
-  final _weapons = <int, String>{};
+  bool _defaultBow(int id) => weaponFamily(id) == null && _peers[id]?.archetype == 'archer';
 
   int _charAction(int id, bool moving, double now) {
     // Down or dead: the fall, held on its last frame (revived: up again).
@@ -1325,6 +1561,7 @@ final class HubSession {
     int stat(String k) => (_stats[k] as num?)?.toInt() ?? 0;
     final maxHp = v?.maxHp ?? stat('max_hp');
     final maxSp = v?.maxSp ?? stat('max_sp');
+    view.setGlossaryContext(jsonEncode(_glossaryContext(level)));
     view.setStatus(
       jsonEncode({
         'name': _myName,
@@ -1359,6 +1596,28 @@ final class HubSession {
       'damageType': ?weapon['damage_type'],
       'attacksPerSec': interval > 0 ? (1000 / interval * ((_stats['attacks'] as num?) ?? 1)).toStringAsFixed(1) : null,
       'proficiency': signed(_stats['proficiency']),
+      if (_stats['class_mod'] != null) 'classMod': signed(_stats['class_mod']),
+      'spellDc': ?_stats['save_dc'],
+      'saves': ?_stats['saves'],
+      'k': ?_stats['k'],
+    };
+  }
+
+  /// The player's numbers for the glossary tips (`GameView.setGlossaryContext`):
+  /// AC, attack bonus, spell DC and saves with the gear (the server's `stats`).
+  Map<String, Object?> _glossaryContext(int level) {
+    final w = _stats['weapon'];
+    final saves = _stats['saves'];
+    return {
+      'level': level,
+      'cls': _myArchetype,
+      'k': ?_stats['k'],
+      'proficiency': ?_stats['proficiency'],
+      'classMod': ?_stats['class_mod'],
+      'ac': ?_stats['ac'],
+      if (w is Map) 'attackBonus': ?w['to_hit'],
+      'spellDc': ?_stats['save_dc'],
+      if (saves is Map) 'saves': saves,
     };
   }
 
@@ -1379,6 +1638,7 @@ final class HubSession {
       'archer': ['Archer', 'Hunter', 'Sniper'],
       'acolyte': ['Acolyte', 'Priest', 'High Priest'],
       'thief': ['Thief', 'Assassin', 'Assassin Cross'],
+      'merchant': ['Merchant', 'Alchemist', 'Creator'],
     };
     final t = titles[archetype];
     if (t == null) return archetype;
@@ -1452,6 +1712,9 @@ final class HubSession {
     }
     _sitting.clear();
     _clearMobs();
+    for (final id in _companions.keys.toList()) {
+      _dropCompanion(id);
+    }
     for (final npc in _npcs) {
       view.setLabel(npc.entityId, null, '');
     }
@@ -1520,15 +1783,19 @@ final class HubSession {
     final me = _me;
     if (me != null) {
       view.setLabel(me.toDouble(), _myName, 'me');
-      _applyLook(me, _myLook);
+      _drawAppearance(me);
     }
     for (final e in _peers.entries) {
       if (_unlit.contains(e.key)) {
-        _applyLook(e.key, e.value.look);
+        _drawAppearance(e.key);
       } else {
         _showPeer(e.key, e.value);
       }
     }
+    for (final id in _companions.keys) {
+      _showCompanion(id);
+    }
+    _rootedSent.clear();
     _vitals.values.forEach(_applyHealth);
     _renderStatus();
     final bgm = map.bgm;
@@ -1565,50 +1832,69 @@ final class HubSession {
 
   void _addPeer(PlayerInfo p) {
     final id = p.entityId;
-    final name = p.name;
-    final archetype = p.archetype;
     if (id == _me) {
-      _myName = name;
-      _myArchetype = archetype;
-      _myLook = p.look;
-      _applyLook(id, p.look);
-      _setWeapon(id, p.weapon);
+      _myName = p.name;
+      _myArchetype = p.archetype;
+      _onAppearance(id, p.appearance);
       return;
     }
-    final peer = _peers[id] = _Peer(name, archetype, p.look)
-      ..tier = tierOfLevel(p.level)
-      ..level = p.level;
-    _setWeapon(id, p.weapon);
+    final peer = _peers[id] = _Peer(p.name, p.archetype, p.appearance)..level = p.level;
+    _syncCart();
     // Drawn from its first snapshot on (with fog in town, maybe never).
     if (_tracks.containsKey(id)) _showPeer(id, peer);
   }
 
-  /// Name label and look of a peer (again after it comes back into view).
+  /// Name label and appearance of a peer (again after it comes back into view).
   void _showPeer(int id, _Peer peer) {
     view.setLabel(id.toDouble(), peer.name, peer.petSprite != null ? 'npc' : (peer.linkDead ? 'linkdead' : ''));
-    _applyLook(id, peer.look);
+    _drawAppearance(id);
   }
 
-  /// Hair and dyes of a character; pets are plain sprites and get none.
-  void _applyLook(int id, Look l) {
+  /// Hands a character's latest appearance to the engine, whole (hair,
+  /// dyes, weapon, headgear): idempotent, so it is safe after a reload of
+  /// the location, a fog re-entry or a repeated message. The body (class,
+  /// tier, mount) is picked per frame from the same state (`_spriteFor`).
+  /// Pets are plain sprites and get none.
+  void _drawAppearance(int id) {
     if (_peers[id]?.petSprite != null) return;
-    view.setLook(id.toDouble(), l.gender, l.hair, l.hairColor, l.bodyColor);
+    final a = id == _me ? (_mine ?? Appearance(cls: _myArchetype, look: _myLook)) : _peers[id]?.appearance;
+    if (a == null) return;
+    view.setAppearance(id.toDouble(), jsonEncode(a.toUi()));
   }
 
-  void _onPlayerLook(int id, Look look) {
+  /// A character's appearance as the server states it now (whole, see
+  /// [Appearance]): stored, drawn, and for the own character the riding
+  /// pace. Getting on or off a Peco Peco puffs and whooshes, unless it is
+  /// the arrival roll call.
+  void _onAppearance(int id, Appearance a) {
+    final before = id == _me ? _mine : _peers[id]?.appearance;
     if (id == _me) {
-      _myLook = look;
-      _renderStatus();
-      if (_stylist != null) {
-        _stylist = null;
-        _styling = false;
-        view.closeScreen();
-        view.toast('Looking sharp!');
+      _mine = a;
+      final restyled = _myLook != a.look;
+      _myLook = a.look;
+      _applyPace();
+      if (restyled) {
+        _renderStatus();
+        if (_stylist != null) {
+          _stylist = null;
+          _styling = false;
+          view.closeScreen();
+          view.toast('Looking sharp!');
+        }
       }
     } else {
-      _peers[id]?.look = look;
+      final peer = _peers[id];
+      // Unknown here: its `player_appeared` (with this appearance) comes first.
+      if (peer == null) return;
+      peer.appearance = a;
     }
-    _applyLook(id, look);
+    _drawAppearance(id);
+    _syncCart();
+    // (The own character has no track: its prediction draws it.)
+    if (before == null || before.riding == a.riding || (id != _me && !_tracks.containsKey(id)) || _now() - _mapSince < 1) return;
+    view.unitSound(id.toDouble(), 'mount');
+    if (id == _me)
+      view.toast(a.riding ? 'You ride your Peco Peco: +${a.speed}% movement.' : 'You get off your Peco Peco.');
   }
 
   /// The stylist window over the game (hair style, hair and clothes dyes).
@@ -1629,6 +1915,310 @@ final class HubSession {
     _peers.remove(id);
     _sitting.remove(id);
     _hidePeer(id);
+    _syncCart();
+  }
+
+  // -------------------------------------------------------- companions
+
+  /// Homunculus sprite ids by [HomType] (the companions pack, server
+  /// `HomType::sprite`).
+  static const _homSprites = ['', 'lif', 'amistr', 'filir', 'vanilmirth'];
+
+  /// The skill the client treats specially: its slot opens the type
+  /// chooser. (The cart follows the appearance, not the skill.)
+  static const callHomunculusSkill = 'call_homunculus';
+
+  /// `COMPANIONS`: new, changed and gone records.
+  void _onCompanions(List<CompanionInfo> list) {
+    if (list.isNotEmpty) _loadCompanionsPack();
+    final now = _now();
+    var mine = false;
+    for (final c in list) {
+      final id = c.entityId;
+      if (c.ownerEntityId == _me && c.kind == CompanionClass.homunculus) {
+        mine = true;
+        _homName = c.name;
+        _homEvolved = c.evolved;
+      }
+      if (c.gone) {
+        _dropCompanion(id);
+        continue;
+      }
+      _companions[id] = c;
+      _companionSince[id] = now;
+      _rootedSent.remove(id);
+      _tracks[id]?.resetSent();
+      _showCompanion(id);
+    }
+    if (mine) _renderHomunculus();
+  }
+
+  /// Name plate of a companion: its name, and on hover its level and owner.
+  void _showCompanion(int id) {
+    final c = _companions[id];
+    if (c == null) return;
+    final own = c.ownerEntityId == _me;
+    view.setLabel(id.toDouble(), c.name, own ? 'ally own' : 'ally');
+    final owner = own ? _myName : _peers[c.ownerEntityId]?.name;
+    view.setLabelSub(
+      id.toDouble(),
+      jsonEncode([
+        {'text': 'Lv. ${c.level}', 'color': '#9ff2e4'},
+        if (owner != null) {'text': "$owner's", 'color': '#c8d0dc'},
+      ]),
+    );
+  }
+
+  void _dropCompanion(int id) {
+    _companions.remove(id);
+    _companionSince.remove(id);
+    _companionDown.remove(id);
+    _hitUntil.remove(id);
+    _rootedSent.remove(id);
+    _attackUntil.remove(id);
+    _vitals.remove(id);
+    _tracks.remove(id);
+    _lastSeen.remove(id);
+    view.setLabel(id.toDouble(), null, '');
+    view.removeEntity(id.toDouble());
+  }
+
+  /// A companion's vitals: the fall when it drops, up again when revived;
+  /// the own homunculus's plate follows its HP (four times a second).
+  void _onCompanionVitals(PlayerVitals v, bool wasUp) {
+    final id = v.entityId;
+    if (v.state != 0 && wasUp) {
+      if (!_companionDown.containsKey(id)) view.unitSound(id.toDouble(), 'die');
+      _companionDown[id] ??= _now();
+    } else if (v.state == 0) {
+      _companionDown.remove(id);
+    }
+    _tracks[id]?.resetSent();
+    final c = _companions[id];
+    if (c != null && c.ownerEntityId == _me && c.kind == CompanionClass.homunculus) {
+      final now = _now();
+      if (now - _homDrawn > 0.25 || v.state != 0) _renderHomunculus();
+    }
+  }
+
+  /// A companion's action: the fall, a strike, a flinch, a wind-up, walk / idle.
+  int _companionAction(int id, bool moving, double now) {
+    if ((_vitals[id]?.state ?? 0) != 0 || _companionDown.containsKey(id)) return Act.die;
+    if (now < (_attackUntil[id] ?? 0)) return Act.attack;
+    if (now < (_hitUntil[id] ?? 0)) return Act.hit;
+    if (now < (_castUntil[id] ?? 0)) return Act.cast;
+    return moving ? Act.walk : Act.idle;
+  }
+
+  /// Its sprite in the companions pack (-1 until the pack is in: no row).
+  int _companionSprite(CompanionInfo c) {
+    final key = '$_mapId:comp:${c.sprite}';
+    final hit = _spriteCache[key];
+    if (hit != null) return hit;
+    final i = view.spriteIndex(c.sprite);
+    if (i >= 0) _spriteCache[key] = i;
+    return i;
+  }
+
+  int _allyFlags(CompanionInfo c) => Row.flagAlly | (c.ownerEntityId == _me ? Row.flagAllyOwn : 0);
+
+  /// Plants and sphere mines: one standing row each, again only when the
+  /// sprite, action or facing changes; at the end of its time a plant
+  /// withers (the fall), then goes.
+  void _rootedRows(double now) {
+    List<int>? gone;
+    for (final c in _companions.values) {
+      if (!c.rooted) continue;
+      final id = c.entityId;
+      final since = _companionSince[id] ?? now;
+      if (c.expiresMs > 0 && now - since >= c.expiresMs / 1000) _companionDown[id] ??= now;
+      final down = _companionDown[id];
+      if (down != null && now - down > 0.75) {
+        (gone ??= []).add(id);
+        continue;
+      }
+      final sprite = _companionSprite(c);
+      if (sprite < 0) continue;
+      final action = _companionAction(id, false, now);
+      final facing = _attackFacing[id] ?? 0;
+      final key = (sprite * 16 + action) * 8 + facing;
+      if (_rootedSent[id] == key) continue;
+      _rootedSent[id] = key;
+      _out.add(
+        id: id.toDouble(),
+        x0: c.x,
+        y0: c.y,
+        t0: 0,
+        x1: c.x,
+        y1: c.y,
+        t1: 0,
+        facing: facing,
+        sprite: sprite,
+        action: action,
+        flags: Row.flagHigh | _allyFlags(c) | statusRowFlags(_vitals[id]?.status ?? 0),
+      );
+    }
+    gone?.forEach(_dropCompanion);
+  }
+
+  /// The companions pack, once (on the first companion or cart).
+  void _loadCompanionsPack() {
+    if (_companionsAsked) return;
+    _companionsAsked = true;
+    view.loadCompanions('$assetsBase/client/companions/').toDart.then((_) {
+      // Rows skipped meanwhile (no sprite) go out now.
+      for (final t in _tracks.values) {
+        t.resetSent();
+      }
+      _rootedSent.clear();
+      // Sprites the location atlas lacked may be in the pack now (the
+      // field plants Plant Cultivation grows on any stage).
+      _spriteCache.removeWhere((_, i) => i < 0);
+      for (final m in _mobs.values) {
+        m.dirty = true;
+      }
+    }).catchError((Object e) {
+      _companionsAsked = false;
+      web.console.warn('companions: $e'.toJS);
+    });
+  }
+
+  /// `COMPANION_STATE`: the own homunculus panel. No type chosen yet and
+  /// Call Homunculus just pressed: the chooser.
+  void _onCompanionState(CompanionState s) {
+    _homState = s;
+    _homStateAt = _now();
+    if (s.homType == HomType.none) {
+      if (_now() - _callHomAt < 3 && !_homChooser) {
+        _homChooser = true;
+        _loadCompanionsPack();
+        view.showHomunculusChooser(true);
+      }
+    } else if (_homChooser && !_homChanging) {
+      _homChooser = false;
+      view.showHomunculusChooser(false);
+    }
+    _renderHomunculus();
+  }
+
+  /// A press of the Call Homunculus slot (rising edge): remembered for the
+  /// chooser, which opens at once when the server already said there is
+  /// no type yet. The cast itself goes out with the slots as usual (out:
+  /// the server makes it the focus / recall command).
+  void _callHomPress(int slots) {
+    final hotbar = _skills?.hotbar ?? const <String>[];
+    var mask = 0;
+    for (var i = 0; i < hotbar.length && i < Bindings.count; i++) {
+      if (hotbar[i] == callHomunculusSkill) mask |= 1 << i;
+    }
+    final held = mask != 0 && slots & mask != 0;
+    if (held && !_callHomHeld) {
+      _callHomAt = _now();
+      if (_homState?.homType == HomType.none && !_homChooser) {
+        _homChooser = true;
+        _loadCompanionsPack();
+        view.showHomunculusChooser(true);
+      }
+    }
+    _callHomHeld = held;
+  }
+
+  /// Price of a new homunculus type (server `companion::TYPE_CHANGE_ZENY`).
+  static const homChangeZeny = 5000;
+
+  /// The plate's Change button: the chooser again, to change the type (in
+  /// town, for zeny; Bond starts again). The server has the last word.
+  void _openHomChange() {
+    final s = _homState;
+    if (s == null || s.homType == HomType.none || _homChooser) return;
+    final zeny = _inventory?.zeny ?? 0;
+    final why = _inStage
+        ? 'Change it in town.'
+        : zeny < homChangeZeny
+        ? 'Needs $homChangeZeny zeny (you have $zeny).'
+        : null;
+    _homChooser = true;
+    _homChanging = true;
+    _loadCompanionsPack();
+    view.showHomunculusChooser(
+      true,
+      jsonEncode({'current': s.homType, 'price': homChangeZeny, 'ok': why == null, 'why': ?why}),
+    );
+  }
+
+  /// The homunculus plate from the panel, its record and its vitals.
+  void _renderHomunculus() {
+    final s = _homState;
+    if (s == null || s.homType == HomType.none || s.homType >= _homSprites.length) {
+      view.setHomunculus('');
+      return;
+    }
+    final now = _now();
+    _homDrawn = now;
+    final c = _companions.values.where((c) => c.ownerEntityId == _me && c.kind == CompanionClass.homunculus).firstOrNull;
+    final v = c == null ? null : _vitals[c.entityId];
+    final evolved = c?.evolved ?? _homEvolved;
+    // The countdowns go on from when the panel came.
+    final gone = ((now - _homStateAt) * 1000).round();
+    int left(int ms) => ms <= 0 ? 0 : math.max(0, ms - gone);
+    final level = _progress?.level ?? _skills?.level ?? _myLevel;
+    view.setHomunculus(
+      jsonEncode({
+        'type': s.homType,
+        'name': c?.name ?? _homName,
+        'sprite': c?.sprite ?? '${_homSprites[s.homType]}${evolved ? '_h' : ''}',
+        'level': s.level,
+        'exp': s.exp,
+        'expToNext': s.expToNext,
+        'bond': s.bond,
+        'stance': s.stance,
+        'state': s.state,
+        'backMs': left(s.backMs),
+        'hp': v?.hp ?? 0,
+        'maxHp': s.state == CompanionState.out ? (v?.maxHp ?? 0) : 0,
+        'sp': s.sp,
+        'maxSp': s.maxSp,
+        'cooldownsMs': [for (final ms in s.cooldownsMs) left(ms)],
+        'evolved': evolved,
+        // The Evolve button from tier 3 on: what is still missing, or ready.
+        if (!evolved && level >= 60) 'evolve': _evolveCheck(level, s.bond),
+      }),
+    );
+  }
+
+  /// The client's side of the evolve rule (design: Bond 75, a Stone of
+  /// Sage, in town); the server has the last word.
+  Map<String, Object> _evolveCheck(int level, int bond) {
+    final missing = [
+      if (bond < 75) 'Bond 75 (now $bond)',
+      if ((_inventory?.count('stone_of_sage') ?? 0) < 1) 'a Stone of Sage (Pharmacy)',
+      if (_inStage) 'to be in town',
+    ];
+    return missing.isEmpty
+        ? {'ok': true, 'why': 'Evolve: stronger, a new look and a fourth skill. Uses one Stone of Sage.'}
+        : {'ok': false, 'why': 'Needs ${missing.join(', ')}.'};
+  }
+
+  /// Every Pushcart on the map follows the appearances (0xA6 `cart`): the
+  /// own one and every peer's, diffed against what the engine draws. A cart
+  /// out of view goes with its owner on the engine's side.
+  void _syncCart() {
+    final me = _me;
+    final want = <int>{
+      if (me != null && (_mine?.cart ?? false)) me,
+      for (final MapEntry(:key, :value) in _peers.entries)
+        if (key != me && value.petSprite == null && value.appearance.cart) key,
+    };
+    for (final id in _carts.difference(want)) {
+      view.setPushcart(id.toDouble(), false);
+    }
+    for (final id in want.difference(_carts)) {
+      view.setPushcart(id.toDouble(), true);
+    }
+    if (want.isNotEmpty) _loadCompanionsPack();
+    _carts
+      ..clear()
+      ..addAll(want);
   }
 
   /// Out of view (beyond the fog, or silent): the sprite goes, the peer
@@ -1822,7 +2412,9 @@ final class HubSession {
       // Centre to centre, so the reach to its edge (the server's rule) holds
       // for any body; a little inside it so a step back does not undo it.
       final reach = math.max(1.0, _weaponReach - 0.3);
-      return _walkGoal(WalkGoal.monster, mx, my, reach: reach, target: (mob.slot, mob.generation)) ? WalkGoal.monster : null;
+      return _walkGoal(WalkGoal.monster, mx, my, reach: reach, target: (mob.slot, mob.generation))
+          ? WalkGoal.monster
+          : null;
     }
     final bonus = view.pickBonus(x, y);
     final at = bonus.isNaN ? null : _bonusAt[bonus.toInt()];
@@ -1883,10 +2475,7 @@ final class HubSession {
   /// A monster's cell now (its record dead-reckoned to the render clock).
   (double, double) _mobAt(_Mob m) {
     final u = (_clock.renderTick(_now()) - m.stamp).clamp(-Reckoning.back, Reckoning.horizon);
-    return (
-      m.x / Reckoning.posOne + m.vx / Reckoning.velOne * u,
-      m.y / Reckoning.posOne + m.vy / Reckoning.velOne * u,
-    );
+    return (m.x / Reckoning.posOne + m.vx / Reckoning.velOne * u, m.y / Reckoning.posOne + m.vy / Reckoning.velOne * u);
   }
 
   /// This tick's world direction of the click-to-move walk: follows the
@@ -1981,7 +2570,11 @@ final class HubSession {
 
   /// A real player other than us (not a townsperson or a pet).
   bool _isPlayer(int id) =>
-      id != _me && id > 0 && id < residentEntityBase && (_peers[id]?.petSprite == null) && _peers.containsKey(id);
+      id != _me &&
+      id > 0 &&
+      id < companionEntityBase &&
+      (_peers[id]?.petSprite == null) &&
+      _peers.containsKey(id);
 
   // ------------------------------------------------------- player menu
 
@@ -2191,6 +2784,8 @@ final class HubSession {
   void _showOnline() {
     final s = _pulse.last;
     view.setOnline(_inStage || s == null || s.down ? 0 : s.online);
+    // A deploy behind this tab: offer the reload (`update.dart`).
+    pageUpdates?.sawServer(s?.build);
   }
 
   /// A map event of the run (server `hub/env.rs`): a toast as it warns,
@@ -2280,6 +2875,12 @@ final class HubSession {
                 (true, true) => "Pick your party's next expedition and start whenever you like.",
                 _ => "See where your party is headed: its leader picks and starts.",
               },
+            },
+          if (isKafra)
+            {
+              'id': 'parties:list',
+              'label': 'Parties looking for adventurers',
+              'detail': 'Public parties in town or already out on an expedition: join one and go.',
             },
           if (isKafra)
             {
@@ -2393,7 +2994,9 @@ final class HubSession {
     final cards = {for (final c in _ladder) c.id: c};
     // The ladder in its order (coming-soon ones too) when a giver offered
     // it; else the offer, with its card where there is one.
-    final ids = _offer.isNotEmpty && _ladder.isNotEmpty ? [for (final c in _ladder) c.id] : [for (final m in offer) m.id];
+    final ids = _offer.isNotEmpty && _ladder.isNotEmpty
+        ? [for (final c in _ladder) c.id]
+        : [for (final m in offer) m.id];
     final infos = {for (final m in offer) m.id: m};
     _missionsShown = true;
     view.showMissions(
@@ -2421,7 +3024,10 @@ final class HubSession {
     final me = _progress?.level ?? _skills?.level ?? _myLevel;
     final lobby = _lobby;
     if (lobby == null) return [me];
-    final going = [for (final m in lobby.members) if (m.online && !m.away) m.entityId == _me ? me : m.level];
+    final going = [
+      for (final m in lobby.members)
+        if (m.online && !m.away) m.entityId == _me ? me : m.level,
+    ];
     return going.isEmpty ? [me] : going;
   }
 
@@ -2439,8 +3045,12 @@ final class HubSession {
     'timeLimit': c.timeLimitSecs,
     'soon': c.soon,
     if (c.reason.isNotEmpty) 'reason': c.reason,
-    'bosses': [for (final b in c.bosses) {'id': '', 'name': b}],
-    'tags': [for (final t in c.tags) {'label': t}],
+    'bosses': [
+      for (final b in c.bosses) {'id': '', 'name': b},
+    ],
+    'tags': [
+      for (final t in c.tags) {'label': t},
+    ],
     if (c.rewards.isNotEmpty) 'rewards': c.rewards,
   };
 
@@ -2465,7 +3075,10 @@ final class HubSession {
           'leader': _leading,
           'state': ?_lobbyMods?.toJson(),
           // Who a start now leaves behind (offline or on a mission).
-          'behind': [for (final m in lobby.members) if (!m.online || m.away) m.name],
+          'behind': [
+            for (final m in lobby.members)
+              if (!m.online || m.away) m.name,
+          ],
         },
       }),
     );
@@ -2630,13 +3243,15 @@ final class HubSession {
             {
               'id': '${m.entityId}',
               'text': m.name,
-              'detail': [
-                '${_title(m.archetype, m.level)} · Lv ${m.level}',
-                if (m.entityId == _me) '(you)',
-              ].join(' '),
+              'detail': ['${_title(m.archetype, m.level)} · Lv ${m.level}', if (m.entityId == _me) '(you)'].join(' '),
               'tag': [
                 if (m.leader) 'leader',
-                if (!m.online) 'offline${_ago(m.offlineSecs)}' else if (m.away) 'on a mission' else if (!m.leader) 'in town',
+                if (!m.online)
+                  'offline${_ago(m.offlineSecs)}'
+                else if (m.away)
+                  'on a mission'
+                else if (!m.leader)
+                  'in town',
               ].join(' · '),
               'tagKind': !m.online ? null : (m.leader ? 'lead' : (m.away ? 'wait' : 'ok')),
               if (leader && m.entityId != _me) 'action': {'id': 'kick', 'label': 'Kick'},
@@ -2741,9 +3356,12 @@ final class HubSession {
       case ('lobby', 'start'):
         // A soft warning, never a lock (server `LevelBand::fit`).
         final id = _lobby?.mission.id;
-        final band = _ladder.where((c) => c.id == id).firstOrNull?.band ?? (_brief?.mission == id ? _brief?.band : null);
+        final band =
+            _ladder.where((c) => c.id == id).firstOrNull?.band ?? (_brief?.mission == id ? _brief?.band : null);
         if (band != null && _goingLevels.every((l) => l < band.min)) {
-          view.toast('Heads up: everyone going is under Lv ${band.min}, the floor of this mission. It will be a hard run.');
+          view.toast(
+            'Heads up: everyone going is under Lv ${band.min}, the floor of this mission. It will be a hard run.',
+          );
         }
         _send(ClientMsg.lobbyStart());
       case ('lobby', 'leave'):
@@ -2801,6 +3419,24 @@ final class HubSession {
           _openFeedback(dialog.startsWith('npc:') ? dialog.substring(4) : dialog, option.substring(9));
           return;
         }
+        if (option.startsWith('parties:')) {
+          // The Kafra's party list (`parties.dart`).
+          final parts = option.split(':');
+          switch (parts[1]) {
+            case 'list':
+              _partiesAsked = true;
+              _send(ClientMsg.partyList());
+            case 'join':
+              final id = int.tryParse(parts.last);
+              view.closeDialog();
+              if (id != null) _askParty(ClientMsg.partyJoin(id));
+            case 'public':
+              _partiesAsked = true;
+              _send(ClientMsg.partyPublic(public: parts.last == '1'));
+              _send(ClientMsg.partyList());
+          }
+          return;
+        }
         if (option.startsWith('resume:')) {
           _resumeOffer = null;
           view.closeDialog();
@@ -2838,6 +3474,9 @@ final class HubSession {
         break;
       case 'guide_auto':
         _applySetting('guideAuto', e['on'] == true);
+      case 'guide_term':
+        // "Open in guide" of a glossary tip: the rules page at that term.
+        _showGuide(term: e['term'] as String?);
       case 'mission_select':
         final tier = (e['tier'] as num?)?.toInt() ?? 0, mask = (e['mask'] as num?)?.toInt() ?? 0;
         _pendingMods = tier == 0 && mask == 0 ? null : (tier, mask);
@@ -2889,6 +3528,34 @@ final class HubSession {
         if (smith == null || i < 0 || _refining != null) return;
         _refining = row;
         _send(ClientMsg.refine(smith.id, row.substring(i + 1), int.tryParse(row.substring(0, i))));
+      case 'craft':
+        final hatter = _hatter;
+        if (hatter == null || _crafting) return;
+        _crafting = true;
+        _send(ClientMsg.craft(hatter, '${e['recipe'] ?? ''}'));
+      case 'hom_stance':
+        _send(ClientMsg.companionStance((e['stance'] as num?)?.toInt() ?? CompanionStance.defensive));
+      case 'hom_rest':
+        _send(ClientMsg.companionRest());
+      case 'hom_rename':
+        final name = '${e['name'] ?? ''}'.trim();
+        if (name.isNotEmpty) _send(ClientMsg.companionRename(name));
+      case 'hom_evolve':
+        _send(ClientMsg.companionEvolve());
+      case 'hom_choose':
+        _homChooser = false;
+        _homChanging = false;
+        final t = (e['homType'] as num?)?.toInt() ?? HomType.none;
+        if (t != HomType.none) _send(ClientMsg.companionChoose(t));
+      case 'hom_choose_close':
+        _homChooser = false;
+        _homChanging = false;
+      case 'hom_change':
+        _openHomChange();
+      case 'craft_close':
+        _hatter = null;
+        _crafting = false;
+        _npcDialog = false;
       case 'refine_close':
         _refiner = null;
         _refining = null;
@@ -2911,6 +3578,10 @@ final class HubSession {
         _styling = false;
       case 'skill_learn':
         _send(ClientMsg.skillLearn(e['skill']! as String));
+      case 'skill_open':
+        _openSkill('${e['skill'] ?? ''}');
+      case 'skill_town':
+        _useTownSkill('${e['skill'] ?? ''}');
       case 'skill_auto':
         _toggleAutoCast((e['slot']! as num).toInt());
       case 'open_settings':
@@ -2925,6 +3596,8 @@ final class HubSession {
         _submitFeedback(e);
       case 'feedback_close':
         _feedback = null;
+      case 'return_town':
+        if (_inStage) _send(ClientMsg.stageLeave());
       case 'player_action':
         final target = (e['target'] as num?)?.toInt();
         switch (e['action']) {
@@ -2970,8 +3643,6 @@ final class HubSession {
         _send(ClientMsg.shopDeal(e['npc']! as String, lines(e['buy']), lines(e['sell'])));
       case 'shop_close':
         _shopNpc = null;
-      case 'quick_potion':
-        _quickPotion(e['kind'] == 'sp' ? 'sp' : 'hp', e['item'] as String?);
       case 'trade_respond':
         _send(ClientMsg.tradeRespond(accept: e['accept'] == true));
       case 'trade_cancel':
@@ -3082,29 +3753,12 @@ final class HubSession {
   double _downedToastAt = -10;
 
   /// Drinks the best potion for [kind] (`hp` / `sp`) on a mission: the
-  /// one the engine picked for the orb, or (keys, gamepad) its pick now.
-  void _quickPotion(String kind, [String? item]) {
+  /// server picks it from what the fighter carries (it knows the running
+  /// potion and the bonuses); it says so when there is none or the bar is
+  /// full.
+  void _quickPotion(String kind) {
     if (!_inStage || _downedToast()) return;
-    final id = (item == null || item.isEmpty) ? view.quickPotion(kind) : item;
-    if (id.isEmpty) {
-      view.toast(kind == 'hp' ? 'No healing potions left.' : 'No SP potions left.');
-      return;
-    }
-    _send(ClientMsg.itemUse(id));
-  }
-
-  /// A character's held weapon: its family goes to the engine (sprite
-  /// layer, swing sounds).
-  void _setWeapon(int id, String weapon) {
-    _peers[id]?.weapon = weapon;
-    final family = weaponFamilyOf(weapon);
-    if (family == null) {
-      _weapons.remove(id);
-      return;
-    }
-    if (_weapons[id] == family) return;
-    _weapons[id] = family;
-    view.setWeapon(id.toDouble(), family);
+    _send(ClientMsg.itemUse(kind == 'sp' ? ClientMsg.quickSp : ClientMsg.quickHp));
   }
 
   // ---------------------------------------------------------------- skills
@@ -3120,8 +3774,19 @@ final class HubSession {
         'level': s.level,
         'cls': _myArchetype,
         'keys': _binds.slotCaptions,
+        // Skills that open a window (in town) rather than being cast.
+        'opens': {pharmacySkill: 'Brew'},
       }),
     );
+  }
+
+  /// The Alchemist's Pharmacy: a recipe book the server opens in town
+  /// (`npc_interact("pharmacy")`, server `hub/quest.rs PHARMACY`).
+  static const pharmacySkill = 'pharmacy';
+
+  /// A skill tree node's open button (`skill_open`): the town skill.
+  void _openSkill(String skill) {
+    if (skill == pharmacySkill) _useTownSkill(skill);
   }
 
   /// The mission is over: the result screen follows (`RUN_STATS`,
@@ -3131,6 +3796,28 @@ final class HubSession {
     view.setBossBar('');
     view.setMissionClock(_stageMission, e.secs * 1000, false);
     _stageEnd = e;
+    _showReturnCall(e);
+  }
+
+  /// Won or lost: the call to go home, counting down [StageEnd.leaveMs]
+  /// (the server sends everyone back then). Should the move not come, the
+  /// client asks for it a little later itself.
+  void _showReturnCall(StageEnd e) {
+    if (!_inStage) return;
+    _returnCall = true;
+    view.showReturnCall(jsonEncode({'victory': e.victory, 'leaveMs': e.leaveMs}));
+    _returnTimer?.cancel();
+    _returnTimer = Timer(Duration(milliseconds: e.leaveMs + returnGraceMs), () {
+      if (_inStage && _returnCall) _send(ClientMsg.stageLeave());
+    });
+  }
+
+  void _hideReturnCall() {
+    _returnTimer?.cancel();
+    _returnTimer = null;
+    if (!_returnCall) return;
+    _returnCall = false;
+    view.showReturnCall('');
   }
 
   /// The result screen: the party's numbers with the player's own take.
@@ -3195,7 +3882,11 @@ final class HubSession {
     }
     final p = _predictor;
     final t = _tracks[id];
-    final (x, y) = id == _me && p != null ? (p.x, p.y) : t != null ? (t.x1, t.y1) : (c.x, c.y);
+    final (x, y) = id == _me && p != null
+        ? (p.x, p.y)
+        : t != null
+        ? (t.x1, t.y1)
+        : (c.x, c.y);
     final dx = c.x - x, dy = c.y - y;
     if (dx * dx + dy * dy > 0.04) _attackFacing[id] = facingOf(dx, dy);
     final until = now + math.max(c.castMs, 400) / 1000;
@@ -3208,13 +3899,9 @@ final class HubSession {
   /// stage, standing up, with no window open.
   int _heldSlots() {
     if (!_inStage || _myState != 0 || view.dialogOpen()) return 0;
+    var bits = _keySlots();
     bool down(String code) => _keys.contains(code) || _tapped.contains(code);
     final pressed = {..._keys, ..._tapped};
-    var bits = 0;
-    for (var i = 0; i < Bindings.count; i++) {
-      final k = _binds.slots[i];
-      if (k != null && (down(k.code)) && k.heldIn(pressed)) bits |= 1 << i;
-    }
     // The travel key: the server casts the learned travel skill on bit 15.
     final t = _binds.travel;
     if (t != null && down(t.code) && t.heldIn(pressed)) bits |= 1 << travelSlot;
@@ -3222,6 +3909,58 @@ final class HubSession {
     // ignores what it cannot honour: cooldown, SP, no target). The mount
     // slot is no cast ([_mountPress]).
     return (bits | _input.state.slots | autoCastSlots(_autoCast, _skills?.hotbar ?? const [])) & ~_mountMask();
+  }
+
+  /// Hotbar slots whose keys are held (bit i = slot i), in town too.
+  int _keySlots() {
+    bool down(String code) => _keys.contains(code) || _tapped.contains(code);
+    final pressed = {..._keys, ..._tapped};
+    var bits = 0;
+    for (var i = 0; i < Bindings.count; i++) {
+      final k = _binds.slots[i];
+      if (k != null && (down(k.code)) && k.heldIn(pressed)) bits |= 1 << i;
+    }
+    return bits;
+  }
+
+  /// Town slot keys held last tick (bit i = slot i).
+  int _townHeld = 0;
+
+  /// In town the bar is the town skill bar (engine `townSkillAt`): a key
+  /// pressed (its rising edge) uses the skill on that slot.
+  void _townPress() {
+    if (_myState != 0 || view.dialogOpen()) {
+      _townHeld = 0;
+      return;
+    }
+    final held = _keySlots() | _input.state.slots;
+    final rising = held & ~_townHeld;
+    _townHeld = held;
+    if (rising == 0) return;
+    for (var i = 0; i < Bindings.count; i++) {
+      if (rising & (1 << i) == 0) continue;
+      final skill = view.townSkillAt(i);
+      if (skill.isNotEmpty) _useTownSkill(skill);
+    }
+  }
+
+  /// A town skill (the town bar, its key, the tree's Brew button): the
+  /// server does it (`TOWN_SKILL`: mount, Pharmacy, homunculus). Calling a
+  /// homunculus without a type opens the chooser at once.
+  void _useTownSkill(String skill) {
+    if (_inStage) {
+      if (skill == pharmacySkill) view.toast('The Pharmacy brews in town.');
+      return;
+    }
+    if (skill == callHomunculusSkill) {
+      _callHomAt = _now();
+      if (_homState?.homType == HomType.none && !_homChooser) {
+        _homChooser = true;
+        _loadCompanionsPack();
+        view.showHomunculusChooser(true);
+      }
+    }
+    _send(ClientMsg.townSkill(skill));
   }
 
   /// Hotbar slots holding the mount skill (bit i = slot i).
@@ -3236,7 +3975,7 @@ final class HubSession {
 
   /// A press of the mount slot (its key, or a gamepad / touch press) gets
   /// on or off the Peco Peco, in town and on missions (`mount_req`; the
-  /// server answers with `player_mount`).
+  /// server answers with `player_appearance`).
   void _mountPress() {
     final mask = _mountMask();
     if (mask == 0 || _myState != 0 || view.dialogOpen()) {
@@ -3252,24 +3991,6 @@ final class HubSession {
     final held = _input.state.slots & mask != 0;
     if (tapped || (held && !_mountHeld)) _send(ClientMsg.mount(on: !_riding));
     _mountHeld = held;
-  }
-
-  /// Someone got on or off a Peco Peco: the body follows (`_spriteFor`
-  /// reads it every frame); a puff and a whoosh unless it is the arrival
-  /// roll call.
-  void _onMount(PlayerMount m) {
-    final id = m.entityId;
-    final was = id == _me ? _riding : (_peers[id]?.riding ?? false);
-    if (id == _me) {
-      _riding = m.riding;
-      _rideSpeed = m.speed;
-      _applyPace();
-    } else {
-      _peers[id]?.riding = m.riding;
-    }
-    if (was == m.riding || !_tracks.containsKey(id) || _now() - _mapSince < 1) return;
-    view.unitSound(id.toDouble(), 'mount');
-    if (id == _me) view.toast(m.riding ? 'You ride your Peco Peco: +${m.speed}% movement.' : 'You get off your Peco Peco.');
   }
 
   /// What the local prediction walks at: the conditions' pace, riding faster.
@@ -3323,7 +4044,10 @@ final class HubSession {
         .me()
         .then((me) {
           final user = (me['user'] as Map?)?.cast<String, Object?>() ?? const {};
-          final f = _account = AccountForm('${user['username'] ?? ''}', (user['contacts'] as Map?)?.cast<String, Object?>() ?? const {});
+          final f = _account = AccountForm(
+            '${user['username'] ?? ''}',
+            (user['contacts'] as Map?)?.cast<String, Object?>() ?? const {},
+          );
           view.showAccount(f.spec());
         })
         .catchError((Object err) => view.toast('Could not load the account: $err'));
@@ -3409,6 +4133,8 @@ final class HubSession {
         view.setTouchControls((value! as num).toInt());
       case 'manualAim':
         _manualAim = value == true;
+      case 'autoPotion' || 'autoPotionHp' || 'autoPotionSp':
+        _syncUsePrefs();
       case 'clickMove':
         _clickMove = value == true;
         if (!_clickMove) _cancelWalk();
@@ -3502,10 +4228,11 @@ final class HubSession {
 
   /// The Adventurer's Guide; [welcome]: opened on its own for a new
   /// character (a greeting and the "open for new characters" box).
-  void _showGuide({bool welcome = false}) {
+  void _showGuide({bool welcome = false, String? term}) {
     view.showGuide(
       jsonEncode({
         'topics': guideTopics(_binds, _ladder, assetsBase),
+        if (term != null) ...{'selected': 'rules', 'term': term},
         if (welcome) 'welcome': true,
         if (welcome) 'auto': _settings['guideAuto'] != false,
       }),
@@ -3538,7 +4265,7 @@ final class HubSession {
             'items': [
               '${b.slotCaptions.where((c) => c.isNotEmpty).join(' ')}: hotbar slots (aim with the pointer)',
               'K: skill tree · right click a slot: auto-cast',
-              '${k(b.potion, 'R')} / ${k(b.potion2, 'T')}: drink a healing / SP potion (or click the HP / SP orb)',
+              '${k(b.potion, 'R')} / ${k(b.potion2, 'T')}: drink a healing / SP potion (Auto-use potions in the settings drinks them for you)',
             ],
           },
           {
@@ -3770,7 +4497,8 @@ final class HubSession {
               {'value': 1, 'label': 'Classic'},
               {'value': 2, 'label': 'Gilded'},
             ],
-            'hint': "The game's own pointer: a sword over monsters, a speech bubble over NPCs, a grab over loot. System keeps your usual one.",
+            'hint':
+                "The game's own pointer: a sword over monsters, a speech bubble over NPCs, a grab over loot. System keeps your usual one.",
           },
           {
             'id': 'cursorSize',
@@ -3840,6 +4568,7 @@ final class HubSession {
                 'Skills aimed at a monster take the one nearest the mouse pointer, ground skills land on it. '
                 'Off: they pick their own target. Auto-cast slots, gamepad and touch always aim by themselves.',
           },
+          ...autoUseFields(_settings),
           {
             'id': 'clickMove',
             'label': 'Click to move',
@@ -3886,8 +4615,8 @@ final class HubSession {
       key('bind.interact2', 'Talk to an NPC (second key)', 'Another key that talks to the nearest NPC.'),
       key('bind.travel', 'Travel skill', 'On missions: your class travel skill (Back Slide, Blink, Charge…).'),
       key('bind.items', 'Inventory window', 'Opens and closes the inventory.'),
-      key('bind.potion', 'Healing potion', 'On missions: drinks a healing potion.'),
-      key('bind.potion2', 'SP potion', 'On missions: drinks an SP potion.'),
+      key('bind.potion', 'Healing potion', 'On missions: drinks the best healing potion or food for the HP missing.'),
+      key('bind.potion2', 'SP potion', 'On missions: drinks the best SP potion for the SP missing.'),
       key('bind.sit', 'Sit / stand', 'In town: sits down or stands up.'),
       key('bind.equip', 'Equipment window', 'Opens and closes your equipment.'),
       key('bind.party', 'Party window', 'Opens and closes the party window.'),
@@ -3958,10 +4687,18 @@ final class HubSession {
     }
     // Downed or fallen: the server ignores movement; do not predict any.
     var (dx, dy) = _myState == 0 ? _inputDir() : (0.0, 0.0);
+    // Belts carry only a standing player (as the server's drift).
+    p.drifts = _myState == 0;
     // Skills are for missions: in town the bar is only set up, never cast
     // (but for the mount, anywhere).
-    _mountPress();
+    // In town the slot keys drive the town skill bar instead.
+    if (_inStage) {
+      _mountPress();
+    } else {
+      _townPress();
+    }
     final slots = _inStage ? _heldSlots() : 0;
+    if (_inStage) _callHomPress(slots);
     _tapped.clear();
     // Click to move: steering of our own (keys, stick, joystick) or going
     // down stops it at once. A skill press stands for the cast (casting is
@@ -4001,6 +4738,7 @@ final class HubSession {
     if (_stopped) return;
     _stopped = true;
     _pingTimer?.cancel();
+    _returnTimer?.cancel();
     _pulse.stop();
     for (final (target, type, fn) in _listeners) {
       target.removeEventListener(type, fn);
@@ -4088,15 +4826,25 @@ final class HubSession {
           }
         }
       }
-      final action = _charAction(t.id, t.moving, now);
-      final facing = _poseFacing(t.id, t.moving, t.facing, now);
       final peer = _peers[t.id];
+      // A homunculus: a creature of the companions pack (never a body).
+      final comp = peer == null ? _companions[t.id] : null;
+      final action = comp != null ? _companionAction(t.id, t.moving, now) : _charAction(t.id, t.moving, now);
+      final facing = comp != null
+          ? (now < (_attackUntil[t.id] ?? 0) ? _attackFacing[t.id] ?? t.facing : t.facing)
+          : _poseFacing(t.id, t.moving, t.facing, now);
       final pet = peer?.petSprite;
-      final sprite = pet != null
+      final sprite = comp != null
+          ? _companionSprite(comp)
+          : pet != null
           ? (_spriteCache['$_mapId:pet:$pet'] ??= view.spriteIndex(pet))
           : _spriteFor(t.id, peer?.archetype ?? 'novice', peer?.look, tier: _tierOf(t.id));
       final still = t.x0 == t.x1 && t.y0 == t.y1;
-      final flags = Row.flagHigh | (fog ? Row.flagFade : 0) | statusRowFlags(_vitals[t.id]?.status ?? 0);
+      final flags =
+          Row.flagHigh |
+          (fog ? Row.flagFade : 0) |
+          statusRowFlags(_vitals[t.id]?.status ?? 0) |
+          (comp != null ? _allyFlags(comp) : 0);
       if (t.sentFacing == facing && t.sentAction == action && t.sentSprite == sprite && _sentFlags[t.id] == flags) {
         if (still ? (t.sentX == t.x1 && t.sentY == t.y1) : (t.sentTick0 == t.tick0 && t.sentTick1 == t.tick1)) {
           continue;
@@ -4126,6 +4874,7 @@ final class HubSession {
         ..sentY = still ? t.y1 : double.nan;
     }
     stale.forEach(_hidePeer);
+    _rootedRows(now);
 
     // Monsters: one row per record change. The row is the record's
     // dead-reckoning line from `stamp − back` to `stamp + horizon`; the
@@ -4231,13 +4980,14 @@ final class HubSession {
 
   final _spriteCache = <String, int>{};
 
-  /// Class tier of a character's body: the local player's from its level,
-  /// other players' from [_Peer.tier] (1 until the wire carries it).
-  int _tierOf(int id) =>
-      id == _me ? tierOfLevel(_progress?.level ?? _skills?.level ?? _myLevel) : (_peers[id]?.tier ?? 1);
+  /// Class tier of a character's body: from its appearance (the own
+  /// character's level until the first one).
+  int _tierOf(int id) => id == _me
+      ? (_mine?.tier ?? tierOfLevel(_progress?.level ?? _skills?.level ?? _myLevel))
+      : (_peers[id]?.tier ?? 1);
 
   /// Sprite for a character: the dyeable body of its class at [tier] and
-  /// its gender (hair and dyes come from `setLook`; the clothes dye rows
+  /// its gender (hair and dyes come from `setAppearance`; the clothes dye rows
   /// follow the body); without the customization pack,
   /// `<archetype>_m|_f` when the atlas has it, else the novice placeholder.
   int _spriteFor(int id, String archetype, Look? look, {int tier = 1}) {
@@ -4263,10 +5013,14 @@ final class HubSession {
   }
 
   /// Sprite of a monster kind in the current location atlas (-1 when the
-  /// atlas lacks it; the engine skips such rows).
+  /// atlas lacks it; the engine skips such rows). A miss asks for the
+  /// companions pack: it carries the field plants Plant Cultivation grows
+  /// on stages whose atlas has none.
   int _mobSprite(int kind) {
     final name = kind < _monsterKinds.length ? _monsterKinds[kind] : '';
-    return _spriteCache['$_mapId:mob:$name'] ??= view.spriteIndex(name);
+    final i = _spriteCache['$_mapId:mob:$name'] ??= view.spriteIndex(name);
+    if (i < 0 && name.isNotEmpty) _loadCompanionsPack();
+    return i;
   }
 
   void _updateStats(double now, LocalPredictor p) {

@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:js_interop';
 
 import 'package:game_client/src/api.dart';
@@ -6,6 +7,7 @@ import 'package:game_client/src/hub_session.dart';
 import 'package:game_client/src/login.dart';
 import 'package:game_client/src/page_guard.dart';
 import 'package:game_client/src/protocol.dart' show Look;
+import 'package:game_client/src/update.dart';
 import 'package:web/web.dart' as web;
 
 // The baked pack. The image build sets `/assets/v/<build>` (cached as
@@ -22,6 +24,27 @@ Future<void> main() async {
   // The engine is up before sign-in: it draws the character screens.
   final view = gameEngine.createGameView();
   await view.init(web.document.getElementById('c')! as web.HTMLCanvasElement).toDart;
+  // Another build on the server: reload, or offer it (`update.dart`).
+  pageUpdates = UpdateWatch(
+    show: (spec) => view.setUpdate(spec == null ? '' : jsonEncode(spec)),
+    reload: () => view.reloadForUpdate(),
+    read: (key) {
+      try {
+        return web.window.sessionStorage.getItem(key);
+      } on Object {
+        return null;
+      }
+    },
+    write: (key, value) {
+      try {
+        web.window.sessionStorage.setItem(key, value);
+        return true;
+      } on Object {
+        // No storage: the modal, never a reload loop.
+        return false;
+      }
+    },
+  );
   try {
     final raw = web.window.localStorage.getItem('game.settings');
     if (raw != null) view.configure(raw);

@@ -10,7 +10,7 @@ use crate::world::horde::catalog::{test_def, MonsterCatalog};
 use crate::world::horde::{Horde, HordeConfig};
 use crate::world::map::{CameraConstraint, LocationKind};
 use crate::world::missions::{self, MissionInfo};
-use crate::world::protocol::Look;
+use crate::world::protocol::{zone_flags, Look};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -21,7 +21,7 @@ static MISSION: MissionInfo = MissionInfo {
     name: "Sewer",
     map: "field",
     fog: None,
-    env: Environment { light_scale: 1.0, hazards: &[BANK], events: &[], objects: &[] },
+    env: Environment { light_scale: 1.0, hazards: &[BANK], events: &[], objects: &[], strikes: &[] },
     ..MissionInfo::TEMPLATE
 };
 
@@ -52,6 +52,7 @@ fn stage() -> HubInstance {
         weapon: String::new(),
         loadout: Default::default(),
         bag: Default::default(),
+        homunculus: None,
     };
     stage.join(profile, Uuid::nil(), None, 0, &mut out);
     let p = &mut stage.players[0];

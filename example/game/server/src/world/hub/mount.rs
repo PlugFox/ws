@@ -1,13 +1,13 @@
 //! Riding (COMBAT.md §3.2, Cavalry): a Crusader or Paladin with Peco Peco
 //! Ride mounts and dismounts anywhere (`MOUNT_REQ`, through the session's
-//! loadout, so it is kept between sessions). The instance only tells the
-//! map (`PLAYER_MOUNT`, drawn with the mounted body) and walks a rider in
-//! town at the mount's pace; on a stage the fighter's riding passives
-//! (pace, attack interval, spear bonuses) come with `cast::equip`.
+//! loadout, so it is kept between sessions). The mount is part of the
+//! player's appearance (`appearance.rs`, drawn with the mounted body), and
+//! a rider walks in town at the mount's pace; on a stage the fighter's
+//! riding passives (pace, attack interval, spear bonuses) come with
+//! `cast::equip`.
 
-use super::{HubEvent, HubInstance, HubPlayer, Outgoing};
+use super::HubPlayer;
 use crate::world::combat::{Class, Loadout, SkillBook, Weapon};
-use crate::world::protocol::{mount, ServerMsg};
 
 impl HubPlayer {
     /// What riding adds to the walking pace (a fraction; 0 on foot): the
@@ -21,54 +21,6 @@ impl HubPlayer {
         let kind = Weapon::held(class, self.weapon_id()).kind;
         let on_foot = Loadout { mounted: false, ..loadout.clone() };
         (book.passives(class, loadout, kind).speed - book.passives(class, &on_foot, kind).speed).max(0.0)
-    }
-
-    /// `player_mount` of this player (`ride` as [`Self::ride_bonus`] gave it).
-    fn mount_msg(&self, book: &SkillBook) -> ServerMsg {
-        let riding = book.rides(&self.profile.loadout);
-        ServerMsg::PlayerMount {
-            entity_id: self.profile.character_id,
-            mount: if riding { mount::PECO } else { mount::NONE },
-            speed: (self.ride * 100.0).round().clamp(0.0, 255.0) as u8,
-        }
-    }
-}
-
-impl HubInstance {
-    /// After `map_enter`: everyone riding on the player's map, the player
-    /// included.
-    pub(super) fn announce_mounts(&self, idx: usize, out: &mut Outgoing) {
-        let p = &self.players[idx];
-        for o in self.players.iter().filter(|o| o.map == p.map && self.skills.rides(&o.profile.loadout)) {
-            out.push((p.profile.user_id, HubEvent::Control(o.mount_msg(&self.skills))));
-        }
-    }
-
-    /// After `player_appeared`: the newcomer's mount to the others there.
-    pub(super) fn announce_rider(&self, idx: usize, out: &mut Outgoing) {
-        let p = &self.players[idx];
-        if !self.skills.rides(&p.profile.loadout) {
-            return;
-        }
-        let msg = p.mount_msg(&self.skills);
-        for o in self.players.iter().filter(|o| o.map == p.map && o.profile.user_id != p.profile.user_id) {
-            out.push((o.profile.user_id, HubEvent::Control(msg.clone())));
-        }
-    }
-
-    /// After a loadout change: a rider who got on or off (`rode`: before)
-    /// walks at the new pace, and the whole map sees it.
-    pub(super) fn remount(&mut self, idx: usize, rode: bool, out: &mut Outgoing) {
-        let ride = self.players[idx].ride_bonus(&self.skills);
-        self.players[idx].ride = ride;
-        let p = &self.players[idx];
-        if self.skills.rides(&p.profile.loadout) == rode {
-            return;
-        }
-        let msg = p.mount_msg(&self.skills);
-        for o in self.players.iter().filter(|o| o.map == p.map) {
-            out.push((o.profile.user_id, HubEvent::Control(msg.clone())));
-        }
     }
 }
 

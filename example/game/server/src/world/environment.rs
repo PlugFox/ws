@@ -18,9 +18,12 @@
 //!   (`MISSION_INFO`), is announced (`ENVIRONMENT`) and switches its
 //!   hazards and light on for its duration.
 //! * [`ObjectDef`]: interactive things on the field (braziers to light,
-//!   eggs to break). They are plants (`archetype = "plant"` monsters:
-//!   rooted, harmless, felled in a fixed number of hits, COMBAT.md §4.10)
-//!   planted at fixed spots, and felling one fires its [`ObjectEffect`].
+//!   eggs to break, graves that keep opening). They are plants
+//!   (`archetype = "plant"` monsters: rooted, harmless, felled in a fixed
+//!   number of hits, COMBAT.md §4.10) planted at fixed spots, and felling
+//!   one fires its [`ObjectEffect`].
+//! * [`Strikes`]: while a [`MapEvent`] runs, telegraphed circles fall on or
+//!   near every player on a beat (arrow volleys, crates, bombs, beams).
 //!
 //! Everything here is plain data with `'static` defaults, so a mission
 //! table stays a `const`, and hazards also deserialize from the bake.
@@ -86,6 +89,11 @@ pub struct Hazard {
     /// Cells per second toward the centre (negative pushes out). Walls stop
     /// it.
     pub pull: f32,
+    /// Cells per second in a fixed direction `[dx, dy]` (a conveyor belt):
+    /// it carries whoever stands on it, players and monsters alike, while
+    /// it bites; walls stop it. The stage may scale it at run time (a belt
+    /// reversed or stopped: `hub/env.rs` `env_set_drift`).
+    pub drift: [f32; 2],
     /// Saving throw DC (0 = no save): a save against the condition (Body
     /// without one) halves the damage and shakes off the condition for that
     /// pulse.
@@ -126,6 +134,10 @@ pub struct RawHazard {
     /// it; it never moves a player off walkable ground.
     #[serde(default)]
     pub pull: f32,
+    /// Cells per second along `[dx, dy]` (a conveyor belt; players and
+    /// monsters). Walls stop it.
+    #[serde(default)]
+    pub drift: [f32; 2],
     /// Saving throw DC (0 = no save): a Body save halves the damage and
     /// shakes off the condition for that pulse.
     #[serde(default)]
@@ -160,6 +172,7 @@ impl RawHazard {
             condition: self.condition.map(leak),
             condition_secs: self.condition_secs,
             pull: self.pull,
+            drift: self.drift,
             dc: self.dc,
             during: self.during.map(leak),
         }
@@ -183,9 +196,21 @@ impl Hazard {
             condition: None,
             condition_secs: 1.0,
             pull: 0.0,
+            drift: [0.0, 0.0],
             dc: 0,
             during: None,
         }
+    }
+
+    /// A plain always-on box (`w` × `h` cells centred on `(x, y)`) with no
+    /// effect yet, as [`Hazard::circle`].
+    pub const fn rect(id: &'static str, x: f32, y: f32, w: f32, h: f32) -> Hazard {
+        Hazard { shape: HazardShape::Rect { x, y, w, h }, ..Hazard::circle(id, x, y, 1.0) }
+    }
+
+    /// Whether it carries bodies along (a belt).
+    pub fn drifts(&self) -> bool {
+        self.drift[0] != 0.0 || self.drift[1] != 0.0
     }
 
     /// The condition it leaves, if it names a known one.
@@ -215,6 +240,9 @@ impl Hazard {
         }
         if DamageType::from_id(self.damage_type).is_none() {
             return Some(format!("{}: unknown damage_type {}", self.id, self.damage_type));
+        }
+        if !(self.drift[0].is_finite() && self.drift[1].is_finite()) {
+            return Some(format!("{}: drift must be finite", self.id));
         }
         let bad = match self.shape {
             HazardShape::Circle { r, .. } => !(r.is_finite() && r > 0.0),
@@ -349,11 +377,143 @@ pub enum ObjectEffect {
 
 /// A timed hatch: an object left standing this long breaks open into
 /// `count` monsters of `monster` (a roster kind) around its spot.
+///
+/// With `every_secs > 0` it is a spawner instead (a grave): it stays,
+/// lets out its brood at `secs` and again every `every_secs` until it is
+/// felled, each time after a warning ring of [`HATCH_WARN_SECS`] on
+/// clients. Nothing hatches once the fog is up.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hatch {
     pub secs: f32,
     pub monster: &'static str,
     pub count: u8,
+    /// 0 = once (the object breaks open and is gone).
+    pub every_secs: f32,
+}
+
+/// A spawner's warning ring shows this long before each brood.
+pub const HATCH_WARN_SECS: f32 = 3.0;
+
+impl Hatch {
+    /// A one-shot hatch (an egg).
+    pub const fn once(secs: f32, monster: &'static str, count: u8) -> Hatch {
+        Hatch { secs, monster, count, every_secs: 0.0 }
+    }
+
+    /// A spawner: first brood at `secs`, then every `every_secs`.
+    pub const fn every(secs: f32, every_secs: f32, monster: &'static str, count: u8) -> Hatch {
+        Hatch { secs, monster, count, every_secs }
+    }
+}
+
+/// Telegraphed circles that fall on the players while a [`MapEvent`]
+/// runs (`hub/env.rs`): a volley at the event's start and every
+/// `every_secs` after while it runs; each volley drops one circle of
+/// radius `r` on or near each standing player (within `scatter`) and
+/// `extra` more within `extra_spread` of them, landing `fall_secs` after
+/// they show. A circle never lands on unwalkable ground nor within
+/// `mask_r` of a `mask` point (the dice try a few spots, then skip it).
+/// Clients get the circles as `BOSS_ZONES` with caster 0 and ability
+/// [`Strikes::id`] (an effects.toml `[skills.<id>]` key for the look of
+/// the landing).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Strikes {
+    /// Unique on the map; the zones' ability id and the hook's key.
+    pub id: &'static str,
+    /// The [`MapEvent`] it falls during.
+    pub during: &'static str,
+    pub every_secs: f32,
+    pub r: f32,
+    pub fall_secs: f32,
+    /// How far from the player a circle's centre may land (0 = on them).
+    pub scatter: f32,
+    pub extra: u8,
+    pub extra_spread: f32,
+    /// Ground look (a `protocol::look` name).
+    pub look: &'static str,
+    /// Dice on each player it catches, `[n, sides]`, + a quarter of the
+    /// mission band's minimum level (as hazards).
+    pub damage: [u8; 2],
+    pub damage_type: &'static str,
+    /// A condition for `condition_secs` (a successful save resists it).
+    pub condition: Option<&'static str>,
+    pub condition_secs: f32,
+    /// Saving throw DC (0 = no save): a save halves the damage.
+    pub dc: i32,
+    /// A projectile: a ranged ward (Pneuma) turns it aside.
+    pub ranged: bool,
+    /// Cells it throws whoever it catches away from its centre (negative
+    /// pulls in); walls stop it.
+    pub push: f32,
+    /// Never lands within `mask_r` of these points (cells).
+    pub mask: &'static [(f32, f32)],
+    pub mask_r: f32,
+    /// Lasting ground it leaves where it lands: this hazard (its shape's
+    /// centre moved to the landing; any `during` is ignored) for
+    /// `patch_secs`.
+    pub patch: Option<Hazard>,
+    pub patch_secs: f32,
+    /// Calls the location's `strike_hook` (`hub/env.rs`) with this id at
+    /// every landing (a crate leaving a Myst Case, a beam healing angels).
+    pub hook: Option<&'static str>,
+}
+
+impl Strikes {
+    /// One circle of radius `r` per player every `every_secs` during
+    /// event `during`, falling for a second, no effect yet; set the
+    /// fields after (`Strikes { damage: [2, 6], ..Strikes::new("volley", "war_horn", 2.5, 1.8) }`).
+    pub const fn new(id: &'static str, during: &'static str, every_secs: f32, r: f32) -> Strikes {
+        Strikes {
+            id,
+            during,
+            every_secs,
+            r,
+            fall_secs: 1.0,
+            scatter: 0.0,
+            extra: 0,
+            extra_spread: 0.0,
+            look: "damage",
+            damage: [0, 0],
+            damage_type: "physical",
+            condition: None,
+            condition_secs: 1.0,
+            dc: 0,
+            ranged: false,
+            push: 0.0,
+            mask: &[],
+            mask_r: 0.0,
+            patch: None,
+            patch_secs: 0.0,
+            hook: None,
+        }
+    }
+
+    /// Its `protocol::look` id.
+    pub fn look_id(&self) -> u8 {
+        look_of(self.look)
+    }
+
+    /// What is wrong with it, if anything (the stage warns and skips it).
+    pub fn problem(&self, events: &[MapEvent]) -> Option<String> {
+        if !events.iter().any(|e| e.id == self.during) {
+            return Some(format!("{}: no map event {}", self.id, self.during));
+        }
+        if !(self.every_secs.is_finite() && self.every_secs > 0.0 && self.r.is_finite() && self.r > 0.0 && self.fall_secs >= 0.0) {
+            return Some(format!("{}: every_secs and r must be > 0", self.id));
+        }
+        if DamageType::from_id(self.damage_type).is_none() {
+            return Some(format!("{}: unknown damage_type {}", self.id, self.damage_type));
+        }
+        if self.condition.is_some_and(|c| Condition::from_id(c).is_none()) {
+            return Some(format!("{}: unknown condition {:?}", self.id, self.condition));
+        }
+        self.patch.and_then(|h| h.problem())
+    }
+
+    /// Whether a circle may land at `(x, y)` (outside the mask).
+    pub fn allowed(&self, x: f32, y: f32) -> bool {
+        !self.mask.iter().any(|&(mx, my)| (x - mx).powi(2) + (y - my).powi(2) <= self.mask_r * self.mask_r)
+    }
 }
 
 /// Interactive objects of one kind: a plant monster (`archetype =
@@ -370,7 +530,7 @@ pub struct ObjectDef {
 }
 
 /// A mission's environment. [`Environment::NONE`] is Poring Island's:
-/// plain light, no hazards, events or objects.
+/// plain light, no hazards, events, objects or strikes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Environment {
     /// Light radius multiplier of the whole run (a dark cave: 0.7).
@@ -378,10 +538,12 @@ pub struct Environment {
     pub hazards: &'static [Hazard],
     pub events: &'static [MapEvent],
     pub objects: &'static [ObjectDef],
+    /// Circles falling during its events.
+    pub strikes: &'static [Strikes],
 }
 
 impl Environment {
-    pub const NONE: Environment = Environment { light_scale: 1.0, hazards: &[], events: &[], objects: &[] };
+    pub const NONE: Environment = Environment { light_scale: 1.0, hazards: &[], events: &[], objects: &[], strikes: &[] };
 
     pub fn event(&self, id: &str) -> Option<&MapEvent> {
         self.events.iter().find(|e| e.id == id)
@@ -424,10 +586,13 @@ mod tests {
           {"id":"tar","shape":{"circle":{"x":10,"y":12,"r":3}},"look":"swamp","condition":"slowed","condition_secs":0.5,"pull":1.5},
           {"id":"vent","shape":{"rect":{"x":4,"y":4,"w":6,"h":2}},"damage":[1,6],"damage_type":"fire","every_secs":2,"dc":12,"during":"eruption"},
           {"id":"bad","shape":{"circle":{"x":1,"y":1,"r":0}}},
-          {"id":"worse","shape":{"circle":{"x":1,"y":1,"r":2}},"condition":"sneezing"}
+          {"id":"worse","shape":{"circle":{"x":1,"y":1,"r":2}},"condition":"sneezing"},
+          {"id":"belt_0","shape":{"rect":{"x":20,"y":30,"w":40,"h":2}},"look":"ripple","drift":[-2,0]}
         ]"#;
         let h = parse_hazards(json).unwrap();
-        assert_eq!(h.len(), 2);
+        assert_eq!(h.len(), 3);
+        assert_eq!((h[2].drift, h[2].drifts(), h[0].drifts()), ([-2.0, 0.0], true, false));
+        assert_eq!(Hazard::rect("b", 1.0, 2.0, 3.0, 4.0).shape, HazardShape::Rect { x: 1.0, y: 2.0, w: 3.0, h: 4.0 });
         assert_eq!((h[0].condition(), h[0].look_id(), h[0].pull, h[0].damage), (Some(Condition::Slowed), look::SWAMP, 1.5, [0, 0]));
         assert_eq!((h[1].damage_type(), h[1].dc, h[1].during), (DamageType::Fire, 12, Some("eruption")));
         assert!(h[1].shape.contains(6.9, 4.0, 0.0) && !h[1].shape.contains(7.5, 4.0, 0.0));

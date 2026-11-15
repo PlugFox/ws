@@ -1129,12 +1129,20 @@ From `docs/review/distribution.md` F6–F8, F14, F15, F19, F20.
   - 121 crate entries today. Platform-only crates (jni, schannel,
     security-framework) are included.
 - **Toolchains** (F15):
-  - `rust-toolchain.toml` in `native/rust` and `server` pins Rust 1.99.0,
-    the same version as `mise.toml`. `tool/rust_toolchain.sh` installs it
-    in CI and fails if the three disagree.
+  - `rust-toolchain.toml` in `native/rust` and `server` pins Rust 1.100.0,
+    the same version as `mise.toml` and the game image (`RUST_VERSION` in
+    `example/game/deploy/Dockerfile`). `tool/rust_toolchain.sh` installs it
+    in CI and fails if the three toolchain files disagree. Every crate sets
+    `rust-version = "1.100"`.
   - zig and cargo-zigbuild are pinned too.
-  - Dart for format, analyze and release is 3.13.7. The test jobs stay on
+  - Dart for format, analyze and release is 3.14.0 (Flutter 3.50.0 for the
+    release and the newest leg of the Flutter matrix). The test jobs stay on
     `stable` as an early warning.
+  - Node 26 (LTS), Python 3.14 and uv 0.13 are pinned in `mise.toml`; the
+    game image uses the same Node and Python. `tool/toolchain_versions.sh`
+    (the `package` job of `checkout.yml`, `mise run check:toolchains`) fails
+    when the Dart, Flutter, Rust, Node or Python pins of `mise.toml`, the
+    workflows and the image drift apart.
   - A job runs the lowest bounds: Dart 3.10.0 with `pub downgrade` for
     `lib` and `bin`, and the VM tests on 3.10.0. Tests cannot run with
     downgraded dev dependencies, because analyzer 6 does not build on
@@ -1764,5 +1772,85 @@ affected. Under dart2wasm the test drops the 17 MiB case, which exists
 for the native transport's 16 MiB tape limit (D50). Debug (asserts on)
 Flutter web builds with dart2wasm will be slow on large nested JSON;
 reported as https://github.com/dart-lang/sdk/issues/64924.
+
+- Status: **adopted**.
+
+### D56. Toolchain and dependency upgrade (2026-11): Rust 1.100, Dart 3.14, Node 26
+
+One pass over every toolchain and the example game's dependencies, after
+the feature freeze of the release.
+
+- **Toolchains.** Rust 1.100.0 (`mise.toml`, both `rust-toolchain.toml`,
+  the image; `rust-version = "1.100"` in every crate), Dart 3.14.0 and
+  Flutter 3.50.0 (mise, `checkout.yml`, `release.yml`, the image), Node 26
+  LTS, Python 3.14 and uv 0.13 (mise and the image), cargo-deny 0.20.2.
+  `tool/toolchain_versions.sh` keeps the pins in step (D43, "Toolchains").
+  The client's dart2js build adds `--no-deprecated-js-interop` (Dart 3.14):
+  it fails on `dart:html`, `dart:js_util` or `package:js`.
+- **Game server crates.** sqlx 0.9 (dynamic SQL is wrapped in
+  `AssertSqlSafe`: every such string is built from constants and enum
+  fragments, never from input), rand 0.10, argon2/password-hash 0.6
+  (a test keeps an argon2 0.5 hash verifying: the PHC format is
+  unchanged), sha2 0.11, tower-http 0.7 (its `ServeDir` now has its own
+  `ETag`; `static_files.rs` strips `If-Match` as it already did
+  `If-None-Match`, so only our per-variant tags answer conditionals;
+  `static_cache_test` unchanged and green), maxminddb 0.33
+  (RUSTSEC-2025-0132), png 0.18, base64 0.23, reqwest 0.13 and
+  tokio-tungstenite 0.30 (tests), `anyhow` removed. The game server is in
+  `audit.yml` with its own `deny.toml`. rand 0.9+ changed seeded value
+  streams (`Uniform` sampling); no seeded test asserted exact values, so
+  none needed new expectations.
+- **jsonwebtoken stays on 9.3.** 10+ needs a crypto backend:
+  `rust_crypto` compiles RSA and ECDSA in (RUSTSEC-2023-0071 for `rsa`,
+  RUSTSEC-2026-0387 for `crypto-bigint` 0.5), `aws_lc_rs` adds a C build
+  for one HMAC. We sign HS256 only, with ring, already in the tree for
+  rustls. Revisit with 12.x after its cooldown, or with an HS256-only
+  `CryptoProvider`.
+- **Rust 1.100 code.** `std::mem::DropGuard` arms the socket cleanup
+  (`ws_handlers::guarded`: a panicking or cancelled socket task still
+  detaches from the party, the instance and the friends' lists and flushes
+  the character; tested with a panic and an abort) and the instance actors
+  (`directory::on_crash`, `stage::on_crash`: a crashed hub channel leaves
+  the directory and the next join reopens it, instead of failing joins
+  until a restart). `extract_if` in the reapers and per-tick
+  retain-with-push sites, `assert_matches!` in tests, `pop_front_if`,
+  `take_if`, `LazyLock`. `#[allow]` became `#[expect(.., reason)]`
+  (four were stale and went), `too_many_arguments` is allowed crate-wide
+  (the SoA systems take their columns as arguments) and
+  `allow_attributes` warns. `cargo clippy --all-targets -D warnings` is
+  clean for the game server, `native/rust` and `server`. `cfg_select!` in
+  `native/rust/src/tls.rs` waits: its non-Apple arms cannot be built on a
+  Mac (ring needs a cross C toolchain), so only CI could check them.
+- **Engine.** TypeScript 7.0.2 (`rootDir`, the tests type-checked by
+  `npm run check`), three r187, Vite 8.3 (Rolldown; explicit
+  `build.target` Chrome/Edge 111, Firefox 115, Safari 16.4),
+  `vite-plugin-dts` removed: `npm audit` 0. `pipeline/minimap_top.mjs`
+  bundles with Vite instead of esbuild.
+- **Pipeline Python.** `pipeline/pyproject.toml` + `uv.lock` (Pillow 13,
+  numpy 2.5); the image's WebP pass uses the same lock instead of
+  Pillow 11.3. `card_art.py bake` reproduced `dist/client/cards`
+  byte for byte.
+- **Tick cost re-checked** (`cargo run --release --example horde_bench`,
+  M-series Mac, mean / p99 µs, two runs each, the better p99 shown):
+
+  | Layout | mobs | Phase 5 | Rust 1.99 | Rust 1.100 |
+  |---|---|---|---|---|
+  | spread | 500 | 213 / 568 | 222 / 532 | 224 / 535 |
+  | spread | 1500 | 315 / 785 | 327 / 723 | 330 / 732 |
+  | spread | 4000 | 639 / 1322 | 667 / 1327 | 668 / 1327 |
+  | clumped | 500 | 314 / 641 | 290 / 586 | 290 / 587 |
+  | clumped | 1500 | 745 / 1096 | 613 / 935 | 615 / 957 |
+  | clumped | 4000 | 2020 / 2415 | 1504 / 1854 | 1509 / 1861 |
+
+  1.99 vs 1.100 is the same code (1.99 with the three new library
+  features gated on): the toolchain is neutral. Against Phase 5 the
+  spread layouts are within noise and the clumped ones are faster (the
+  horde work since, and rand 0.10 places the same seed differently).
+- **No rayon** (re-checked): the worst case, 4000 monsters packed on the
+  party, is 1.5 ms mean / 1.9 ms p99 of a 50 ms tick, and hub channels and
+  stages already run in parallel as Tokio tasks. A rayon pool inside an
+  instance would compete with the other instances for the same cores.
+  AGENTS.md said otherwise and is corrected; it also named KTX2 textures,
+  which the pack never had (PNG and WebP through `TextureLoader`).
 
 - Status: **adopted**.

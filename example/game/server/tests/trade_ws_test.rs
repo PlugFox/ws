@@ -17,6 +17,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use std::assert_matches;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -81,8 +82,8 @@ async fn player(addr: SocketAddr, name: &str) -> (u32, String, u32) {
 }
 
 async fn connect(addr: SocketAddr, token: &str) -> Ws {
-    let (mut ws, _) = connect_async(format!("ws://{addr}/api/ws?token={token}")).await.unwrap();
-    assert!(matches!(next_msg(&mut ws).await, ServerMsg::Connected { .. }));
+    let (mut ws, _) = connect_async(format!("ws://{addr}/api/ws?token={token}&build={}", game_server::version::client_build())).await.unwrap();
+    assert_matches!(next_msg(&mut ws).await, ServerMsg::Connected { .. });
     send(&mut ws, ClientMsg::HubJoin { channel: None }).await;
     next_where(&mut ws, "inventory", |m| matches!(m, ServerMsg::Inventory { .. })).await;
     ws
@@ -312,7 +313,7 @@ async fn the_vault_never_applies_an_all_in_deal_twice() {
     assert_eq!(oks, 1, "{r1:?} {r2:?} {r3:?}");
     for r in [r1, r2, r3] {
         if let Err(e) = r {
-            assert!(matches!(e, TradeError::NotOwned | TradeError::NoZeny), "{e:?}");
+            assert_matches!(e, TradeError::NotOwned | TradeError::NoZeny, "{e:?}");
         }
     }
     let (sa, sb) = (stored(&state, ca).await, stored(&state, cb).await);

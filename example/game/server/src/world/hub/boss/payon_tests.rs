@@ -86,6 +86,7 @@ fn profile() -> PlayerProfile {
         weapon: String::new(),
         loadout: Default::default(),
         bag: Default::default(),
+        homunculus: None,
     }
 }
 

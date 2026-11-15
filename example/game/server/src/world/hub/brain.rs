@@ -11,16 +11,17 @@
 
 use super::aim::{norm, Aimed, BODY};
 use super::area::Area;
-use super::cast::{area_of, count_of, look_of, moved, scaled, ticks16, ticks_of, Live};
+use super::cast::{area_of, count_of, look_of, moved, scaled, ticks16, ticks_of, Kill, Live};
 use super::fight::damage_type_bits;
 use super::{HubEvent, HubInstance, HubPlayer, MapIdx, Outgoing};
 use crate::world::combat::rules::saving_throw;
-use crate::world::combat::skills::{Act, DamageFx, Effect, EffectDice, MobTarget, MonsterSkill, Payload, SkillBook};
+use crate::world::combat::skills::{Act, DamageFx, Effect, EffectDice, MobTarget, MonsterSkill, Payload, RallyFx, SkillBook};
 use crate::world::combat::{Condition, DamageType, Dice, Rng};
-use crate::world::horde::storage::FLAG_FULL;
-use crate::world::horde::Horde;
+use crate::world::horde::storage::{Rally, FLAG_BOSS, FLAG_FULL};
+use crate::world::horde::{Horde, LURE_BASE};
+use super::companion::Companions;
 use crate::world::map::WalkGrid;
-use crate::world::protocol::{hit, HitEvent, ServerMsg, Telegraph, MONSTER_ENTITY_BASE};
+use crate::world::protocol::{hit, BossZone, HitEvent, ServerMsg, Telegraph, MONSTER_ENTITY_BASE};
 
 /// Skills a monster kind may carry.
 pub(super) const MAX_MOB_SKILLS: usize = 4;
@@ -79,7 +80,6 @@ impl Hazard {
     /// with a strike every `pulse` ticks (0: once); a saving throw against
     /// `dc` halves it (and spares the rider). For effects that are no
     /// monster skill (affixes, `affix.rs`).
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn damage(
         id: u32,
         map: MapIdx,
@@ -140,7 +140,7 @@ fn plan<'a>(sk: &'a MonsterSkill, walk: &WalkGrid, mx: f32, my: f32, aim: (f32, 
                 let aimed = Aimed { x: aim.0, y: aim.1, ox: x, oy: y, dir, ally: None, monster: None };
                 out.push((area_of(act, 1, sk.range, &aimed, x, y).0, &**act));
             }
-            Effect::Passive(_) | Effect::Mount | Effect::Pending(_) => {}
+            Effect::Passive(_) | Effect::Mount | Effect::Quiver(_) | Effect::Pending(_) => {}
         }
     }
     out
@@ -172,21 +172,138 @@ fn telegraphs(planned: &[(Area, &Act)], zone: u32) -> Vec<Telegraph> {
         .collect()
 }
 
-/// Turns a finished wind-up into hazards (and moves the monster); false
-/// when it was called off (the monster died, or is stunned or frozen).
-#[allow(clippy::too_many_arguments)]
-fn land(c: &MobCast, sk: &MonsterSkill, horde: &mut Horde, walk: &WalkGrid, rng: &mut Rng, now: u32, hz: f32, out: &mut Vec<Hazard>) -> bool {
+/// What a monster skill needs of its caster once it lands (a corpse's
+/// too: read before the slot is freed).
+#[derive(Clone, Copy)]
+struct Caster {
+    map: MapIdx,
+    dc: i32,
+    level: u32,
+    evil: bool,
+}
+
+fn caster_of(horde: &Horde, slot: u16) -> Caster {
+    let block = horde.block(slot);
+    Caster { map: horde.map(), dc: 10 + block.save, level: block.level, evil: horde.catalog().get(horde.store().kind[slot as usize]).evil }
+}
+
+/// The hazards of one act landing on `area` from `at` on (its repeats
+/// `every` apart); lasting ground takes the next telegraph id of `zone`.
+fn drop_hazards(act: &Act, ranged: bool, area: Area, c: Caster, at: u32, zone: &mut u32, rng: &mut Rng, hz: f32, out: &mut Vec<Hazard>) {
+    let t = &act.timing;
+    let lasting = t.lasting(1);
+    let load = match &act.payload {
+        Payload::Damage(DamageFx { dice: EffectDice::Fixed(d), scale_k, mult, bonus, kind, save, .. }) => HazardLoad::Damage {
+            dice: scaled(*d, *scale_k, mult.at(1), bonus.at(1), c.level),
+            kind: *kind,
+            rider: save.map(|sv| (sv.condition, ticks16(sv.secs.at(1), hz))),
+        },
+        Payload::Condition { condition, save, secs, .. } => {
+            let ticks = match (*save, lasting) {
+                (true, _) => ticks16(secs.at(1), hz),
+                (false, true) => ticks16(t.pulse * 2.0, hz).max(2),
+                (false, false) => ticks16(1.0, hz),
+            };
+            HazardLoad::Condition { condition: *condition, ticks, save: *save }
+        }
+        _ => return,
+    };
+    let id = if lasting {
+        *zone += 1;
+        *zone - 1
+    } else {
+        0
+    };
+    for i in 0..count_of(act, 1) {
+        let mut area = area;
+        if act.area.scatter > 0.0 {
+            let a = rng.die(360) as f32 * std::f32::consts::TAU / 360.0;
+            let r = act.area.scatter * (rng.die(1000) as f32 / 1000.0).sqrt();
+            let (x, y) = area.centre();
+            area = area.moved_to(x + a.cos() * r, y + a.sin() * r);
+        }
+        let at = at + ticks_of(i as f32 * t.every, hz);
+        out.push(Hazard {
+            id,
+            map: c.map,
+            next: at,
+            until: if lasting { at + ticks_of(t.secs.at(1), hz) } else { at },
+            pulse: if lasting { ticks_of(t.pulse, hz).max(1) } else { 0 },
+            area,
+            dc: c.dc,
+            ranged,
+            evil: c.evil,
+            load,
+        });
+    }
+}
+
+/// A rally (S5): the monsters inside `area` (the caster always, when it
+/// passes the filter) are healed a share of their HP and spurred for a
+/// while ([`Rally`]). Plants, objects and bosses other than the caster
+/// take nothing.
+pub(super) fn rally(horde: &mut Horde, caster: u16, r: &RallyFx, area: &Area, hz: f32, hits: &mut Vec<HitEvent>) {
+    let mut near = Vec::new();
+    area.monsters(horde, &mut near);
+    if horde.store().is_alive(caster) && !near.contains(&caster) {
+        near.push(caster);
+    }
+    let kinds: Vec<u8> = r.kinds.iter().filter_map(|k| horde.catalog().kind_of(k)).collect();
+    let spur = Rally {
+        to_hit: r.to_hit.clamp(-20, 20) as i8,
+        speed: (r.speed * 100.0).round().clamp(0.0, 255.0) as u8,
+        taken: (r.resist * 100.0).round().clamp(-100.0, 90.0) as i8,
+        ticks: ticks16(r.secs, hz),
+    };
+    let spurs = spur.ticks > 0 && (spur.to_hit != 0 || spur.speed != 0 || spur.taken != 0);
+    for s in near {
+        let i = s as usize;
+        let st = horde.store();
+        if !st.is_alive(s) || st.hp[i] <= 0 || st.is_plant(s) || (s != caster && st.flags[i] & FLAG_BOSS != 0) {
+            continue;
+        }
+        let def = horde.catalog().get(st.kind[i]);
+        if (!r.kinds.is_empty() && !kinds.contains(&st.kind[i])) || (r.evil && !def.evil) {
+            continue;
+        }
+        if r.heal > 0.0 {
+            let max = horde.block(s).hp;
+            let hp = &mut horde.store_mut().hp[i];
+            let healed = ((max as f32 * r.heal).round() as i32).max(1).min(max - *hp).max(0);
+            *hp += healed;
+            if healed > 0 {
+                hits.push(HitEvent { target: MONSTER_ENTITY_BASE + s as u32, amount: healed as u32, flags: hit::HEAL });
+            }
+        }
+        if spurs {
+            horde.store_mut().rally(s, spur);
+        }
+    }
+}
+
+/// Turns a finished wind-up into hazards and rallies (and moves the
+/// monster; a sacrifice dies: its kill goes to `doomed`, paid next tick);
+/// false when it was called off (the monster died, or is stunned, frozen,
+/// terrified or silenced).
+fn land(
+    c: &MobCast,
+    sk: &MonsterSkill,
+    horde: &mut Horde,
+    walk: &WalkGrid,
+    rng: &mut Rng,
+    now: u32,
+    hz: f32,
+    out: &mut Vec<Hazard>,
+    hits: &mut Vec<HitEvent>,
+    doomed: &mut Vec<Kill>,
+) -> bool {
     let store = horde.store();
     let s = c.slot as usize;
-    if !store.is_alive(c.slot) || store.generation[s] != c.generation || store.status_of(c.slot).held() {
+    if !store.is_alive(c.slot) || store.generation[s] != c.generation || store.status_of(c.slot).mute() {
         return false;
     }
     let (mut mx, mut my) = (store.x[s], store.y[s]);
-    let block = horde.block(c.slot);
-    let dc = 10 + block.save;
-    let level = block.level;
-    let map = horde.map();
-    let evil = horde.catalog().get(store.kind[s]).evil;
+    let who = caster_of(horde, c.slot);
     let mut zone = c.zone;
     for e in &sk.effects {
         let act = match e {
@@ -196,62 +313,113 @@ fn land(c: &MobCast, sk: &MonsterSkill, horde: &mut Horde, walk: &WalkGrid, rng:
                 continue;
             }
             Effect::Act(act) => act,
-            Effect::Passive(_) | Effect::Mount | Effect::Pending(_) => continue,
-        };
-        let t = &act.timing;
-        let lasting = t.lasting(1);
-        let load = match &act.payload {
-            Payload::Damage(DamageFx { dice: EffectDice::Fixed(d), scale_k, mult, bonus, kind, save, .. }) => HazardLoad::Damage {
-                dice: scaled(*d, *scale_k, mult.at(1), bonus.at(1), level),
-                kind: *kind,
-                rider: save.map(|sv| (sv.condition, ticks16(sv.secs.at(1), hz))),
-            },
-            Payload::Condition { condition, save, secs, .. } => {
-                let ticks = match (*save, lasting) {
-                    (true, _) => ticks16(secs.at(1), hz),
-                    (false, true) => ticks16(t.pulse * 2.0, hz).max(2),
-                    (false, false) => ticks16(1.0, hz),
-                };
-                HazardLoad::Condition { condition: *condition, ticks, save: *save }
-            }
-            _ => continue,
+            Effect::Passive(_) | Effect::Mount | Effect::Quiver(_) | Effect::Pending(_) => continue,
         };
         let aimed = Aimed { x: c.x, y: c.y, ox: mx, oy: my, dir: c.dir, ally: None, monster: None };
         let (area, _) = area_of(act, 1, sk.range, &aimed, mx, my);
-        let id = if lasting {
-            zone += 1;
-            zone - 1
-        } else {
-            0
-        };
-        for i in 0..count_of(act, 1) {
-            let mut area = area;
-            if act.area.scatter > 0.0 {
-                let a = rng.die(360) as f32 * std::f32::consts::TAU / 360.0;
-                let r = act.area.scatter * (rng.die(1000) as f32 / 1000.0).sqrt();
-                let (x, y) = area.centre();
-                area = area.moved_to(x + a.cos() * r, y + a.sin() * r);
-            }
-            let at = now + ticks_of(i as f32 * t.every, hz);
-            out.push(Hazard {
-                id,
-                map,
-                next: at,
-                until: if lasting { at + ticks_of(t.secs.at(1), hz) } else { at },
-                pulse: if lasting { ticks_of(t.pulse, hz).max(1) } else { 0 },
-                area,
-                dc,
-                ranged: sk.ranged,
-                evil,
-                load,
-            });
+        if let Payload::Rally(r) = &act.payload {
+            rally(horde, c.slot, r, &area, hz, hits);
+            continue;
         }
+        drop_hazards(act, sk.ranged, area, who, now, &mut zone, rng, hz, out);
+    }
+    if sk.sacrifice {
+        sacrifice(horde, c.slot, hits, doomed);
     }
     true
 }
 
-/// One action of a hazard on every standing player inside.
-fn strike(h: &Hazard, players: &mut [HubPlayer], lives: &[Live], rng: &mut Rng, hz: f32, hits: &mut Vec<HitEvent>) {
+/// The caster of a `sacrifice` skill dies as it resolves: no HP left, the
+/// death shown now, the kill paid by the kill funnel next tick (nobody's
+/// blow: the nearest party member loots it).
+fn sacrifice(horde: &mut Horde, slot: u16, hits: &mut Vec<HitEvent>, doomed: &mut Vec<Kill>) {
+    let hp = &mut horde.store_mut().hp[slot as usize];
+    if *hp <= 0 {
+        return;
+    }
+    hits.push(HitEvent { target: MONSTER_ENTITY_BASE + slot as u32, amount: *hp as u32, flags: hit::KILL });
+    *hp = 0;
+    doomed.push((slot, 0));
+}
+
+/// A dying monster's `on_death` skills (S4), from the kill funnel
+/// (`fight.rs`) before its slot is freed: each one whose chance rolls
+/// resolves at the corpse `cast` seconds later (the fuse; telegraphed
+/// now as `BOSS_ZONES` from the dead monster's entity, ability = the
+/// skill id). `nearest` / `densest` aim at the nearest standing player in
+/// range, else the corpse; a rally on a corpse spurs at once.
+pub(super) fn on_death(
+    horde: &mut Horde,
+    s: u16,
+    skills: &[u16],
+    book: &SkillBook,
+    ups: &[(f32, f32)],
+    now: u32,
+    hz: f32,
+    rng: &mut Rng,
+    next_zone: &mut u32,
+    out: &mut Vec<Hazard>,
+    hits: &mut Vec<HitEvent>,
+    msgs: &mut Vec<ServerMsg>,
+) {
+    if !horde.store().is_alive(s) {
+        return;
+    }
+    let (x, y) = (horde.store().x[s as usize], horde.store().y[s as usize]);
+    let who = caster_of(horde, s);
+    for &sk in skills {
+        let def = book.monster(sk);
+        if !def.on_death || (def.chance < 100 && rng.die(100) > def.chance) {
+            continue;
+        }
+        let nearest = ups
+            .iter()
+            .map(|&(px, py)| ((px - x).powi(2) + (py - y).powi(2), px, py))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .filter(|n| n.0.sqrt() <= def.range + BODY);
+        let dir = nearest.and_then(|n| norm(n.1 - x, n.2 - y)).unwrap_or((1.0, 0.0));
+        let aim = match (def.target, nearest) {
+            (MobTarget::Nearest | MobTarget::Densest, Some(n)) => (n.1, n.2),
+            _ => (x, y),
+        };
+        let at = now + ticks_of(def.cast, hz).max(1);
+        let mut zone = *next_zone;
+        let mut zones = Vec::new();
+        for act in def.effects.iter().filter_map(Effect::act) {
+            let aimed = Aimed { x: aim.0, y: aim.1, ox: x, oy: y, dir, ally: None, monster: None };
+            let (area, _) = area_of(act, 1, def.range, &aimed, x, y);
+            if let Payload::Rally(r) = &act.payload {
+                rally(horde, s, r, &area, hz, hits);
+                continue;
+            }
+            let first = zone;
+            drop_hazards(act, def.ranged, area, who, at, &mut zone, rng, hz, out);
+            let t = &act.timing;
+            let span = if t.lasting(1) { t.secs.at(1) } else { (count_of(act, 1) - 1) as f32 * t.every };
+            let mut shown = area;
+            if act.area.scatter > 0.0
+                && let Area::Circle { x, y, r } = area
+            {
+                shown = Area::Circle { x, y, r: r + act.area.scatter };
+            }
+            let tid = if zone != first { first } else { 0 };
+            zones.push(BossZone { area: shown.telegraph(tid, look_of(act), (span * 1000.0).round() as u32, 0), delay_ms: (def.cast * 1000.0).round() as u32, flags: 0 });
+        }
+        *next_zone = zone.max(1);
+        if !zones.is_empty() {
+            msgs.push(ServerMsg::BossZones { caster: MONSTER_ENTITY_BASE + s as u32, ability: def.id.clone(), zones });
+        }
+    }
+}
+
+/// One action of a hazard on every standing player inside, then on every
+/// companion inside (`companion.rs`: a save halves the damage; only the
+/// holding conditions stick to them).
+fn strike(h: &Hazard, players: &mut [HubPlayer], companions: &mut Companions, lives: &[Live], rng: &mut Rng, now: u32, hz: f32, hits: &mut Vec<HitEvent>) {
+    match h.load {
+        HazardLoad::Damage { dice, kind, .. } => companions.hazard_damage(&h.area, dice, kind, h.dc, rng, now, hits),
+        HazardLoad::Condition { condition, ticks, save } => companions.hazard_condition(&h.area, condition, ticks, save, h.dc, rng, now),
+    }
     for p in players.iter_mut().filter(|p| p.map == h.map) {
         let (x, y, id) = (p.x, p.y, p.profile.character_id);
         let Some(f) = p.fighter.as_mut() else { continue };
@@ -313,12 +481,22 @@ impl HubInstance {
         let mut i = 0;
         let mut casts: Vec<ServerMsg> = Vec::new();
         while i < self.mob_casts.len() {
-            if self.mob_casts[i].land > now {
-                i += 1;
+            let c = self.mob_casts[i];
+            if c.land > now {
+                // Silenced (or held) mid-wind-up, or flinched during an
+                // interruptible one: called off at once.
+                let st = horde.store();
+                let mine = st.is_alive(c.slot) && st.generation[c.slot as usize] == c.generation;
+                if mine && (st.status_of(c.slot).mute() || (book.monster(c.skill).interrupt && st.staggered(c.slot))) {
+                    self.mob_casts.swap_remove(i);
+                    casts.push(super::cast::cancel(MONSTER_ENTITY_BASE + c.slot as u32));
+                } else {
+                    i += 1;
+                }
                 continue;
             }
             let c = self.mob_casts.swap_remove(i);
-            if !land(&c, book.monster(c.skill), horde, walk, &mut self.dice, now, hz, &mut self.hazards)
+            if !land(&c, book.monster(c.skill), horde, walk, &mut self.dice, now, hz, &mut self.hazards, hits, &mut self.doomed)
                 && !self.mob_casts.iter().any(|o| o.slot == c.slot)
             {
                 casts.push(super::cast::cancel(MONSTER_ENTITY_BASE + c.slot as u32));
@@ -337,7 +515,7 @@ impl HubInstance {
             if now >= h.next {
                 h.next = if h.pulse > 0 { now + h.pulse } else { h.until + 1 };
                 let h = h.clone();
-                strike(&h, &mut self.players, &self.lives, &mut self.dice, hz, hits);
+                strike(&h, &mut self.players, &mut self.companions, &self.lives, &mut self.dice, now, hz, hits);
             }
             k += 1;
         }
@@ -371,22 +549,34 @@ impl HubInstance {
                 }
                 continue;
             }
-            if now < mind.next_check || now < mind.busy_until || store.status_of(slot).held() {
+            if now < mind.next_check || now < mind.busy_until || store.status_of(slot).mute() {
                 continue;
             }
             mind.next_check = now + check;
             let (mx, my) = (store.x[s], store.y[s]);
             let block = horde.block(slot);
             let hp_frac = (store.hp[s] as f32 / block.hp.max(1) as f32).min(1.0);
-            let nearest = ups
-                .iter()
-                .map(|&(x, y)| ((x - mx).powi(2) + (y - my).powi(2), x, y))
-                .min_by(|a, b| a.0.total_cmp(&b.0))
-                .map(|(d2, x, y)| (d2.sqrt(), x, y));
+            // Taunted by a companion's lure (Amistr, a Marine Sphere): it
+            // aims at the lure.
+            let taunter = if store.status_of(slot).has(Condition::Taunted) { store.taunter[s] } else { 0 };
+            let lure = (taunter >= LURE_BASE).then(|| horde.lures().iter().find(|l| l.id == taunter)).flatten();
+            let nearest = match lure {
+                Some(l) => Some((((l.x - mx).powi(2) + (l.y - my).powi(2)).sqrt(), l.x, l.y)),
+                None => ups
+                    .iter()
+                    .map(|&(x, y)| ((x - mx).powi(2) + (y - my).powi(2), x, y))
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(d2, x, y)| (d2.sqrt(), x, y)),
+            };
             let Some((dist, nx, ny)) = nearest else { continue };
             let mut chosen = None;
             for (j, &sk) in skills.iter().enumerate() {
                 let def = book.monster(sk);
+                // Corpse skills wait for the death; an interruptible one
+                // does not start while the monster still flinches.
+                if def.on_death || (def.interrupt && store.staggered(slot)) {
+                    continue;
+                }
                 if now < mind.ready[j] || hp_frac > def.hp_below || dist > def.range + BODY {
                     continue;
                 }

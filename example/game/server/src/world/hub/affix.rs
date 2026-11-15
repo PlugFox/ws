@@ -137,7 +137,6 @@ pub(super) fn absorb(horde: &mut Horde, s: u16, amount: i32, kind: DamageType) -
 /// An affixed monster's contact blow landed `dealt` on `f` (after its own
 /// damage): Vampiric heals the monster, an enchantment adds its element
 /// (Cold slows on a failed save). Extra hit numbers go to `hits`.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn melee(horde: &mut Horde, s: u16, block: &MonsterBlock, f: &mut Fighter, target: u32, dealt: i32, rng: &mut Rng, hz: f32, hits: &mut Vec<HitEvent>) {
     let i = s as usize;
     let bits = AffixFlags(horde.store().affix[i]);
@@ -202,7 +201,6 @@ fn blast_dice(block: &MonsterBlock, mult: u32) -> Dice {
 /// `s` just died with its affixes: the novas and the Volatile blast are
 /// marked now and land later as hazards (`hazards`); their telegraphs go
 /// to the clients with the next step.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn on_death(horde: &Horde, s: u16, now: u32, hz: f32, rng: &mut Rng, stage: &mut AffixStage, hazards: &mut Vec<Hazard>) {
     let i = s as usize;
     let st = horde.store();
@@ -353,7 +351,6 @@ fn prick(players: &mut [super::HubPlayer], map: MapIdx, x: f32, y: f32, amount: 
 
 /// One second of an affixed monster. Returns the damage Thorns reflects
 /// this second (0: none).
-#[allow(clippy::too_many_arguments)]
 fn beat(
     horde: &mut Horde,
     s: u16,

@@ -163,7 +163,10 @@ impl Files {
 
         // `If-Modified-Since` and `If-Range` are evaluated here, against the
         // variant actually sent (`ServeDir` would answer 304 by date alone).
+        // `ServeDir` (tower-http 0.7) also has its own `ETag`, which is not
+        // ours: it must not answer `If-None-Match` or `If-Match` with it.
         let headers = req.headers_mut();
+        headers.remove(header::IF_MATCH);
         let if_none_match = headers.remove(header::IF_NONE_MATCH);
         let if_modified_since = headers.remove(header::IF_MODIFIED_SINCE);
         let if_range = headers.remove(header::IF_RANGE);
@@ -176,11 +179,10 @@ impl Files {
             if etag.as_ref().is_some_and(|tag| none_match_hits(cond, tag)) {
                 return finish(not_modified(&res, etag), policy);
             }
-        } else if let Some(since) = &if_modified_since {
-            if res.status() == StatusCode::OK && res.headers().get(header::LAST_MODIFIED) == Some(since) {
+        } else if let Some(since) = &if_modified_since
+            && res.status() == StatusCode::OK && res.headers().get(header::LAST_MODIFIED) == Some(since) {
                 return finish(not_modified(&res, etag), policy);
             }
-        }
 
         // A range of another version than the client holds: the whole file.
         if res.status() == StatusCode::PARTIAL_CONTENT {
@@ -238,11 +240,10 @@ impl Files {
     /// The cached tag while the file's size and mtime hold, else hashed now.
     async fn tag(&self, file: PathBuf) -> Option<HeaderValue> {
         let meta = tokio::fs::metadata(&file).await.ok()?;
-        if let Some(tag) = self.tags.get(&file) {
-            if tag.len == meta.len() && tag.modified == meta.modified().ok() {
+        if let Some(tag) = self.tags.get(&file)
+            && tag.len == meta.len() && tag.modified == meta.modified().ok() {
                 return Some(tag.etag.clone());
             }
-        }
         let files = self.clone();
         tokio::task::spawn_blocking(move || files.tag_blocking(&file).map(|(_, etag)| etag)).await.ok().flatten()
     }

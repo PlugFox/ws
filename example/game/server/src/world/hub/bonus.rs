@@ -517,7 +517,7 @@ impl HubInstance {
         let walk = &self.world.map(self.players[idx].map).walk;
         // The skills of this tick already ran: it lands on the next one.
         let cx = Landing { def, skill, slv, now: self.tick + 1, hz, zone, power: Some(power) };
-        land(&cx, &mut self.players[idx], aimed, horde, walk, &mut self.dice, &mut self.lives);
+        land(&cx, &mut self.players[idx], aimed, horde, walk, &mut self.dice, &mut self.lives, &mut self.companions, &mut super::cast::Spent::default());
     }
 
     /// The Horong's card: a wisp casts Fire Bolt at the nearest monster
@@ -637,6 +637,7 @@ mod tests {
             weapon: String::new(),
             loadout: Loadout::default(),
             bag: Default::default(),
+            homunculus: None,
         }
     }
 

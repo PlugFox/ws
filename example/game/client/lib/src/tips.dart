@@ -18,16 +18,20 @@ List<String> _general(TipKeys keys, {required bool town}) => [
   'Press <b>F10</b> for settings and key bindings.',
   'Emotes are on <b>Alt+1–0</b>, ping flags for the party on <b>Ctrl+1–0</b>.',
   'Spend skill points with <b>K</b> after a level up.',
+  'Underlined words in tooltips explain themselves: hold still (or press <b>Alt</b>) over an item, then hover a word; click it to pin it.',
   if (town) ...[
     'The missions start at the <b>Kafra employee</b> in the town centre.',
     'Talk to people with <b>${keys.interact}</b> or Space. <b>${keys.sit}</b> sits you down.',
     'Players trade with each other in town only.',
     'The party leader picks the mission <b>modifiers</b>: more risk, a bigger clear bonus.',
+    'An Alchemist evolves the homunculus in town: <b>Bond 75</b>, level 60 and a <b>Stone of Sage</b>.',
   ] else ...[
     'Downed? An ally standing by you gets you back up.',
     'When the <b>poison fog</b> rises, stay inside the safe circle.',
     'Monsters outside your <b>light</b> stay hidden until they come close.',
     'A <b>Thief</b> striking out of Hiding or Cloaking rolls with advantage.',
+    'A <b>homunculus</b> on Aggressive goes for anything near you; Passive only follows.',
+    "Press the <b>Call Homunculus</b> slot again: at a monster it attacks that one, elsewhere it comes back.",
   ],
 ];
 

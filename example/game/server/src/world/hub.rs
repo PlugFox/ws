@@ -9,7 +9,7 @@
 use super::map::{MapData, MapError};
 use super::missions;
 use super::modifiers::{self, ModFlags};
-use super::protocol::{pose, CastPrefs, Look, MapInfo, PlayerInfo, ServerMsg, SnapshotBody, MAX_EMOTE, MAX_FLAG};
+use super::protocol::{pose, Appearance, CastPrefs, UsePrefs, Look, MapInfo, PlayerInfo, ServerMsg, SnapshotBody, MAX_EMOTE, MAX_FLAG};
 use super::horde::view::MonsterView;
 use super::horde::{Horde, PlayerView};
 use super::combat::{self, Loadout, SkillBook};
@@ -23,6 +23,7 @@ use uuid::Uuid;
 pub type MapIdx = u8;
 
 mod affix;
+mod appearance;
 #[cfg(test)]
 mod affix_tests;
 #[cfg(test)]
@@ -33,6 +34,7 @@ mod bonus;
 mod boss;
 mod brain;
 mod cast;
+mod companion;
 mod culvert;
 mod env;
 mod feedback;
@@ -53,14 +55,34 @@ mod plant_tests;
 mod aim_tests;
 #[cfg(test)]
 mod thief_tests;
+#[cfg(test)]
+mod merchant_tests;
+#[cfg(test)]
+mod adept_tests;
+#[cfg(test)]
+mod hunter_tests;
+#[cfg(test)]
+mod monster_skill_tests;
+mod quiver;
 mod residents;
 mod shop;
+mod quest;
+pub use quest::HATTER;
 mod payon;
 mod sograt;
+// The ladder from 60 to 99 (docs/locations/ladder_60_99.md): one module
+// per location, owned by its agent.
+mod glast;
+mod orc;
+mod thanatos;
+mod thor;
+mod toy;
 mod trade;
 mod social;
 mod stats;
+pub use companion::HomSave;
 pub use fight::{Fighter, Vital};
+pub use shop::{QUICK_HP, QUICK_SP};
 
 /// Where a portal leads.
 #[derive(Clone, Debug, PartialEq)]
@@ -252,6 +274,9 @@ pub struct PlayerProfile {
     /// Belongings (equipment, potions, zeny); an empty one (no weapon
     /// worn: tests) means the class's starting kit holding `weapon`.
     pub bag: combat::Bag,
+    /// The Merchant line's homunculus (`characters.homunculus`; `None`:
+    /// never chosen, or another class).
+    pub homunculus: Option<HomSave>,
 }
 
 /// Inputs a player may have waiting for their tick (150 ms at 20 Hz):
@@ -295,6 +320,8 @@ struct HubPlayer {
     pressed: u16,
     /// Manual aiming and the auto-cast slots (`CAST_PREFS`).
     prefs: CastPrefs,
+    /// Auto-use thresholds of HP / SP consumables (`USE_PREFS`).
+    uses: UsePrefs,
     /// Sitting (hubs only); any movement stands the player up.
     sitting: bool,
     /// Earliest ticks of the next emote and flag (rate limits).
@@ -307,6 +334,9 @@ struct HubPlayer {
     /// What riding adds to the walking pace in town (0 on foot; on a stage
     /// the fighter's riding passives do it). See `mount.rs`.
     ride: f32,
+    /// The appearance the map was last shown (`appearance.rs`): re-derived
+    /// on every change of its inputs, sent whole when it differs.
+    shown: Appearance,
 }
 
 impl HubPlayer {
@@ -318,26 +348,9 @@ impl HubPlayer {
             x: self.x,
             y: self.y,
             facing: self.facing,
-            look: self.profile.look,
             level: self.fighter.as_ref().map_or(self.profile.level, |f| f.level),
-            weapon: self.weapon_id().into(),
+            appearance: self.shown.clone(),
         }
-    }
-
-    /// Headgear worn, upper / middle / lower (item ids; bare slots left out).
-    fn headgear(&self) -> Vec<String> {
-        use combat::items::{base_id, Slot};
-        [Slot::UpperHead, Slot::MidHead, Slot::LowerHead]
-            .iter()
-            .map(|&s| base_id(&self.profile.bag.equip[s as usize]))
-            .filter(|id| !id.is_empty())
-            .map(String::from)
-            .collect()
-    }
-
-    /// What the map's clients draw on this player's head (`PLAYER_HEADGEAR`).
-    fn headgear_msg(&self) -> ServerMsg {
-        ServerMsg::PlayerHeadgear { entity_id: self.profile.character_id, items: self.headgear() }
     }
 }
 
@@ -354,10 +367,12 @@ pub enum HubEvent {
     QuickStart { mission: String, tier: u8, mask: u32 },
     /// Internal: the player left this instance through a portal into a map
     /// owned by someone else (stage → hub). The instance has already removed
-    /// the player; the socket task joins the target.
+    /// the player; the socket task joins the target. An empty
+    /// `target_map` (a stage without a walk-out portal) means town's
+    /// mission return point.
     Transfer { target_map: String, arrival: (f32, f32) },
     /// Internal: the player restyled; the socket task persists the look
-    /// (`player_look` goes out separately).
+    /// (`player_appearance` goes out separately).
     LookChanged(Look),
     /// Internal: level or experience changed; the socket task updates the
     /// session's character (persisted by the flusher).
@@ -367,14 +382,20 @@ pub enum HubEvent {
     SkillResetApproved,
     /// Internal: the player stands at a merchant that may take this
     /// order; the socket task applies it to the character's bag.
-    Shop(crate::world::trade::ShopOrder),
+    Shop(crate::world::trade::ShopOrder, crate::world::combat::items::Haggle),
     /// Internal: the player stands at a smith; the socket task applies the
     /// attempt (`Bag::refine`) with the smith's d100 `roll`.
     Refine { item: String, slot: Option<crate::world::combat::Slot>, roll: u32, slip: u32 },
+    /// Internal: the player stands at a recipe giver; the socket task
+    /// makes the recipe from the bag (`combat::quests::craft`).
+    Craft { recipe: &'static str, count: u32 },
     /// Internal: the player drank `item` on a mission (one fewer).
     ItemUsed { item: String },
     /// Internal: zeny earned on a mission (kills, the clear bonus).
     Zeny { amount: u64 },
+    /// Internal: zeny a skill spent from the bag on a mission (Mammonite);
+    /// the hub's copy of the bag already paid it.
+    ZenySpent { amount: u64 },
     /// Internal: items monsters dropped for the player (merged stacks);
     /// the socket task puts them in the bag.
     Loot { items: Vec<(&'static str, u32)> },
@@ -391,6 +412,10 @@ pub enum HubEvent {
     /// MVPs, falls, missions, best combo; `world::record`); the socket task
     /// adds them to the session's character (persisted by the flusher).
     Record(crate::world::record::Record),
+    /// Internal: the homunculus changed (type, level, experience, Bond,
+    /// stance, name, evolution; `companion.rs`); the socket task updates
+    /// the session's character (persisted by the flusher).
+    Homunculus(HomSave),
     /// The result screen of a finished mission: `RUN_STATS` and the
     /// recipient's `RUN_REWARDS` (`stats.rs`). Not a plain control frame
     /// so that a link-dead player still gets it on re-attaching.
@@ -457,6 +482,9 @@ pub struct HubInstance {
     minds: Vec<brain::Mind>,
     mob_casts: Vec<brain::MobCast>,
     hazards: Vec<brain::Hazard>,
+    /// Monsters a `sacrifice` skill killed: paid by the next tick's kill
+    /// funnel (`fight.rs`).
+    doomed: Vec<cast::Kill>,
     /// Monster affixes' pending tricks (`affix.rs`).
     affix: affix::AffixStage,
     kind_skills: Vec<Vec<u16>>,
@@ -470,6 +498,9 @@ pub struct HubInstance {
     outcome: mission::Outcome,
     /// Simulated townsfolk on the entry map (hub channels only).
     residents: residents::Residents,
+    /// The Merchant line's homunculi, plants and sphere mines
+    /// (`companion.rs`; empty without a Merchant).
+    companions: companion::Companions,
     /// Scratch: the player block of the snapshot being built.
     snapshot_body: SnapshotBody,
     /// Pickup bonuses on the stage (`bonus.rs`).
@@ -567,6 +598,7 @@ impl HubInstance {
             snapshot_body: SnapshotBody::default(),
             bonuses: bonus::Bonuses::default(),
             trades: trade::Trades::default(),
+            companions: companion::Companions::default(),
             run: stats::RunLog::new(match &kind {
                 InstanceKind::Stage { mission, .. } => missions::find(mission).map_or(0.0, |m| m.time_limit_secs),
                 InstanceKind::Hub { .. } => 0.0,
@@ -597,6 +629,7 @@ impl HubInstance {
             minds: Vec::new(),
             mob_casts: Vec::new(),
             hazards: Vec::new(),
+            doomed: Vec::new(),
             affix: affix::AffixStage::default(),
             kind_skills: Vec::new(),
             bosses: boss::Bosses::default(),
@@ -722,11 +755,13 @@ impl HubInstance {
             aim: [0, 0],
             pressed: 0,
             prefs: CastPrefs::default(),
+            uses: UsePrefs::default(),
             sitting: false,
             emote_ready: 0,
             flag_ready: 0,
             link_dead: false,
             ride: 0.0,
+            shown: Appearance::default(),
         };
         let joined = match &self.kind {
             InstanceKind::Hub { channel } => ServerMsg::HubJoined {
@@ -755,8 +790,12 @@ impl HubInstance {
             let pr = &player.profile;
             self.run.sit(user_id, pr.character_id, &pr.name, &pr.archetype);
         }
+        // Derived once all its inputs are there (the stage's fighter holds
+        // the weapon swung).
+        player.shown = player.appearance(&self.skills);
         self.players.push(player);
         let idx = self.players.len() - 1;
+        self.companion_arrive(idx);
         self.announce_arrival(idx, None, out);
         self.announce_stage(idx, out);
         outcome
@@ -771,6 +810,7 @@ impl HubInstance {
         self.announce_bonuses(idx, out);
         self.announce_fog(idx, out);
         self.announce_env(idx, out);
+        self.announce_companions(idx, out);
         out.push((user_id, HubEvent::Control(self.skills_msg(idx))));
         for o in self.players.iter().filter(|o| o.link_dead && o.map == p.map && o.profile.user_id != user_id) {
             out.push((user_id, HubEvent::Control(ServerMsg::PlayerLink { entity_id: o.profile.character_id, online: false })));
@@ -861,14 +901,16 @@ impl HubInstance {
     pub fn set_loadout(&mut self, user_id: u32, loadout: Loadout, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
         let p = &mut self.players[i];
-        let rode = self.skills.rides(&p.profile.loadout);
         p.profile.loadout = loadout;
+        // A mount stays only while a mount skill is learned (a reset that
+        // drops Peco Peco Ride gets the rider off).
+        p.profile.loadout.mounted = self.skills.rides(&p.profile.loadout);
         if let Some(f) = p.fighter.as_mut() {
             cast::equip(f, &self.skills, &p.profile.loadout);
         }
         out.push((user_id, HubEvent::Control(self.skills_msg(i))));
         // Got on or off the Peco Peco: the map sees it.
-        self.remount(i, rode, out);
+        self.refresh_appearance(i, out);
     }
 
     /// Aim and skill slots of an accepted input (see [`HubInstance::input`]).
@@ -887,6 +929,13 @@ impl HubInstance {
     pub fn cast_prefs(&mut self, user_id: u32, prefs: CastPrefs) {
         if let Some(i) = self.find(user_id) {
             self.players[i].prefs = prefs;
+        }
+    }
+
+    /// The connection's auto-use thresholds (`USE_PREFS`).
+    pub fn use_prefs(&mut self, user_id: u32, uses: UsePrefs) {
+        if let Some(i) = self.find(user_id) {
+            self.players[i].uses = uses;
         }
     }
 
@@ -927,6 +976,8 @@ impl HubInstance {
         for other in self.players.iter().filter(|o| o.map == p.map) {
             out.push((other.profile.user_id, HubEvent::Control(ServerMsg::PlayerVanished { entity_id: id })));
         }
+        // Their companions go with them (the GONE records with the next step).
+        self.companion_depart(user_id, out);
         true
     }
 
@@ -968,17 +1019,28 @@ impl HubInstance {
         let Some(i) = self.find(user_id) else { return };
         let p = &self.players[i];
         let map = self.world.map(p.map);
-        let reply = match map.manifest.npcs.iter().find(|n| n.id == npc_id) {
+        // An Alchemist's Pharmacy is a skill, not an NPC (`quest.rs`).
+        if npc_id == quest::PHARMACY {
+            return self.open_pharmacy(user_id, out);
+        }
+        let reply = match self.npc_here(p.map, npc_id) {
             None => hub_error("no_such_npc", format!("no NPC {npc_id} on {}", map.id())),
             // GAME_DEV: merchants, smiths and mission givers answer from anywhere (e2e: `?shop=kafra`).
-            Some(n) if !n.in_reach(p.x, p.y) && !((n.kind == SHOP || n.kind == REFINER || gives_missions(&n.kind)) && self.at_merchant(n, p.x, p.y)) => {
+            Some(n) if !n.in_reach(p.x, p.y) && !((n.kind == SHOP || n.kind == REFINER || n.kind == HATTER || gives_missions(&n.kind)) && self.at_merchant(n, p.x, p.y)) => {
                 hub_error("npc_too_far", format!("walk closer to {}", n.name))
             }
-            Some(n) if n.kind == SHOP => ServerMsg::Shop {
-                npc: n.id.clone(),
-                name: n.name.clone(),
-                items: combat::items::shop(&n.shop).unwrap_or_default().iter().map(|s| s.to_string()).collect(),
-            },
+            Some(n) if n.kind == HATTER => quest::recipes_msg(n),
+            Some(n) if n.kind == SHOP => {
+                // Discount and Overcharge: the prices this buyer gets.
+                let haggle = self.haggle_of(i);
+                ServerMsg::Shop {
+                    npc: n.id.clone(),
+                    name: n.name.clone(),
+                    items: combat::items::shop(&n.shop).unwrap_or_default().iter().map(|s| s.to_string()).collect(),
+                    buy_pct: haggle.buy,
+                    sell_pct: haggle.sell,
+                }
+            }
             Some(n) => ServerMsg::NpcDialog {
                 npc: n.id.clone(),
                 name: n.name.clone(),
@@ -1004,7 +1066,7 @@ impl HubInstance {
 
     /// Restyles a player standing at a stylist (or a Kafra): hair style and dyes change,
     /// the gender is kept. Everyone on the map (the player too) gets
-    /// `player_look`; the socket task persists it via [`HubEvent::LookChanged`].
+    /// `player_appearance`; the socket task persists it via [`HubEvent::LookChanged`].
     pub fn restyle(&mut self, user_id: u32, look: Look, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
         let p = &self.players[i];
@@ -1018,11 +1080,8 @@ impl HubInstance {
             out.push((user_id, HubEvent::Control(hub_error("npc_too_far", "stand next to a stylist to restyle"))));
             return;
         }
-        let (map, entity_id) = (p.map, p.profile.character_id);
         self.players[i].profile.look = look;
-        for o in self.players.iter().filter(|o| o.map == map) {
-            out.push((o.profile.user_id, HubEvent::Control(ServerMsg::PlayerLook { entity_id, look })));
-        }
+        self.refresh_appearance(i, out);
         out.push((user_id, HubEvent::LookChanged(look)));
     }
 
@@ -1174,6 +1233,16 @@ impl HubInstance {
             }
             return;
         }
+        // Test hook (`GAME_DEV=1`): `/event <map event id>` starts one of the
+        // mission's map events now (a lava surge without waiting minutes).
+        if self.config.missions_anywhere
+            && let Some(id) = text.strip_prefix("/event ")
+            && let Some(horde) = self.horde.as_ref()
+        {
+            let (map, now) = (self.players[i].map, horde.director_elapsed());
+            self.env_force_event(map, id.trim(), now, out);
+            return;
+        }
         // Test hook (`GAME_DEV=1`): `/spawn <monster id>` puts a monster of
         // the stage's roster 6 cells east of the speaker (a boss for the
         // e2e smoke tests without waiting ten minutes).
@@ -1298,11 +1367,23 @@ impl HubInstance {
                 id: p.profile.user_id,
                 hunted: p.fighter.as_ref().is_none_or(Fighter::hunted),
             }));
+            // Companions taunt and body-block (`companion.rs`); summons
+            // stand on the horde's map.
+            self.companions.set_map(horde.map());
+            self.companions.refresh_lures();
+            horde.set_lures(self.companions.lures());
             horde.tick_views(self.tick, self.config.tick_hz, &self.horde_players);
         }
         self.fight(out);
+        self.auto_use(out);
         self.residents_step(out);
+        // Town: homunculi follow their owners (no fighting there).
+        if self.horde.is_none() {
+            self.companions_town(out);
+        }
         self.trade_tick(out);
+        // Levels (the body's tier) and anything else a change path missed.
+        self.sweep_appearances(out);
         self.emit_snapshots(out);
     }
 
@@ -1350,25 +1431,26 @@ impl HubInstance {
                 p.portal_guard = true;
                 p.sitting = false;
                 self.announce_arrival(idx, Some(def.name.clone()), out);
+                // The homunculi already following someone on that map.
+                self.announce_companions(idx, out);
             }
         }
     }
 
     /// Sends `map_enter` to the player (then `pose` for everyone sitting
-    /// there) and `player_appeared` to the others on that map.
+    /// there) and `player_appeared` (with its whole appearance) to the
+    /// others on that map.
     fn announce_arrival(&self, idx: usize, via_portal: Option<String>, out: &mut Outgoing) {
         self.announce_map(idx, via_portal, out);
         let p = &self.players[idx];
         let info = p.info();
-        let headgear = p.headgear_msg();
         for o in self.players.iter().filter(|o| o.map == p.map && o.profile.user_id != p.profile.user_id) {
             out.push((o.profile.user_id, HubEvent::Control(ServerMsg::PlayerAppeared { player: info.clone() })));
-            out.push((o.profile.user_id, HubEvent::Control(headgear.clone())));
         }
-        self.announce_rider(idx, out);
     }
 
-    /// `map_enter` (then `pose` for everyone sitting there) to the player.
+    /// `map_enter` (everyone there with their whole appearance), the
+    /// player's own appearance, then `pose` for everyone sitting there.
     fn announce_map(&self, idx: usize, via_portal: Option<String>, out: &mut Outgoing) {
         let p = &self.players[idx];
         let others: Vec<&HubPlayer> = self
@@ -1391,18 +1473,13 @@ impl HubInstance {
                 players,
             }),
         ));
+        self.own_appearance(idx, out);
         let sitting = others.iter().filter(|o| o.sitting).map(|o| o.profile.character_id);
         let here = self.residents.map() == p.map;
         let resting = self.residents.iter().filter(|r| here && r.is_sitting()).map(|r| r.id);
         for entity_id in sitting.chain(resting) {
             out.push((p.profile.user_id, HubEvent::Control(ServerMsg::Pose { entity_id, pose: pose::SIT })));
         }
-        // What everyone here (the player too) wears on the head.
-        for o in others.iter().copied().chain(std::iter::once(p)) {
-            out.push((p.profile.user_id, HubEvent::Control(o.headgear_msg())));
-        }
-        // Who rides here (the player too).
-        self.announce_mounts(idx, out);
     }
 
     fn emit_snapshots(&mut self, out: &mut Outgoing) {
@@ -1423,6 +1500,11 @@ impl HubInstance {
             body.clear();
             for p in self.players.iter().filter(|p| p.map == map) {
                 body.push(p.profile.character_id, p.x, p.y, p.facing);
+            }
+            // Homunculi walk in the player rows; rooted companions never
+            // move (their spot is in the COMPANIONS record).
+            for c in self.companions.units().iter().filter(|c| c.map == map && !c.kind.rooted()) {
+                body.push(c.entity(), c.x, c.y, c.facing);
             }
             if town {
                 for r in self.residents.iter() {
@@ -1465,6 +1547,10 @@ impl HubInstance {
                 for r in self.residents.iter().filter(|r| in_sight(r.x - me.x, r.y - me.y, radius)) {
                     body.push(r.id, r.x, r.y, r.facing);
                 }
+            }
+            // Homunculi following their owners around town.
+            for c in self.companions.units().iter().filter(|c| c.map == map && !c.kind.rooted() && in_sight(c.x - me.x, c.y - me.y, radius)) {
+                body.push(c.entity(), c.x, c.y, c.facing);
             }
             out.push((me.profile.user_id, HubEvent::Snapshot(body.frame(me.map_epoch, self.tick, me.last_seq))));
         }
@@ -1600,6 +1686,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use super::*;
     use super::test_support::*;
     use crate::world::map::{CameraConstraint, LocationKind};
@@ -1607,7 +1694,7 @@ mod tests {
     use crate::world::combat::DamageType;
 
     pub(super) fn profile(user_id: u32) -> PlayerProfile {
-        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default() }
+        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default(), homunculus: None }
     }
 
     /// Default simulation without town residents.
@@ -1711,7 +1798,7 @@ mod tests {
         hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         out.clear();
         hub.skill_reset(1, &mut out);
-        assert!(matches!(controls_for(&out, 1).last(), Some(ServerMsg::HubError { code, .. }) if code == "npc_too_far"));
+        assert_matches!(controls_for(&out, 1).last(), Some(ServerMsg::HubError { code, .. }) if code == "npc_too_far");
         // The Kafra stands at (5,1), two cells south of the spawn.
         let mut seq = 0;
         assert!(walk_until(&mut hub, 1, &mut seq, (0.0, -1.0), 40, &mut out, |h| {
@@ -1728,10 +1815,10 @@ mod tests {
         }
         out.clear();
         hub.select_mission(1, "poring_island_survival", true, &mut out);
-        assert!(matches!(&out[..], [(1, HubEvent::MissionChosen { public: true, .. })]), "{out:?}");
+        assert_matches!(&out[..], [(1, HubEvent::MissionChosen { public: true, .. })], "{out:?}");
         out.clear();
         hub.skill_reset(1, &mut out);
-        assert!(matches!(&out[..], [(1, HubEvent::SkillResetApproved)]), "{out:?}");
+        assert_matches!(&out[..], [(1, HubEvent::SkillResetApproved)], "{out:?}");
         out.clear();
         let look = Look { gender: 0, hair: 3, hair_color: 4, body_color: 5 };
         hub.restyle(1, look, &mut out);
@@ -1768,7 +1855,9 @@ mod tests {
         hub.join(profile(3), Uuid::nil(), None, 0, &mut out);
         let msgs = controls_for(&out, 3);
         let enter = msgs.iter().position(|m| matches!(m, ServerMsg::MapEnter { .. })).unwrap();
-        assert_eq!(msgs[enter + 1], ServerMsg::Pose { entity_id: 101, pose: pose::SIT });
+        // (Its own appearance comes first, then the poses.)
+        assert_matches!(msgs[enter + 1], ServerMsg::PlayerAppearance { entity_id: 103, .. });
+        assert_eq!(msgs[enter + 2], ServerMsg::Pose { entity_id: 101, pose: pose::SIT });
         assert_eq!(poses(&out, 3), vec![(101, pose::SIT)]);
 
         // Seated players do not move; moving stands them up first.
@@ -1942,7 +2031,7 @@ mod tests {
         let kept = Look { gender: 1, ..wanted };
         for user in [1, 2] {
             assert!(
-                controls_for(&out, user).iter().any(|m| matches!(m, ServerMsg::PlayerLook { entity_id: 101, look } if *look == kept)),
+                controls_for(&out, user).iter().any(|m| matches!(m, ServerMsg::PlayerAppearance { entity_id: 101, appearance } if appearance.look == kept)),
                 "user {user} sees the new look: {out:?}"
             );
         }
@@ -1951,7 +2040,7 @@ mod tests {
         out.clear();
         hub.join(profile(3), Uuid::nil(), None, 0, &mut out);
         let seen = controls_for(&out, 3).iter().find_map(|m| match m {
-            ServerMsg::MapEnter { players, .. } => players.iter().find(|p| p.entity_id == 101).map(|p| p.look),
+            ServerMsg::MapEnter { players, .. } => players.iter().find(|p| p.entity_id == 101).map(|p| p.appearance.look),
             _ => None,
         });
         assert_eq!(seen, Some(kept));
@@ -1963,11 +2052,11 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(hub.join(profile(1), Uuid::nil(), None, 0, &mut out), JoinOutcome::Joined);
         let msgs = controls_for(&out, 1);
-        assert!(matches!(&msgs[0], ServerMsg::HubJoined { channel: 1, channel_name, entity_id: 101, .. } if channel_name == "Hub-1"));
+        assert_matches!(&msgs[0], ServerMsg::HubJoined { channel: 1, channel_name, entity_id: 101, .. } if channel_name == "Hub-1");
         match &msgs[1] {
             ServerMsg::MapEnter { map, map_epoch: 0, via_portal: None, players, .. } => {
                 assert_eq!(map.id, "town");
-                assert!(matches!(map.camera, CameraConstraint::Free { .. }));
+                assert_matches!(map.camera, CameraConstraint::Free { .. });
                 assert!(players.is_empty());
             }
             other => panic!("expected map_enter, got {other:?}"),
@@ -2106,7 +2195,7 @@ mod tests {
             .filter(|m| matches!(m, ServerMsg::PortalDenied { .. }))
             .collect();
         assert_eq!(denials.len(), 1, "standing in the trigger must not spam: {denials:?}");
-        assert!(matches!(&denials[0], ServerMsg::PortalDenied { target_map, .. } if target_map == "field"));
+        assert_matches!(&denials[0], ServerMsg::PortalDenied { target_map, .. } if target_map == "field");
         assert_eq!(hub.position_of(1).unwrap().0, "town");
     }
 
@@ -2171,8 +2260,8 @@ mod tests {
         let mut out = Vec::new();
         stage.join(profile(1), Uuid::nil(), None, 5, &mut out);
         let msgs = controls_for(&out, 1);
-        assert!(matches!(&msgs[0], ServerMsg::StageJoined { stage_id: 7, mission, entity_id: 101, .. } if mission == "m1"));
-        assert!(matches!(&msgs[1], ServerMsg::MapEnter { map, map_epoch: 5, .. } if map.id == "field"));
+        assert_matches!(&msgs[0], ServerMsg::StageJoined { stage_id: 7, mission, entity_id: 101, .. } if mission == "m1");
+        assert_matches!(&msgs[1], ServerMsg::MapEnter { map, map_epoch: 5, .. } if map.id == "field");
         assert_eq!(stage.name(), "Stage-7");
     }
 
@@ -3692,7 +3781,7 @@ mod tests {
         assert_eq!(fighter(&stage, 1).hp, hp, "not a fresh fighter");
         assert_eq!(stage.position_of(1).map(|(_, x, y)| (x, y)), at);
         let mine = controls_for(&out, 1);
-        assert!(matches!(&mine[0], ServerMsg::StageJoined { entity_id: 101, .. }));
+        assert_matches!(&mine[0], ServerMsg::StageJoined { entity_id: 101, .. });
         assert!(mine.iter().any(|m| matches!(m, ServerMsg::MapEnter { map_epoch: 9, players, .. } if players.len() == 2)));
         assert!(mine.iter().any(|m| matches!(m, ServerMsg::PlayerVitals { entity_id: 101, .. })));
         assert!(controls_for(&out, 2).contains(&ServerMsg::PlayerLink { entity_id: 101, online: true }));

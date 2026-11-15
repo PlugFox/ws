@@ -2,6 +2,7 @@
 name = "ws_bench_native"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.100"
 
 [lib]
 crate-type = ["cdylib"]

@@ -293,7 +293,6 @@ impl RunLog {
     /// Monster slot `s` died (not a plant), credited to `killer` (0 =
     /// nobody); `on_map`: user ids of the players on the stage map (they
     /// share a boss). Assists go to the others who hit it lately.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn kill(
         &mut self,
         s: u16,

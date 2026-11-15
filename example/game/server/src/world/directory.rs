@@ -8,14 +8,15 @@
 
 use super::combat::Loadout;
 use super::hub::{Arrival, HubEvent, HubInstance, HubSimConfig, HubWorld, Outgoing, PlayerProfile};
-use super::protocol::{CastPrefs, ChannelInfo, Look};
+use super::protocol::{CastPrefs, ChannelInfo, CompanionCmd, Look, UsePrefs};
 use super::trade::{Settlement, TradeError, TradeVault};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::mem::DropGuard;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// Per-player outbound queue depth. Snapshots are dropped when it is full;
@@ -57,6 +58,12 @@ pub enum HubCommand {
         arrival: Option<Arrival>,
         epoch: u16,
     },
+    /// A join into a mission already under way (`stage.rs`
+    /// `late_ticket`): beside a party member (`HubInstance::join_late`).
+    JoinLate { profile: PlayerProfile, session_id: Uuid, outbox: mpsc::Sender<HubEvent>, epoch: u16 },
+    /// The connection's cast and auto-use preferences, sent right after a
+    /// join (a player standing still sends no `Input` to carry them).
+    Prefs { user_id: u32, prefs: CastPrefs, uses: UsePrefs },
     Leave { user_id: u32, session_id: Uuid },
     /// The socket owning the slot dropped (stages: the player turns
     /// link-dead, `stage.rs`). `events` is that socket's end of the outbox,
@@ -67,7 +74,7 @@ pub enum HubCommand {
     /// back to the same spot after a short drop.
     Whereabouts { user_id: u32, reply: tokio::sync::oneshot::Sender<Option<Arrival>> },
     /// `prefs`: the connection's manual aiming and auto-cast slots.
-    Input { user_id: u32, seq: u32, dx: f32, dy: f32, aim: [i8; 2], slots: u16, prefs: CastPrefs },
+    Input { user_id: u32, seq: u32, dx: f32, dy: f32, aim: [i8; 2], slots: u16, prefs: CastPrefs, uses: UsePrefs },
     /// Learned skills or hotbar changed (already validated).
     Loadout { user_id: u32, loadout: Loadout },
     Interact { user_id: u32, npc: String },
@@ -82,6 +89,13 @@ pub enum HubCommand {
     SkillReset { user_id: u32 },
     Emote { user_id: u32, emote: u8 },
     Pose { user_id: u32, pose: u8 },
+    /// Nock an arrow (Arrow Change; `QUIVER_NEXT`: the next one).
+    Quiver { user_id: u32, element: u8 },
+    /// A homunculus command (`COMPANION_CMD`; `hub/companion.rs`).
+    Companion { user_id: u32, cmd: CompanionCmd },
+    /// A town skill the socket task checked (learned, `town = true`) and
+    /// does not handle itself (the mount is the loadout's).
+    TownSkill { user_id: u32, town: crate::world::combat::skills::TownUse },
     Flag { user_id: u32, flag: u8, x: f32, y: f32 },
     /// A local chat line (cleaned and rate limited by the socket).
     Chat { user_id: u32, text: String },
@@ -90,6 +104,9 @@ pub enum HubCommand {
     /// One refine attempt at a smith (checked and rolled here, applied by
     /// the socket).
     Refine { user_id: u32, npc: String, item: String, slot: u8 },
+    /// Make a recipe at a recipe giver (`hub::quest`; checked here,
+    /// applied by the socket).
+    Craft { user_id: u32, npc: String, recipe: String },
     /// Drink a potion (stages).
     UseItem { user_id: u32, item: String },
     /// Another player's worn gear (the player context menu).
@@ -159,21 +176,30 @@ pub struct HubDirectory {
     state: Arc<Mutex<DirState>>,
     /// Settles player trades (`None`: trades fail with `trade_unavailable`).
     vault: Option<Arc<dyn TradeVault>>,
+    /// The skill table every channel rides and resets by (riding in town:
+    /// a channel without it would never show a Peco Peco nor dismount one).
+    skills: Arc<crate::world::combat::SkillBook>,
 }
 
 impl HubDirectory {
     /// Creates the directory and spawns the base channels. Must be called
     /// inside a Tokio runtime.
     pub fn new(world: Arc<HubWorld>, config: HubConfig) -> Self {
-        Self::with_vault(world, config, None)
+        Self::with_vault(world, config, None, Arc::default())
     }
 
     /// As [`HubDirectory::new`], with the vault that settles player trades
-    /// (`session::trade::SessionVault`).
-    pub fn with_vault(world: Arc<HubWorld>, config: HubConfig, vault: Option<Arc<dyn TradeVault>>) -> Self {
+    /// (`session::trade::SessionVault`) and the skill table (`skills`:
+    /// what riding needs in town).
+    pub fn with_vault(
+        world: Arc<HubWorld>,
+        config: HubConfig,
+        vault: Option<Arc<dyn TradeVault>>,
+        skills: Arc<crate::world::combat::SkillBook>,
+    ) -> Self {
         assert!(config.base_channels >= 1 && config.base_channels <= config.max_channels);
         assert!(config.capacity >= 1);
-        let dir = Self { world, config, state: Arc::new(Mutex::new(DirState::default())), vault };
+        let dir = Self { world, config, state: Arc::new(Mutex::new(DirState::default())), vault, skills };
         {
             let mut st = dir.state.lock().unwrap();
             for id in 1..=dir.config.base_channels {
@@ -194,8 +220,13 @@ impl HubDirectory {
 
     fn spawn_channel(&self, id: u16) -> Channel {
         let (tx, rx) = mpsc::channel(COMMAND_CAPACITY);
-        let hub = HubInstance::new(id, Arc::clone(&self.world), self.config.sim.clone());
-        tokio::spawn(run_instance_with(hub, rx, self.vault.clone()));
+        let hub = HubInstance::new(id, Arc::clone(&self.world), self.config.sim.clone()).with_skills(Arc::clone(&self.skills));
+        let exit = on_crash(Arc::downgrade(&self.state), id);
+        let vault = self.vault.clone();
+        tokio::spawn(async move {
+            let _exit = exit;
+            run_instance_with(hub, rx, vault).await
+        });
         info!("Hub channel Hub-{id} started");
         Channel { commands: tx, population: 0, empty_since: None }
     }
@@ -362,21 +393,37 @@ impl HubDirectory {
     }
 }
 
+/// Armed for the life of channel `id`'s actor: when the actor panics, the
+/// channel and its members leave the directory, so the next join opens it
+/// again (`join_at` spawns the lowest free id). Without it a crashed base
+/// channel stayed listed with a closed sender, every join failed with
+/// `Unavailable` and the reaper never removes base channels: town was
+/// gone until a restart. A normal exit (the last sender dropped by the
+/// reaper) or a cancelled task (runtime shutdown) leaves the state alone.
+fn on_crash(state: Weak<Mutex<DirState>>, id: u16) -> DropGuard<(), impl FnOnce(())> {
+    DropGuard::new((), move |()| {
+        if !std::thread::panicking() {
+            return;
+        }
+        let Some(state) = state.upgrade() else { return };
+        // Never panic here: a panic while unwinding aborts the process.
+        let mut st = state.lock().unwrap_or_else(PoisonError::into_inner);
+        if st.channels.remove(&id).is_none() {
+            return;
+        }
+        let before = st.members.len();
+        st.members.retain(|_, m| m.channel != id);
+        error!("Hub channel Hub-{id} crashed: closed, {} members dropped; the next join opens it again", before - st.members.len());
+    })
+}
+
 fn reap(state: &Mutex<DirState>, base: u16, grace: Duration, now: Instant) -> Vec<u16> {
     let mut st = state.lock().unwrap();
-    let doomed: Vec<u16> = st
-        .channels
-        .iter()
-        .filter(|(id, ch)| {
-            **id > base
-                && ch.population == 0
-                && ch.empty_since.is_some_and(|t| now.saturating_duration_since(t) >= grace)
-        })
-        .map(|(id, _)| *id)
-        .collect();
+    // Overflow channels only (`base + 1..`). Dropping the last sender ends
+    // the actor loop.
+    let idle = |ch: &mut Channel| ch.population == 0 && ch.empty_since.is_some_and(|t| now.saturating_duration_since(t) >= grace);
+    let doomed: Vec<u16> = st.channels.extract_if(base + 1.., |_, ch| idle(ch)).map(|(id, _)| id).collect();
     for id in &doomed {
-        // Dropping the last sender ends the actor loop.
-        st.channels.remove(id);
         info!("Hub channel Hub-{id} shut down (idle)");
     }
     doomed
@@ -433,6 +480,10 @@ async fn run_loop(
                         // Back from link-dead: what happened meanwhile.
                         out.extend(parked.remove(&user_id).into_iter().flatten().map(|e| (user_id, e)));
                     }
+                    HubCommand::JoinLate { profile, session_id, outbox, epoch } => {
+                        outboxes.insert(profile.user_id, outbox);
+                        hub.join_late(profile, session_id, epoch, &mut out);
+                    }
                     HubCommand::Leave { user_id, session_id } => {
                         if hub.leave(user_id, session_id, &mut out) {
                             outboxes.remove(&user_id);
@@ -452,11 +503,16 @@ async fn run_loop(
                         let spot = hub.position_of(user_id).map(|(map, x, y)| Arrival { map: map.into(), x, y });
                         let _ = reply.send(spot);
                     }
-                    HubCommand::Input { user_id, seq, dx, dy, aim, slots, prefs } => {
+                    HubCommand::Input { user_id, seq, dx, dy, aim, slots, prefs, uses } => {
                         if hub.input(user_id, seq, dx, dy) {
                             hub.act(user_id, aim, slots);
                             hub.cast_prefs(user_id, prefs);
+                            hub.use_prefs(user_id, uses);
                         }
+                    }
+                    HubCommand::Prefs { user_id, prefs, uses } => {
+                        hub.cast_prefs(user_id, prefs);
+                        hub.use_prefs(user_id, uses);
                     }
                     HubCommand::Loadout { user_id, loadout } => hub.set_loadout(user_id, loadout, &mut out),
                     HubCommand::Interact { user_id, npc } => hub.interact(user_id, &npc, &mut out),
@@ -472,10 +528,14 @@ async fn run_loop(
                     HubCommand::SkillReset { user_id } => hub.skill_reset(user_id, &mut out),
                     HubCommand::Emote { user_id, emote } => hub.emote(user_id, emote, &mut out),
                     HubCommand::Pose { user_id, pose } => hub.set_pose(user_id, pose, &mut out),
+                    HubCommand::Quiver { user_id, element } => hub.quiver(user_id, element),
+                    HubCommand::Companion { user_id, cmd } => hub.companion_cmd(user_id, cmd, &mut out),
+                    HubCommand::TownSkill { user_id, town } => hub.town_skill(user_id, town, &mut out),
                     HubCommand::Flag { user_id, flag, x, y } => hub.flag(user_id, flag, x, y, &mut out),
                     HubCommand::Chat { user_id, text } => hub.chat(user_id, text, &mut out),
                     HubCommand::Shop { user_id, npc, order } => hub.shop(user_id, &npc, order, &mut out),
                     HubCommand::Refine { user_id, npc, item, slot } => hub.refine(user_id, &npc, item, slot, &mut out),
+                    HubCommand::Craft { user_id, npc, recipe } => hub.craft(user_id, &npc, &recipe, &mut out),
                     HubCommand::UseItem { user_id, item } => hub.use_item(user_id, &item, &mut out),
                     HubCommand::Bag { user_id, bag } => hub.set_bag(user_id, bag, &mut out),
                     HubCommand::Inspect { user_id, target } => hub.inspect(user_id, target, &mut out),
@@ -564,6 +624,7 @@ fn dispatch(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use super::*;
     use crate::world::protocol::ServerMsg;
 
@@ -572,7 +633,7 @@ mod tests {
     }
 
     fn profile(user_id: u32) -> PlayerProfile {
-        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: crate::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default() }
+        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: crate::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default(), homunculus: None }
     }
 
     fn cfg(capacity: usize) -> HubConfig {
@@ -591,6 +652,62 @@ mod tests {
                 _ => continue,
             }
         }
+    }
+
+    /// Town channels ride by the server's skill table: without it a rider
+    /// was drawn on foot in town and a skill reset there never got anyone
+    /// off the bird (the bug behind "the Peco stays after a reset").
+    #[tokio::test]
+    async fn town_channels_show_riders_and_a_reset_dismounts() {
+        use crate::world::combat::{Loadout, SkillBook};
+        use crate::world::protocol::mount;
+        let book = r#"{"skills":[{"id":"peco_ride","name":"Peco Peco Ride","class":"swordsman","tier":2,"max_level":1,"min_level":30,
+            "target":"self","effects":[{"type":"mount"},{"type":"buff","riding":true,"speed":0.25}]}]}"#;
+        let dir = HubDirectory::with_vault(world(), cfg(4), None, Arc::new(SkillBook::from_json(book).unwrap()));
+        let mut loadout = Loadout { mounted: true, ..Loadout::default() };
+        loadout.skills.insert("peco_ride".into(), 1);
+        let rider = PlayerProfile { archetype: "swordsman".into(), level: 40, loadout, ..profile(1) };
+        let (tx, mut rx) = outbox();
+        let ticket = dir.join(rider, Uuid::nil(), None, tx).unwrap();
+        let own = |m: &ServerMsg| match m {
+            ServerMsg::PlayerAppearance { entity_id: 101, appearance } => Some(appearance.mount),
+            _ => None,
+        };
+        let mut first = None;
+        while first.is_none() {
+            first = own(&next_control(&mut rx).await);
+        }
+        assert_eq!(first, Some(mount::PECO), "riding in town");
+        ticket.commands.send(HubCommand::Loadout { user_id: 1, loadout: Loadout::default() }).await.unwrap();
+        let mut after = None;
+        while after.is_none() {
+            after = own(&next_control(&mut rx).await);
+        }
+        assert_eq!(after, Some(mount::NONE), "the reset gets the rider off");
+    }
+
+    /// A crashed channel actor leaves the directory with its members, and
+    /// the next join opens the channel again (town is never bricked).
+    #[tokio::test]
+    async fn a_crashed_channel_is_dropped_and_reopened_by_the_next_join() {
+        let dir = HubDirectory::new(world(), cfg(4));
+        let (tx, _rx) = outbox();
+        assert_eq!(dir.join(profile(1), Uuid::nil(), None, tx).unwrap().channel, 1);
+        // What the guard of Hub-1's actor does when the actor panics.
+        let exit = on_crash(Arc::downgrade(&dir.state), 1);
+        let crashed = tokio::spawn(async move {
+            let _exit = exit;
+            panic!("an instance bug");
+        });
+        assert!(crashed.await.unwrap_err().is_panic());
+        assert!(dir.channels().is_empty() && dir.channel_of(1).is_none());
+        let (tx, mut rx) = outbox();
+        assert_eq!(dir.join(profile(2), Uuid::nil(), None, tx).unwrap().channel, 1);
+        assert_matches!(next_control(&mut rx).await, ServerMsg::HubJoined { channel: 1, .. });
+        // A normal exit (or a cancelled actor) leaves the directory alone.
+        let exit = on_crash(Arc::downgrade(&dir.state), 1);
+        drop(exit);
+        assert_eq!(dir.channel_of(2), Some(1));
     }
 
     #[tokio::test]
@@ -619,7 +736,7 @@ mod tests {
         let dir = HubDirectory::new(world(), HubConfig { base_channels: 2, ..cfg(1) });
         let (tx, mut rx1) = outbox();
         assert_eq!(dir.join(profile(1), Uuid::nil(), None, tx).unwrap().channel, 1);
-        assert!(matches!(next_control(&mut rx1).await, ServerMsg::HubJoined { channel: 1, .. }));
+        assert_matches!(next_control(&mut rx1).await, ServerMsg::HubJoined { channel: 1, .. });
 
         // Re-joining the full channel you are already in is allowed.
         let (tx, _rx) = outbox();
@@ -627,7 +744,7 @@ mod tests {
 
         let (tx, mut rx2) = outbox();
         assert_eq!(dir.join(profile(1), Uuid::nil(), Some(2), tx).unwrap().channel, 2);
-        assert!(matches!(next_control(&mut rx2).await, ServerMsg::HubJoined { channel: 2, .. }));
+        assert_matches!(next_control(&mut rx2).await, ServerMsg::HubJoined { channel: 2, .. });
         assert_eq!(dir.channel_of(1), Some(2));
         let pops: Vec<_> = dir.channels().iter().map(|c| c.population).collect();
         assert_eq!(pops, vec![0, 1]);
@@ -671,7 +788,7 @@ mod tests {
         let (tx2, rx2) = outbox();
         dir.join(profile(2), Uuid::nil(), None, tx2).unwrap();
 
-        t1.commands.try_send(HubCommand::Input { user_id: 1, seq: 1, dx: 1.0, dy: 0.0, aim: [0, 0], slots: 0, prefs: CastPrefs::default() }).unwrap();
+        t1.commands.try_send(HubCommand::Input { user_id: 1, seq: 1, dx: 1.0, dy: 0.0, aim: [0, 0], slots: 0, prefs: CastPrefs::default(), uses: UsePrefs::default() }).unwrap();
         let snap = loop {
             if let HubEvent::Snapshot(b) = tokio::time::timeout(Duration::from_secs(2), rx1.recv()).await.unwrap().unwrap() {
                 let s = crate::world::protocol::Snapshot::decode(&b).unwrap();

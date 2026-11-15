@@ -124,11 +124,11 @@ extension type GameView._(JSObject _) implements JSObject {
   /// The local player's net seconds inside the fog (0 hides the meter).
   external void setFogExposure(int secs, int deathSecs);
 
-  /// Weapon family a character holds (`sword`, `bow`, ...): its attack sound.
-  external void setWeapon(double entityId, String kind);
-
-  /// Headgear a character wears: item ids, comma separated ('' = none).
-  external void setHeadgear(double entityId, String items);
+  /// A character's whole appearance (`Appearance.toUi` as JSON: gender,
+  /// hair, hairColor, bodyColor, weapon `family:item`, headgear item ids),
+  /// replacing whatever it had: hair and dyes, the weapon layer and swing
+  /// sound, the headgear. Idempotent; '' forgets the character.
+  external void setAppearance(double entityId, String json);
 
   /// A unit's own sound: `attack`, `hit`, `die`, `move`.
   external void unitSound(double entityId, String event);
@@ -139,6 +139,10 @@ extension type GameView._(JSObject _) implements JSObject {
   /// A ranged basic attack flies from one unit to another ([kind]: `arrow`);
   /// a monster's blow from next to its target shows nothing.
   external void projectile(double fromId, double toId, String kind);
+
+  /// The arrow an archer has nocked (Arrow Change: `fire`, `cold`, ...; ''
+  /// the plain one): its skill arrows fly with that element's tip.
+  external void setQuiver(double entityId, String element);
 
   /// The local player's bars as JSON (see the engine); '' hides them.
   external void setStatus(String json);
@@ -157,6 +161,11 @@ extension type GameView._(JSObject _) implements JSObject {
   /// statistics, the player's rewards and loot); '' closes it. Event:
   /// `results_close`.
   external void showResults(String specJson);
+
+  /// The end-of-mission "Return to town" call (`{victory, leaveMs}`): a
+  /// banner over everything counting down until the server sends the party
+  /// home; it cannot be closed. '' takes it down. Event: `return_town`.
+  external void showReturnCall(String specJson);
 
   /// Settings → Account: the account's optional contacts (`AccountSpec`
   /// JSON: `{username, email?, emailVerified?, emailGoogle?, telegram?,
@@ -215,10 +224,18 @@ extension type GameView._(JSObject _) implements JSObject {
   /// the hotbar. Events: `skill_learn`, `skill_slot`, `skill_tree`.
   external void setSkills(String json);
 
+  /// The town skill bar's skill on slot [i] ('' none).
+  external String townSkillAt(int i);
+
   /// A cast starts (telegraphs; `own` also drives the cast bar and
   /// cooldown): `{caster, skill, x, y, castMs, cooldownMs, level, own,
   /// areas: [{id, shape, look, x, y, dir, a, b, spanMs, follow}]}`.
   external void castSkill(String json);
+
+  /// Where the seeking hits of a cast that just landed fall:
+  /// `{caster, skill, radius, strikes: [{x, y, delayMs}]}` (cells, ms from
+  /// now; `radius` of each hit).
+  external void skillStrikes(String json);
 
   /// Lasting ground `id` ended early (a spent ward, a sprung trap).
   external void endZone(int id);
@@ -281,6 +298,12 @@ extension type GameView._(JSObject _) implements JSObject {
   /// `guide_close`, `guide_auto {on}`.
   external void showGuide(String json);
 
+  /// The player's numbers the glossary tips show (`{level, k, proficiency,
+  /// classMod, ac, attackBonus, spellDc, saves: {body, reflex, mind},
+  /// cls}`); '' drops them. "Open in guide" in a term tip sends
+  /// `guide_term {term}`.
+  external void setGlossaryContext(String json);
+
   /// The mission modifier table (server `MODIFIER_DEFS`): `{defs: [{id, bit
   /// (255 = the difficulty slider), name, desc, icon, risk, minLevel,
   /// locked, steps: [{label, detail}]}], rewards: [{zenyPct, expPct,
@@ -307,7 +330,7 @@ extension type GameView._(JSObject _) implements JSObject {
   /// The own belongings: `{zeny, items: [{id, count}], equip: [10 ids], cls,
   /// combat}`; ids are instance keys (`sword+7[card]`, one per stack).
   /// Events: `item_use {item}`, `item_equip {item}`,
-  /// `item_unequip {slot}`, `quick_potion {kind, item}` (orb click).
+  /// `item_unequip {slot}`.
   external void setInventory(String json);
 
   /// A merchant's window `{npc, name, items}`; '' closes it. Events:
@@ -331,6 +354,37 @@ extension type GameView._(JSObject _) implements JSObject {
   /// The answer to a `refine_strike`: `{ok, item, from, to, slip}` or
   /// `{error}`; the window plays the outcome.
   external void refineResult(String json);
+
+  /// The Hatter's recipe window (`RecipesSpec` JSON: `{npc, name, text?,
+  /// recipes: [{id, item, zeny, needs: [{item, count}]}]}`; the engine
+  /// counts the bag); '' closes it. It counts as a dialog. Events:
+  /// `craft {npc, recipe}`, `craft_close`.
+  external void showRecipes(String json);
+
+  /// The answer to a `craft`: `{crafted: item}` or `{error}`.
+  external void recipesResult(String json);
+
+  /// The shared companions pack (`client/companions/`: homunculi, plants,
+  /// the marine sphere, the pushcart), once; until it is in, their
+  /// [spriteIndex] is -1. It joins the current atlas without dropping units.
+  external JSPromise<JSAny?> loadCompanions(String baseUrl);
+
+  /// The engine's own pushcart row trailing [entityId] (a Merchant with
+  /// the Pushcart passive); needs the companions pack.
+  external void setPushcart(double entityId, bool on);
+
+  /// The own homunculus plate (engine `HomunculusSpec` JSON); '' hides it.
+  /// Events: `hom_stance {stance}`, `hom_rest`, `hom_rename {name}`,
+  /// `hom_evolve`.
+  external void setHomunculus(String json);
+
+  /// The homunculus type chooser. Events: `hom_choose {homType}`,
+  /// `hom_choose_close`.
+  /// [change]: the chooser to change the type (`ChangeSpec` JSON).
+  external void showHomunculusChooser(bool open, [String change]);
+
+  /// The hover line under a name plate (`[{text, color}]`); '' removes it.
+  external void setLabelSub(double entityId, String json);
 
   /// Monster cards: the card [id] large in the card viewer; [reveal] flips
   /// it over first (a new card). Events: `card_insert` / `card_remove
@@ -375,7 +429,7 @@ extension type GameView._(JSObject _) implements JSObject {
   /// click (nothing reachable nearer). NaN removes it.
   external void markMove(double x, double y, int kind);
 
-  /// The potion the `hp` / `sp` orb would drink now ('' = none).
+  /// The potion the `hp` / `sp` quick-use key would drink now ('' = none).
   external String quickPotion(String kind);
 
   /// Opens (1), closes (0) or toggles (-1) the skill tree; returns whether it is open.
@@ -468,6 +522,14 @@ extension type GameView._(JSObject _) implements JSObject {
   /// world; '' removes it (so does [resetSession]).
   external void setConnection(String json);
 
+  /// A new build of the game is out (`{required?, text?}` JSON, see
+  /// `update.dart`): `required` is a modal with a Reload button, otherwise
+  /// a small "Update available" button; '' removes it.
+  external void setUpdate(String json);
+
+  /// Asks the service worker for a fresh copy, then reloads the page.
+  external void reloadForUpdate();
+
   /// Players online, beside the minimap (town); 0 hides it.
   external void setOnline(int count);
 
@@ -533,6 +595,18 @@ abstract final class Row {
   /// Burrowed: drawn as a moving mound of earth instead of the sprite
   /// (2048 is the engine's own leap bit).
   static const flagBurrowed = 4096;
+
+  /// Cloaked (a player walking unseen): a see-through shimmer.
+  static const flagCloaked = 8192;
+
+  /// A companion (homunculus, plant, sphere mine): a teal ground ring.
+  static const flagAlly = 16384;
+
+  /// With [flagAlly]: the viewer's own (a brighter ring).
+  static const flagAllyOwn = 32768;
+
+  /// Silenced (no skills): a muted violet tint.
+  static const flagSilenced = 65536;
 }
 
 /// Growable row buffer for `upsertEntities`; reused every frame.

@@ -12,7 +12,7 @@
 
 use super::{redacted, Db, DbConfig};
 use sqlx::migrate::MigrateDatabase;
-use sqlx::{Connection, PgConnection, Postgres};
+use sqlx::{AssertSqlSafe, Connection, PgConnection, Postgres};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::OnceCell;
 
@@ -20,7 +20,7 @@ use tokio::sync::OnceCell;
 pub const DEV_DATABASE_URL: &str = "postgres://mobbed:mobbed@127.0.0.1:55432/mobbed";
 /// Test databases older than this are dropped (a test run takes seconds;
 /// the margin covers a concurrent run elsewhere).
-pub const STALE_AFTER: Duration = Duration::from_secs(15 * 60);
+pub const STALE_AFTER: Duration = Duration::from_mins(15);
 /// E2E databases older than this are dropped.
 pub const E2E_STALE_AFTER: Duration = Duration::from_secs(6 * 3600);
 const PREFIX: &str = "gs_test_";
@@ -78,7 +78,7 @@ async fn sweep(url: &str) {
                 };
                 let born = rest.split('_').next().and_then(|s| s.parse::<u64>().ok());
                 if born.is_some_and(|b| now.saturating_sub(b) > keep.as_secs()) {
-                    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)")).execute(&mut conn).await;
+                    let _ = sqlx::query(AssertSqlSafe(format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))).execute(&mut conn).await;
                 }
             }
             let _ = conn.close().await;

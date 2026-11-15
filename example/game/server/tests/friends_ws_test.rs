@@ -110,7 +110,7 @@ async fn next_where(ws: &mut Ws, what: &str, pred: impl Fn(&ServerMsg) -> bool) 
 /// Connects and joins the hub; returns the socket, the account id and the
 /// first friends list (sent after the first map).
 async fn enter(addr: SocketAddr, token: &str) -> (Ws, u32, Vec<FriendInfo>) {
-    let (mut ws, _) = connect_async(format!("ws://{addr}/api/ws?token={token}")).await.unwrap();
+    let (mut ws, _) = connect_async(format!("ws://{addr}/api/ws?token={token}&build={}", game_server::version::client_build())).await.unwrap();
     let ServerMsg::Connected { user_id, .. } = next_msg(&mut ws).await else { panic!("no connected") };
     send(&mut ws, ClientMsg::HubJoin { channel: None }).await;
     let list = friends(&mut ws).await;

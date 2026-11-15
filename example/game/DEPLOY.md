@@ -138,6 +138,15 @@ in both directions (pages revalidate by content `ETag`, so a page cached
 from the other build is never answered 304; a pack id another server does
 not own is served `no-cache`).
 
+Client and server are one build: both are stamped with the commit
+(`GIT_HASH`; `server/src/version.rs` `client_build`, the client's
+`GAME_BUILD` from `client/tool/build.sh`). The server closes the socket of
+any other client build (close 4010 `update_required:<build>`; a client from
+before the check gets a notification and 4008) without touching the
+player's session; the client reloads itself once, else shows an
+"Update available — Reload" modal. `/api/online` reports the build too, so
+a tab open across a deploy shows a small "Update available" button.
+
 If the newer release added a migration, the older binary refuses to start
 (`_sqlx_migrations` names a version it does not have): restore the dump taken
 before the deploy, then start the older image, or roll forward with a fix.

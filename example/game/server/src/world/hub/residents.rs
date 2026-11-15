@@ -29,7 +29,7 @@ const NAMES: &[&str] = &[
     "Liora", "Merrick", "Nessa", "Osric", "Perrin", "Quilla", "Rowan", "Sabine", "Tobias", "Ulric", "Vesna",
     "Wendel", "Yara", "Elowen", "Bram", "Maren", "Thane", "Ilsa", "Cedric",
 ];
-const ARCHETYPES: &[&str] = &["novice", "swordsman", "mage", "archer", "acolyte", "thief"];
+const ARCHETYPES: &[&str] = &["novice", "swordsman", "mage", "archer", "acolyte", "thief", "merchant"];
 /// Friendly emotes residents play; pets only `!` and the heart.
 const EMOTES: &[u8] = &[0, 1, 2, 3, 15, 17, 18, 27, 33, 46];
 const PET_EMOTES: &[u8] = &[0, 3];
@@ -136,9 +136,13 @@ impl Resident {
             x: self.x,
             y: self.y,
             facing: self.facing,
-            look: self.look,
             level: self.level,
-            weapon: String::new(),
+            appearance: crate::world::protocol::Appearance {
+                class: self.archetype.clone(),
+                tier: crate::world::combat::tier(self.level) as u8,
+                look: self.look,
+                ..Default::default()
+            },
         }
     }
 
@@ -714,6 +718,7 @@ impl HubInstance {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use super::super::test_support::test_world;
     use super::super::{HubEvent, HubInstance, HubSimConfig, InstanceKind};
     use super::*;
@@ -733,12 +738,24 @@ mod tests {
             weapon: String::new(),
             loadout: Default::default(),
             bag: Default::default(),
+            homunculus: None,
         }
     }
 
+    /// A hub whose residents come from a fixed seed. A live hub seeds them
+    /// from `rand::random()`, and on the cramped test town (six NPCs, two
+    /// portals) some seeds miss a free cell within `SPOT_TRIES` and spawn
+    /// fewer residents, which made these tests flaky.
     fn town(residents: u32) -> HubInstance {
-        HubInstance::new(1, Arc::new(test_world()), HubSimConfig { residents, ..Default::default() })
+        let world = Arc::new(test_world());
+        let config = HubSimConfig { residents, ..Default::default() };
+        let mut hub = HubInstance::new(1, Arc::clone(&world), config.clone());
+        hub.residents = Residents::spawn(&world, &config, TOWN_SEED);
+        hub
     }
+
+    /// Spawns every resident of `town(4..=8)` on the test town.
+    const TOWN_SEED: u64 = 2;
 
     /// A 30×20 town with an inner wall, spots on both sides and two pets.
     fn route_world() -> HubWorld {
@@ -796,7 +813,7 @@ mod tests {
         let map = world.map(world.entry());
         for p in &listed {
             assert!(p.entity_id >= RESIDENT_ENTITY_BASE && p.entity_id < RESIDENT_ENTITY_BASE + 5);
-            assert!(p.look.is_valid() && (1..=MAX_LEVEL).contains(&p.level));
+            assert!(p.appearance.look.is_valid() && (1..=MAX_LEVEL).contains(&p.level));
             assert!(ARCHETYPES.contains(&p.archetype.as_str()));
             assert!(free_spot(map, p.x, p.y), "spawned on a free spot: {p:?}");
         }
@@ -821,7 +838,7 @@ mod tests {
     fn stages_have_no_residents() {
         let world = Arc::new(test_world());
         let stage = HubInstance::stage(1, "m1", world, HubSimConfig { residents: 14, ..Default::default() });
-        assert!(matches!(stage.kind(), InstanceKind::Stage { .. }));
+        assert_matches!(stage.kind(), InstanceKind::Stage { .. });
         assert!(stage.residents.is_empty());
     }
 

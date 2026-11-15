@@ -143,9 +143,7 @@ impl Admin {
                     }
                 }
                 let mut slot = admin.inner.countdown.lock().unwrap();
-                if slot.as_ref().is_some_and(|c| c.id == id) {
-                    *slot = None;
-                }
+                slot.take_if(|c| c.id == id);
             })
         };
         let countdown = Countdown { id, minutes, restart_at, pending, task };

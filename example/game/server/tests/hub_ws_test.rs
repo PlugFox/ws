@@ -15,6 +15,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use std::assert_matches;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -107,6 +108,7 @@ async fn start_with(stages: Vec<HubWorld>) -> (SocketAddr, AppState) {
         size: game_server::world::combat::Size::Small,
         spawn_cost: 1,
         unlock_secs: 0.0,
+        retire_secs: f32::INFINITY,
         weight: 100,
         xp: 5,
         boss: false,
@@ -166,8 +168,8 @@ async fn player(addr: SocketAddr, name: &str, select: bool) -> (String, u64) {
 }
 
 async fn connect(addr: SocketAddr, token: &str) -> Ws {
-    let (mut ws, _) = connect_async(format!("ws://{addr}/api/ws?token={token}")).await.unwrap();
-    assert!(matches!(next_msg(&mut ws).await, ServerMsg::Connected { .. }));
+    let (mut ws, _) = connect_async(format!("ws://{addr}/api/ws?token={token}&build={}", game_server::version::client_build())).await.unwrap();
+    assert_matches!(next_msg(&mut ws).await, ServerMsg::Connected { .. });
     ws
 }
 
@@ -274,7 +276,7 @@ async fn hub_flow_join_move_portal_and_peers() {
     assert_eq!(entity_id as u64, char_a);
     let ServerMsg::MapEnter { map, x: x0, .. } = next_msg(&mut a).await else { panic!("then map_enter") };
     assert_eq!(map.id, "town");
-    assert!(matches!(map.camera, CameraConstraint::Free { max_zoom: 40.0, .. }), "{:?}", map.camera);
+    assert_matches!(map.camera, CameraConstraint::Free { max_zoom: 40.0, .. }, "{:?}", map.camera);
 
     // Bob joins: Alice sees him appear, Bob's map_enter lists Alice.
     send(&mut b, ClientMsg::HubJoin { channel: Some(1) }).await;

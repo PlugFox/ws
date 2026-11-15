@@ -2,6 +2,7 @@
 name = "ws_native"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.100"
 description = "Native WebSocket transport for the Dart package ws (FFI)."
 license = "MIT"
 publish = false
@@ -9,6 +10,12 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+
+[lints.clippy]
+# Suppressions are `#[expect(lint, reason = "..")]`: they say why and warn
+# once they are no longer needed.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
 [dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 serde = { version = "1", features = ["derive"] }

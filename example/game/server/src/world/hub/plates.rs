@@ -148,6 +148,7 @@ mod tests {
             weapon: String::new(),
             loadout: Default::default(),
             bag: Default::default(),
+            homunculus: None,
         };
         stage.join(profile, Uuid::nil(), None, 0, &mut Vec::new());
         stage

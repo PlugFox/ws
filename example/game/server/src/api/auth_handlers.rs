@@ -150,19 +150,16 @@ pub struct TokenRefreshResponse {
 }
 
 fn extract_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
-    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = forwarded.split(',').next() {
-            if let Ok(ip) = first.trim().parse::<IpAddr>() {
+    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+        && let Some(first) = forwarded.split(',').next()
+            && let Ok(ip) = first.trim().parse::<IpAddr>() {
                 return Some(ip);
             }
-        }
-    }
 
-    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        if let Ok(ip) = real_ip.trim().parse::<IpAddr>() {
+    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok())
+        && let Ok(ip) = real_ip.trim().parse::<IpAddr>() {
             return Some(ip);
         }
-    }
 
     // Default to loopback if no proxy headers are set
     Some(IpAddr::from([127, 0, 0, 1]))

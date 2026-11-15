@@ -102,12 +102,11 @@ impl SessionRegistry {
 
     /// Removes an active session by user_id if it matches the specified session_id.
     pub fn remove_if_match(&self, user_id: u32, session_id: &Uuid) -> Option<Arc<ActiveSession>> {
-        if let Some(entry) = self.sessions.get(&user_id) {
-            if entry.value().session_id == *session_id {
+        if let Some(entry) = self.sessions.get(&user_id)
+            && entry.value().session_id == *session_id {
                 drop(entry);
                 return self.sessions.remove(&user_id).map(|(_, s)| s);
             }
-        }
         None
     }
 

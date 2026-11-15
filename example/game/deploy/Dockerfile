@@ -13,9 +13,11 @@
 # loads (Dockerfile.dockerignore), and the WebP pass and precompression run
 # on that copy.
 
-ARG RUST_VERSION=1.99.0
-ARG DART_VERSION=3.13.7
-ARG NODE_VERSION=22
+ARG RUST_VERSION=1.100.0
+ARG DART_VERSION=3.14.0
+ARG NODE_VERSION=26
+ARG PYTHON_VERSION=3.14
+ARG UV_VERSION=0.13.4
 
 # --- engine: TypeScript / Three.js runtime -> engine.bundle.js ----------------
 FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-trixie-slim AS engine
@@ -39,8 +41,11 @@ COPY example/game/client example/game/client
 # The build id versions every static URL (server/src/api/static_files.rs):
 # the pack at /assets/v/<id>/, the page's scripts with ?v=<id>.
 ARG BUILD_ID=dev
+# The commit, as the server gets it: the server refuses another build on
+# connect (server/src/version.rs `client_build`).
+ARG GIT_HASH=""
 RUN cd example/game/client \
-    && ASSETS_BASE="/assets/v/${BUILD_ID}" ./tool/build.sh \
+    && GAME_BUILD="${GIT_HASH:-dev}" ASSETS_BASE="/assets/v/${BUILD_ID}" ./tool/build.sh \
     && rm -f build/web/*.deps build/web/*.map \
     && sed -i \
         -e "s#src=\"/assets/engine.bundle.js\"#src=\"/assets/v/${BUILD_ID}/engine.bundle.js\"#" \
@@ -64,16 +69,23 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked --bin game_server \
     && cp target/release/game_server /game_server
 
+# --- uv: the pipeline's Python packages, as locked for local bakes -----------
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
 # --- pack: the asset pack and the client, WebP + precompressed ----------------
-FROM --platform=$BUILDPLATFORM python:3.13-slim-trixie AS pack
+FROM --platform=$BUILDPLATFORM python:${PYTHON_VERSION}-slim-trixie AS pack
 RUN apt-get update \
     && apt-get install -y --no-install-recommends brotli \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir pillow==11.3.0
+    && rm -rf /var/lib/apt/lists/*
+# The same Pillow (and libwebp) as a local bake: pipeline/uv.lock.
+COPY --from=uv /uv /usr/local/bin/uv
+COPY example/assets/pipeline/pyproject.toml example/assets/pipeline/uv.lock /tools/
+ENV UV_PROJECT_ENVIRONMENT=/opt/pipeline UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy
+RUN --mount=type=cache,target=/root/.cache/uv cd /tools && uv sync --frozen
 COPY example/assets/pipeline/webp_pass.py example/game/deploy/precompress.sh /tools/
 # The pack first: its slow passes stay cached while only code changes.
 COPY example/assets/dist /srv/assets
-RUN python3 /tools/webp_pass.py /srv/assets && /tools/precompress.sh /srv/assets
+RUN /opt/pipeline/bin/python /tools/webp_pass.py /srv/assets && /tools/precompress.sh /srv/assets
 COPY --from=engine /src/example/assets/dist/engine.bundle.js /srv/assets/
 COPY --from=client /src/example/game/client/build/web /srv/web
 RUN /tools/precompress.sh /srv/web /srv/assets/engine.bundle.js \

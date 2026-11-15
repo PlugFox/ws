@@ -55,6 +55,7 @@ pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
         "status": if db { "healthy" } else { "unhealthy" },
         "service": "game_server",
         "version": crate::version::version(),
+        "client_build": crate::version::client_build(),
         "uptime_secs": state.started.elapsed().as_secs(),
         "checks": {
             "database": if db { "ok" } else { "error" },
@@ -66,13 +67,17 @@ pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     (status, Json(body))
 }
 
-/// `GET /api/online`: `{"online": n, "server_time": unix ms}`; cheap and
+/// `GET /api/online`: `{"online": n, "server_time": unix ms, "build":
+/// client build}`; cheap and
 /// public (the login screen polls it): shared caches may keep it for the
 /// [`ONLINE_TTL`] the count is cached here anyway.
 pub async fn online(State(state): State<AppState>) -> impl IntoResponse {
     let body = Json(json!({
         "online": online_now(&state),
         "server_time": chrono::Utc::now().timestamp_millis(),
+        // The client build this server takes: an open tab of another one
+        // offers a reload (client `update.dart`).
+        "build": crate::version::client_build(),
     }));
     let cache = format!("public, max-age={}", ONLINE_TTL.as_secs());
     ([(axum::http::header::CACHE_CONTROL, cache)], body)

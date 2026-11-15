@@ -140,7 +140,7 @@ pub fn normalize_telegram(raw: &str) -> Result<Option<String>, Invalid> {
     if let Some(n) = strip(s, &["www.t.me/", "t.me/", "www.telegram.me/", "telegram.me/"]) {
         s = &s[n..];
     }
-    let s = s.strip_prefix('@').unwrap_or(s).trim_end_matches('/');
+    let s = s.trim_prefix('@').trim_end_matches('/');
     if s.is_empty() {
         return Ok(None);
     }

@@ -11,7 +11,8 @@
 //!
 //! * a boss first, when one is unlocked, affordable and none of its kind is
 //!   alive;
-//! * then weighted picks among unlocked kinds it can afford; a pick buys a
+//! * then weighted picks among unlocked kinds not yet retired
+//!   (`MonsterDef::retire_secs`: a mission's act is over) it can afford; a pick buys a
 //!   pack sized by the kind's archetype (swarms come by the dozen, tanks
 //!   alone), trimmed to what is left. An elite (mini-boss) pick goes
 //!   through with chance `1 / (1 + elite_crowd × elites)`, counting the
@@ -28,7 +29,7 @@
 
 use super::catalog::MonsterCatalog;
 use crate::world::combat::Archetype;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use std::collections::VecDeque;
 
 /// Wave settings of a mission (its map's difficulty).
@@ -88,8 +89,9 @@ impl WaveRules {
         levels: (1, 20),
         level_every_secs: 90.0,
         elite_weight: 1.0,
-        opening_waves: 4,
-        opening_boost: 1.5,
+        // A busy first two minutes: the run starts in the thick of it.
+        opening_waves: 6,
+        opening_boost: 1.8,
         elite_crowd: 1.5,
     };
 }
@@ -143,6 +145,9 @@ pub struct Director {
     bank: f32,
     pending: VecDeque<Pack>,
     picks: Vec<(u8, u32)>,
+    /// The fog is up ([`Director::close`]): no more waves, only a missing
+    /// boss is still bought.
+    closed: bool,
 }
 
 impl Director {
@@ -155,7 +160,23 @@ impl Director {
             bank: 0.0,
             pending: VecDeque::with_capacity(256),
             picks: Vec::with_capacity(16),
+            closed: false,
         }
+    }
+
+    /// The run is closing in (the poison fog rose): no more waves, the
+    /// packs not yet released are dropped. Monsters on the field stay; a
+    /// boss whose kind is not on the field is still bought, alone (it is
+    /// the run's objective, not its crowd). The clock keeps running.
+    pub fn close(&mut self, catalog: &MonsterCatalog) {
+        self.closed = true;
+        self.pending.retain(|p| catalog.get(p.kind).boss);
+        self.bank = 0.0;
+    }
+
+    /// Whether [`Director::close`] was called.
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
 
     pub fn rules(&self) -> &WaveRules {
@@ -221,8 +242,8 @@ impl Director {
             self.buy_wave(players, catalog, rng, &boss_alive, crowd);
             self.next_wave += self.rules.wave_period_secs;
         }
-        while self.pending.front().is_some_and(|p| p.release_at <= self.elapsed) {
-            out.push(self.pending.pop_front().unwrap());
+        while let Some(p) = self.pending.pop_front_if(|p| p.release_at <= self.elapsed) {
+            out.push(p);
         }
     }
 
@@ -243,7 +264,7 @@ impl Director {
         // Bosses first: one of each kind at a time.
         for (kind, def) in catalog.defs().iter().enumerate() {
             let kind = kind as u8;
-            if def.boss && self.elapsed >= def.unlock_secs && def.spawn_cost as f32 <= points && !boss_alive(kind) {
+            if def.boss && self.elapsed >= def.unlock_secs && self.elapsed < def.retire_secs && def.spawn_cost as f32 <= points && !boss_alive(kind) {
                 points -= def.spawn_cost as f32;
                 self.pending.push_back(Pack { kind, count: 1, formation: Formation::Scatter, release_at: start });
             }
@@ -251,7 +272,8 @@ impl Director {
         // Elites already bought this wave crowd the next picks too.
         let mut crowd = elite_crowd;
         let mut elites_open = true;
-        loop {
+        // Closed: the bosses above, nothing else.
+        while !self.closed {
             self.picks.clear();
             let mut total = 0u32;
             for (kind, def) in catalog.defs().iter().enumerate() {
@@ -261,6 +283,7 @@ impl Director {
                     && !def.is_plant()
                     && (elites_open || !elite)
                     && self.elapsed >= def.unlock_secs
+                    && self.elapsed < def.retire_secs
                     && def.spawn_cost as f32 <= points
                 {
                     total += if elite {
@@ -274,29 +297,29 @@ impl Director {
             if total == 0 {
                 break;
             }
-            let roll = rng.gen_range(0..total);
+            let roll = rng.random_range(0..total);
             let kind = self.picks.iter().find(|(_, acc)| roll < *acc).unwrap().0;
             let def = catalog.get(kind);
-            if def.archetype == Archetype::Elite && crowd > 1.0 && !rng.gen_bool((1.0 / crowd) as f64) {
+            if def.archetype == Archetype::Elite && crowd > 1.0 && !rng.random_bool((1.0 / crowd) as f64) {
                 elites_open = false;
                 continue;
             }
             let affordable = (points / def.spawn_cost as f32) as u16;
-            let count = rng.gen_range(def.pack.0..=def.pack.1).min(affordable).max(1);
+            let count = rng.random_range(def.pack.0..=def.pack.1).min(affordable).max(1);
             if def.archetype == Archetype::Elite {
                 crowd += self.rules.elite_crowd.max(0.0) * count as f32;
             }
             points -= (count as u32 * def.spawn_cost) as f32;
-            let formation = if def.pack.1 >= 6 && count >= 6 && rng.gen_bool(self.rules.surround_chance as f64) {
+            let formation = if def.pack.1 >= 6 && count >= 6 && rng.random_bool(self.rules.surround_chance as f64) {
                 Formation::Surround
-            } else if count > 1 && rng.gen_bool(self.rules.cluster_chance as f64) {
+            } else if count > 1 && rng.random_bool(self.rules.cluster_chance as f64) {
                 Formation::Cluster
             } else {
                 Formation::Scatter
             };
             self.pending.push_back(Pack { kind, count, formation, release_at: start });
         }
-        self.bank = points.min(budget * self.rules.bank_waves);
+        self.bank = if self.closed { 0.0 } else { points.min(budget * self.rules.bank_waves) };
 
         // Spread this wave's packs over the window (bosses lead).
         let n = self.pending.len() - first;
@@ -308,6 +331,9 @@ impl Director {
     /// Returns the points of `count` members of `kind` that could not be
     /// placed.
     pub fn refund(&mut self, kind: u8, count: u16, catalog: &MonsterCatalog) {
+        if self.closed {
+            return;
+        }
         self.bank += (count as u32 * catalog.get(kind).spawn_cost) as f32;
     }
 }
@@ -423,6 +449,56 @@ mod tests {
         let d = Director::new(WaveRules::NORMAL);
         assert_eq!(d.opening_factor(WaveRules::NORMAL.opening_waves), 1.0, "the boost ends");
         assert!(d.opening_factor(0) > d.opening_factor(1), "and fades");
+    }
+
+    #[test]
+    fn a_closed_director_buys_no_more_waves_but_keeps_the_clock_and_the_boss() {
+        let rules = WaveRules { budget: 200.0, growth: 1.0, ..WaveRules::NORMAL };
+        let c = catalog();
+        let mut d = Director::new(rules);
+        let mut rng = StdRng::seed_from_u64(5);
+        let mut out = Vec::new();
+        // The first wave is bought and half released, then the fog rises.
+        for _ in 0..(20.0 * 4.5) as usize {
+            d.tick(0.05, 1, &c, &mut rng, |_| false, || 0, &mut out);
+        }
+        assert!(!out.is_empty() && !d.pending.is_empty(), "a wave under way");
+        d.close(&c);
+        assert!(d.is_closed());
+        assert!(d.pending.is_empty(), "the rest of the wave is called off");
+        out.clear();
+        let waves = d.waves();
+        let start = d.elapsed();
+        // The boss unlocks at 120 s.
+        for _ in 0..20 * 150 {
+            d.tick(0.05, 1, &c, &mut rng, |_| false, || 0, &mut out);
+        }
+        assert!(d.elapsed() > start + 149.0, "the run clock goes on");
+        assert!(d.waves() > waves, "the schedule still ticks");
+        assert!(out.iter().all(|p| p.kind == 2), "nothing but the boss: {out:?}");
+        assert!(out.iter().any(|p| p.kind == 2), "the missing boss still comes");
+        d.refund(0, 5, &c);
+        assert_eq!(d.bank(), 0.0, "nothing banked for later");
+    }
+
+    #[test]
+    fn a_retired_kind_is_no_longer_bought() {
+        // Two acts: the swarm until 60 s, the tank from 40 s on.
+        let mut swarm = test_def("a_swarm", 2.0, 1, 0.0, false);
+        swarm.retire_secs = 60.0;
+        let mut tank = test_def("b_tank", 2.0, 2, 40.0, false);
+        tank.pack = (1, 2);
+        let c = MonsterCatalog::new(vec![swarm, tank]).unwrap();
+        let rules = WaveRules { budget: 30.0, growth: 1.0, opening_waves: 0, ..WaveRules::NORMAL };
+        let mut d = Director::new(rules.clone());
+        let mut rng = StdRng::seed_from_u64(9);
+        let mut out = Vec::new();
+        for _ in 0..20 * 180 {
+            d.tick(0.05, 1, &c, &mut rng, |_| false, || 0, &mut out);
+        }
+        let last_swarm = out.iter().filter(|p| p.kind == 0).map(|p| p.release_at).fold(0.0, f32::max);
+        assert!(last_swarm > 30.0 && last_swarm < 60.0 + rules.spawn_window_secs, "bought until it retires: {last_swarm}");
+        assert!(out.iter().any(|p| p.kind == 1 && p.release_at > 120.0), "the next act's kind goes on");
     }
 
     #[test]

@@ -29,7 +29,9 @@ impl HubInstance {
     /// A merchant order at `npc` (the shop window's cart, or one item): the
     /// player must stand at it, and every buy must be something it sells.
     /// The socket task applies the order to the bag ([`HubEvent::Shop`]),
-    /// all of it or nothing.
+    /// all of it or nothing, at the prices the player's haggling makes
+    /// (Discount, Overcharge: read here off the loadout, never taken from
+    /// the client).
     pub fn shop(&mut self, user_id: u32, npc: &str, order: ShopOrder, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
         if self.is_trading(user_id) {
@@ -37,14 +39,13 @@ impl HubInstance {
             return;
         }
         let p = &self.players[i];
-        let map = self.world.map(p.map);
-        let event = match map.manifest.npcs.iter().find(|n| n.id == npc && n.kind == SHOP) {
+        let event = match self.npc_here(p.map, npc).filter(|n| n.kind == SHOP) {
             None => HubEvent::Control(hub_error("no_such_npc", format!("no merchant {npc} here"))),
             Some(n) if !self.at_merchant(n, p.x, p.y) => HubEvent::Control(hub_error("npc_too_far", format!("walk closer to {}", n.name))),
             Some(n) => match order.check(items::shop(&n.shop).unwrap_or_default()) {
                 Err(OrderError::NotSoldHere) => HubEvent::Control(hub_error("not_sold_here", format!("{} does not sell that", n.name))),
                 Err(e) => HubEvent::Control(hub_error(e.code(), e.message())),
-                Ok(()) => HubEvent::Shop(order),
+                Ok(()) => HubEvent::Shop(order, self.haggle_of(i)),
             },
         };
         out.push((user_id, event));
@@ -61,7 +62,6 @@ impl HubInstance {
             return;
         }
         let p = &self.players[i];
-        let map = self.world.map(p.map);
         let slot = match slot {
             0xFF => None,
             s => match Slot::from_index(s) {
@@ -69,7 +69,7 @@ impl HubInstance {
                 None => return out.push((user_id, HubEvent::Control(hub_error("bad_message", "no such slot")))),
             },
         };
-        let event = match map.manifest.npcs.iter().find(|n| n.id == npc && n.kind == REFINER) {
+        let event = match self.npc_here(p.map, npc).filter(|n| n.kind == REFINER) {
             None => HubEvent::Control(hub_error("no_such_npc", format!("no smith {npc} here"))),
             Some(n) if !self.at_merchant(n, p.x, p.y) => HubEvent::Control(hub_error("npc_too_far", format!("walk closer to {}", n.name))),
             Some(_) => {
@@ -80,6 +80,12 @@ impl HubInstance {
         out.push((user_id, event));
     }
 
+    /// The shop prices player `i` gets (Discount, Overcharge).
+    pub(super) fn haggle_of(&self, i: usize) -> items::Haggle {
+        let (buy, sell) = self.skills.haggle(&self.players[i].profile.loadout);
+        items::Haggle { buy, sell }
+    }
+
     /// Standing at merchant `n` (anywhere, with the `GAME_DEV` test hooks:
     /// the e2e shop opens without a walk).
     pub(super) fn at_merchant(&self, n: &crate::world::map::NpcDef, x: f32, y: f32) -> bool {
@@ -87,24 +93,14 @@ impl HubInstance {
     }
 
     /// The player's belongings changed (the socket task's copy): the next
-    /// stage starts from them, and a new weapon is shown to the map.
+    /// stage starts from them, and the map sees the new appearance (weapon,
+    /// headgear) if it changed.
     pub fn set_bag(&mut self, user_id: u32, bag: Bag, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
-        let before = self.players[i].weapon_id().to_string();
-        let worn = self.players[i].headgear();
         let p = &mut self.players[i];
         p.profile.weapon = bag.weapon().to_string();
         p.profile.bag = bag;
-        let after = self.players[i].weapon_id().to_string();
-        if after != before {
-            let p = &self.players[i];
-            let msg = ServerMsg::PlayerGear { entity_id: p.profile.character_id, weapon: after };
-            self.broadcast(p.map, &msg, out);
-        }
-        let p = &self.players[i];
-        if p.headgear() != worn {
-            self.broadcast(p.map, &p.headgear_msg(), out);
-        }
+        self.refresh_appearance(i, out);
         self.trade_bag_changed(user_id, out);
     }
 
@@ -120,6 +116,26 @@ impl HubInstance {
         let Some(f) = p.fighter.as_mut() else {
             out.push((user_id, HubEvent::Control(hub_error("not_in_stage", "potions are for missions"))));
             return;
+        };
+        // The quick-use keys: the server picks ([`super::Fighter::best_potion`]).
+        let pool = match item {
+            QUICK_HP => Some(0),
+            QUICK_SP => Some(1),
+            _ => None,
+        };
+        let item = match pool.map(|pool| f.best_potion(pool)) {
+            None => item,
+            Some(Ok(id)) => id,
+            Some(Err(why)) => {
+                let (code, text) = match (why, pool == Some(0)) {
+                    (NoPick::NoneLeft, true) => ("not_in_bag", "No healing potions left."),
+                    (NoPick::NoneLeft, false) => ("not_in_bag", "No SP potions left."),
+                    (NoPick::Full, true) => ("hp_full", "Your HP is full (or a potion is still working)."),
+                    (NoPick::Full, false) => ("sp_full", "Your SP is full (or a potion is still working)."),
+                };
+                out.push((user_id, HubEvent::Control(hub_error(code, text))));
+                return;
+            }
         };
         let (id, effect) = match items::find(item).map(|e| (e.id, e.kind)) {
             Some((id, Kind::Consumable(e))) => (id, e),
@@ -181,6 +197,47 @@ impl HubInstance {
     }
 }
 
+/// `ITEM_USE` of the quick-use keys: the best HP / SP consumable.
+pub const QUICK_HP: &str = "@hp";
+pub const QUICK_SP: &str = "@sp";
+
+/// Why [`super::Fighter::best_potion`] picked nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoPick {
+    /// Nothing of that pool carried (or nothing that beats the running one).
+    NoneLeft,
+    /// The bar is full, or the running potion already covers the rest.
+    Full,
+}
+
+impl HubInstance {
+    /// Auto-use (`USE_PREFS`): a fighter below their HP (then SP) threshold
+    /// drinks the best consumable, through the same checks as a key press
+    /// (off cooldown, up, not held, no Abstinence). Never replaces a running
+    /// regeneration of that pool.
+    pub(super) fn auto_use(&mut self, out: &mut Outgoing) {
+        let tick = self.tick;
+        let mut drinks: Vec<(u32, &'static str)> = Vec::new();
+        for p in &self.players {
+            let (Some(f), uses) = (&p.fighter, p.uses) else { continue };
+            if uses.hp == 0 && uses.sp == 0 {
+                continue;
+            }
+            if !f.is_up() || f.status.held() || tick < f.potion_ready || f.curses.intersects(crate::world::modifiers::ModFlags::NO_POTIONS) {
+                continue;
+            }
+            let low = |cur: i32, max: i32, pct: u8| pct > 0 && max > 0 && i64::from(cur) * 100 < i64::from(max) * i64::from(pct);
+            let want = [low(f.hp, f.max_hp, uses.hp), low(f.sp, f.max_sp, uses.sp)];
+            if let Some(id) = (0..2).filter(|&pool| want[pool] && f.regen[pool].is_none()).find_map(|pool| f.best_potion(pool).ok()) {
+                drinks.push((p.profile.user_id, id));
+            }
+        }
+        for (user_id, id) in drinks {
+            self.use_item(user_id, id, out);
+        }
+    }
+}
+
 /// A potion's regeneration: `left` HP (or SP) over `ticks` more ticks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Regen {
@@ -203,9 +260,14 @@ impl Regen {
         average > self.left || rate(average, ticks) > rate(self.total, self.span) || ticks > self.ticks + self.span / 2
     }
 
-    /// One tick: what it gives now.
+    /// One tick: what it gives now (an even share, rounded up; the rest
+    /// at once when no ticks are left, which the old `ticks.max(1)` form
+    /// got one short).
     fn step(&mut self) -> i32 {
-        let give = (self.left + self.ticks as i32 - 1) / self.ticks.max(1) as i32;
+        let give = match self.ticks {
+            0 => self.left,
+            t => (self.left + t as i32 - 1) / t as i32,
+        };
         self.left -= give;
         self.ticks = self.ticks.saturating_sub(1);
         give
@@ -213,6 +275,67 @@ impl Regen {
 }
 
 impl super::Fighter {
+    /// The consumable a quick-use key (and auto-use) drinks from `pool` (0
+    /// HP, 1 SP), among those carried that would beat the running one.
+    ///
+    /// What is wanted is the missing amount (less what the running potion
+    /// still gives), but at least a quarter of the bar: a drink heals over
+    /// six seconds while the hits keep coming, and only one goes down a
+    /// second, so a fruit at a scratch is a wasted press. The weakest one
+    /// that covers it wins (least waste); if none does, the strongest. Equal
+    /// amounts: a potion before food, then by id.
+    pub(super) fn best_potion(&self, pool: usize) -> Result<&'static str, NoPick> {
+        let (cur, max) = if pool == 0 { (self.hp, self.max_hp) } else { (self.sp, self.max_sp) };
+        let running = self.regen[pool].as_ref().map_or(0, |r| r.left);
+        let scale = 1.0 + self.mods.potion.max(0.0);
+        let food = items::shop("food").unwrap_or_default();
+        let mut owned = false;
+        let mut best: Option<(i32, bool, &'static str)> = None;
+        let missing = max - cur - running;
+        let want = missing.max(max / 4);
+        for (id, n) in &self.potions {
+            if *n == 0 {
+                continue;
+            }
+            let Some(e) = items::find(id) else { continue };
+            let d = match (e.kind, pool) {
+                (Kind::Consumable(Effect::Heal(d)), 0) | (Kind::Consumable(Effect::Spirit(d)), 1) => d,
+                _ => continue,
+            };
+            owned = true;
+            let average = (d.average_x2() + 1) / 2;
+            // Every drink runs the same span: a new one is that long.
+            if let Some(r) = &self.regen[pool]
+                && !r.beaten_by(average, r.span)
+            {
+                continue;
+            }
+            let value = (average as f32 * scale).round() as i32;
+            let is_food = food.contains(&e.id);
+            let better = match best {
+                None => true,
+                Some((bv, bf, bid)) => {
+                    let (covers, best_covers) = (value >= want, bv >= want);
+                    match (covers, best_covers) {
+                        (true, false) => true,
+                        (false, true) => false,
+                        // Both cover: the smaller; neither: the larger.
+                        _ if value != bv => (value < bv) == covers,
+                        _ if is_food != bf => !is_food,
+                        _ => e.id < bid,
+                    }
+                }
+            };
+            if better {
+                best = Some((value, is_food, e.id));
+            }
+        }
+        if missing <= 0 {
+            return Err(if owned { NoPick::Full } else { NoPick::NoneLeft });
+        }
+        best.map(|(_, _, id)| id).ok_or(NoPick::NoneLeft)
+    }
+
     /// One tick of the running potions; once a second (`every` ticks) and
     /// at the end, the HP healed since the last number.
     pub(super) fn potion_tick(&mut self, every: u32) -> Option<i32> {
@@ -250,6 +373,7 @@ impl super::Fighter {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use super::super::test_support::*;
     use super::super::{HubEvent, HubInstance, HubSimConfig, HubWorld, PlayerProfile};
     use crate::world::combat::{self, Bag, Class, Condition};
@@ -258,6 +382,19 @@ mod tests {
     use crate::world::trade::ShopOrder;
     use std::sync::Arc;
     use uuid::Uuid;
+
+    /// A regeneration hands out all it has: in even shares rounded up, and
+    /// whatever is left when no ticks are (never one short).
+    #[test]
+    fn regen_steps_give_everything() {
+        let mut r = super::Regen { item: "red_potion", left: 10, total: 10, ticks: 3, span: 3, shown: 0, started: 0 };
+        let given: Vec<i32> = (0..3).map(|_| r.step()).collect();
+        assert_eq!(given, vec![4, 3, 3]);
+        assert_eq!((r.left, r.ticks), (0, 0));
+        let mut r = super::Regen { left: 7, ticks: 0, ..r };
+        assert_eq!(r.step(), 7);
+        assert_eq!(r.left, 0);
+    }
 
     use super::super::tests::{profile, quiet};
 
@@ -330,7 +467,7 @@ mod tests {
         );
         out.clear();
         hub.refine(1, "smith", "coat".into(), 0xFF, &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Refine { slot: None, .. }]), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Refine { slot: None, .. }], "{out:?}");
     }
 
     #[test]
@@ -344,22 +481,22 @@ mod tests {
         hub.chat(1, "/give zeny 5000".into(), &mut out);
         hub.chat(1, "/give sword+11".into(), &mut out);
         let got = events(&out, 1);
-        assert!(matches!(&got[..], [HubEvent::DevGive { key }, HubEvent::Zeny { amount: 5000 }, HubEvent::Control(ServerMsg::Chat { .. })] if key == "sword+8"), "{got:?}");
+        assert_matches!(&got[..], [HubEvent::DevGive { key }, HubEvent::Zeny { amount: 5000 }, HubEvent::Control(ServerMsg::Chat { .. })] if key == "sword+8", "{got:?}");
         out.clear();
         // One rigged roll, then the dice again.
         hub.chat(1, "/rig 100 3".into(), &mut out);
         assert!(out.is_empty(), "{out:?}");
         hub.refine(1, "smith", "sword+8".into(), 0xFF, &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Refine { roll: 100, slip: 3, .. }]), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Refine { roll: 100, slip: 3, .. }], "{out:?}");
         out.clear();
         hub.refine(1, "smith", "sword+8".into(), 0xFF, &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Refine { .. }]), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Refine { .. }], "{out:?}");
         // Without the test hooks it is only chat.
         let mut plain = HubInstance::new(1, Arc::new(test_world()), quiet());
         plain.join(profile(1), Uuid::nil(), None, 0, &mut out);
         out.clear();
         plain.chat(1, "/rig 100 3".into(), &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::Chat { .. })]), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::Chat { .. })], "{out:?}");
     }
 
     #[test]
@@ -379,18 +516,18 @@ mod tests {
         out.clear();
         let o = order(&[("red_potion", 2)], &[]);
         hub.shop(1, "merchant", o.clone(), &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Shop(got)] if *got == o), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Shop(got, _)] if *got == o, "{out:?}");
         out.clear();
         // Anything can be sold; the board is no merchant.
         hub.shop(1, "merchant", order(&[], &[("sword", 1)]), &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Shop(_)]), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Shop(..)], "{out:?}");
         out.clear();
         hub.shop(1, "board", order(&[], &[("sword", 1)]), &mut out);
         assert!(refused(&out, "no_such_npc"), "{out:?}");
         out.clear();
         // Talking to it opens the goods.
         hub.interact(1, "merchant", &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::Shop { items, .. })] if items.contains(&"red_potion".to_string())), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::Shop { items, .. })] if items.contains(&"red_potion".to_string()), "{out:?}");
     }
 
     #[test]
@@ -403,7 +540,7 @@ mod tests {
         // Several buys and sells at once, one event.
         let cart = order(&[("red_potion", 12), ("blue_potion", 1)], &[("jellopy", 300), ("sword+7", 1)]);
         hub.shop(1, "merchant", cart.clone(), &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Shop(got)] if *got == cart), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Shop(got, _)] if *got == cart, "{out:?}");
         // One line the merchant does not sell refuses the whole cart.
         out.clear();
         hub.shop(1, "merchant", order(&[("red_potion", 12), ("sword", 1)], &[("jellopy", 3)]), &mut out);
@@ -426,10 +563,10 @@ mod tests {
         place(&mut dev, 1, 2.5, 2.5);
         out.clear();
         dev.interact(1, "merchant", &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::Shop { .. })]), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::Shop { .. })], "{out:?}");
         out.clear();
         dev.shop(1, "merchant", order(&[("red_potion", 1)], &[]), &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Shop(_)]), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Shop(..)], "{out:?}");
     }
 
     #[test]
@@ -440,15 +577,20 @@ mod tests {
         hub.join(PlayerProfile { archetype: "swordsman".into(), bag: bag.clone(), ..profile(1) }, Uuid::nil(), None, 0, &mut out);
         assert!(events(&out, 1).iter().any(|e| matches!(e, HubEvent::Control(ServerMsg::MapEnter { .. }))));
         hub.join(profile(2), Uuid::nil(), None, 0, &mut out);
-        // The newcomer sees the sword.
-        assert!(events(&out, 2).iter().any(|e| matches!(e, HubEvent::Control(ServerMsg::MapEnter { players, .. }) if players.iter().any(|p| p.weapon == "sword"))), "{out:?}");
+        // The newcomer sees the sword (family and item, the server's table).
+        assert!(events(&out, 2).iter().any(|e| matches!(e, HubEvent::Control(ServerMsg::MapEnter { players, .. }) if players.iter().any(|p| p.appearance.weapon == "sword:sword"))), "{out:?}");
         out.clear();
         let mut katana = bag.clone();
         katana.zeny = 10_000;
         katana.buy("katana", 1, &["katana"]).unwrap();
         katana.equip(Class::Swordsman, "katana", None).unwrap();
         hub.set_bag(1, katana.clone(), &mut out);
-        assert!(events(&out, 2).iter().any(|e| matches!(e, HubEvent::Control(ServerMsg::PlayerGear { weapon, .. }) if weapon == "katana")), "{out:?}");
+        for to in [1, 2] {
+            assert!(
+                events(&out, to).iter().any(|e| matches!(e, HubEvent::Control(ServerMsg::PlayerAppearance { entity_id: 101, appearance }) if appearance.weapon == "two_hand_sword:katana")),
+                "{to}: {out:?}"
+            );
+        }
         out.clear();
         hub.set_bag(1, katana, &mut out);
         assert!(out.is_empty(), "same weapon: nothing to say");
@@ -465,7 +607,8 @@ mod tests {
         hub.join(PlayerProfile { archetype: "swordsman".into(), bag: bag.clone(), ..profile(1) }, Uuid::nil(), None, 0, &mut out);
         let worn = |out: &[(u32, HubEvent)], to: u32, items: &[&str]| {
             events(out, to).iter().any(|e| {
-                matches!(e, HubEvent::Control(ServerMsg::PlayerHeadgear { entity_id: 101, items: got }) if got.iter().map(String::as_str).eq(items.iter().copied()))
+                matches!(e, HubEvent::Control(ServerMsg::PlayerAppearance { entity_id: 101, appearance: a }) if a.headgear.iter().map(String::as_str).eq(items.iter().copied()))
+                    || matches!(e, HubEvent::Control(ServerMsg::MapEnter { players, .. }) if players.iter().any(|p| p.entity_id == 101 && p.appearance.headgear.iter().map(String::as_str).eq(items.iter().copied())))
             })
         };
         // Its own client learns it on arrival, a newcomer too.
@@ -480,7 +623,7 @@ mod tests {
         assert!(worn(&out, 2, &[]) && worn(&out, 1, &[]), "{out:?}");
         out.clear();
         hub.set_bag(1, bag, &mut out);
-        assert!(!events(&out, 2).iter().any(|e| matches!(e, HubEvent::Control(ServerMsg::PlayerHeadgear { .. }))), "{out:?}");
+        assert!(!events(&out, 2).iter().any(|e| matches!(e, HubEvent::Control(ServerMsg::PlayerAppearance { .. }))), "{out:?}");
     }
 
     #[test]
@@ -511,7 +654,7 @@ mod tests {
         assert!(out.is_empty(), "{out:?}");
         stage.tick += 25;
         stage.use_item(1, "red_potion", &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::HubError { code, .. })] if code == "potion_weaker"), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::HubError { code, .. })] if code == "potion_weaker", "{out:?}");
         assert_eq!(fighter(&mut stage).potions.iter().find(|p| p.0 == "red_potion").unwrap().1, 4);
         out.clear();
         // A Yellow Potion is stronger: it replaces it.
@@ -536,14 +679,14 @@ mod tests {
         out.clear();
         stage.tick += 25;
         stage.use_item(1, "green_potion", &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::HubError { code, .. })] if code == "not_in_bag"), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::HubError { code, .. })] if code == "not_in_bag", "{out:?}");
         out.clear();
         // Not in town.
         let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
         hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
         out.clear();
         hub.use_item(1, "red_potion", &mut out);
-        assert!(matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::HubError { code, .. })] if code == "not_in_stage"), "{out:?}");
+        assert_matches!(&events(&out, 1)[..], [HubEvent::Control(ServerMsg::HubError { code, .. })] if code == "not_in_stage", "{out:?}");
     }
 
     #[test]
@@ -601,5 +744,147 @@ mod tests {
             stage.tick(&mut out);
         }
         assert_eq!(fighter(&mut stage).hp, 0);
+    }
+
+    fn carry(stage: &mut HubInstance, potions: &[(&str, u32)]) {
+        let f = fighter(stage);
+        f.potions = potions.iter().map(|(id, n)| (id.to_string(), *n)).collect();
+        f.regen = [None, None];
+    }
+
+    fn set_hp(stage: &mut HubInstance, hp: i32, max_hp: i32) {
+        let f = fighter(stage);
+        (f.hp, f.max_hp) = (hp, max_hp);
+    }
+
+    #[test]
+    fn the_quick_heal_picks_the_potion_that_covers_the_wound_with_least_waste() {
+        use super::NoPick;
+        let mut stage = stage();
+        let kit = [("apple", 20), ("red_potion", 5), ("yellow_potion", 3), ("white_potion", 2), ("blue_potion", 1)];
+        carry(&mut stage, &kit);
+        // A scratch still drinks something that matters: at least a quarter
+        // of the bar (125 of 500) is wanted, nothing covers it, the
+        // strongest goes — never the apple.
+        set_hp(&mut stage, 495, 500);
+        assert_eq!(fighter(&mut stage).best_potion(0), Ok("white_potion"));
+        // 200 max, 150 missing: the White Potion (90) is the strongest.
+        set_hp(&mut stage, 50, 200);
+        assert_eq!(fighter(&mut stage).best_potion(0), Ok("white_potion"));
+        // 200 max, 50 missing: the Yellow Potion (56) covers it with least waste.
+        set_hp(&mut stage, 150, 200);
+        assert_eq!(fighter(&mut stage).best_potion(0), Ok("yellow_potion"));
+        // A small bar: the Red Potion (14) covers a quarter of 40 and more.
+        set_hp(&mut stage, 30, 40);
+        assert_eq!(fighter(&mut stage).best_potion(0), Ok("red_potion"));
+        // Only food: the fruit it is.
+        carry(&mut stage, &[("apple", 3), ("meat", 1)]);
+        set_hp(&mut stage, 100, 200);
+        assert_eq!(fighter(&mut stage).best_potion(0), Ok("meat"));
+        // Equal amounts (4d4+4 both): by id, deterministic.
+        carry(&mut stage, &[("yellow_herb", 1), ("red_potion", 1)]);
+        set_hp(&mut stage, 30, 40);
+        assert_eq!(fighter(&mut stage).best_potion(0), Ok("red_potion"));
+        // Full, or nothing carried; SP has its own pool.
+        set_hp(&mut stage, 40, 40);
+        assert_eq!(fighter(&mut stage).best_potion(0), Err(NoPick::Full));
+        carry(&mut stage, &[("blue_potion", 1), ("apple", 0)]);
+        set_hp(&mut stage, 10, 40);
+        assert_eq!(fighter(&mut stage).best_potion(0), Err(NoPick::NoneLeft));
+        let f = fighter(&mut stage);
+        (f.sp, f.max_sp) = (0, 100);
+        assert_eq!(f.best_potion(1), Ok("blue_potion"));
+        // A running White Potion: weaker drinks would be refused, so they
+        // are not picked; what it still gives counts as healed.
+        carry(&mut stage, &kit);
+        set_hp(&mut stage, 100, 200);
+        let mut out = Vec::new();
+        stage.use_item(1, "white_potion", &mut out);
+        assert_eq!(fighter(&mut stage).regen[0].unwrap().item, "white_potion");
+        // Half of it left (60 of a 60 roll): only another White Potion beats it.
+        if let Some(r) = fighter(&mut stage).regen[0].as_mut() {
+            (r.left, r.total) = (60, 60);
+        }
+        assert_eq!(fighter(&mut stage).best_potion(0), Ok("white_potion"), "beats a running one with 60 left");
+        if let Some(r) = fighter(&mut stage).regen[0].as_mut() {
+            r.left = 100;
+        }
+        assert_eq!(fighter(&mut stage).best_potion(0), Err(NoPick::Full), "the running one covers the rest");
+    }
+
+    #[test]
+    fn the_quick_use_keys_drink_the_servers_pick() {
+        let mut stage = stage();
+        carry(&mut stage, &[("apple", 20), ("white_potion", 2)]);
+        set_hp(&mut stage, 480, 500);
+        let mut out = Vec::new();
+        stage.use_item(1, super::QUICK_HP, &mut out);
+        assert!(events(&out, 1).iter().any(|e| matches!(e, HubEvent::ItemUsed { item } if item == "white_potion")), "{out:?}");
+        assert_eq!(fighter(&mut stage).potions[0], ("apple".to_string(), 20), "no apple eaten");
+        // Out of SP potions: told so, nothing drunk.
+        out.clear();
+        stage.tick += 25;
+        let f = fighter(&mut stage);
+        (f.sp, f.max_sp) = (0, 100);
+        stage.use_item(1, super::QUICK_SP, &mut out);
+        assert!(refused(&out, "not_in_bag"), "{out:?}");
+        // Full HP: refused, kept.
+        out.clear();
+        carry(&mut stage, &[("white_potion", 1)]);
+        set_hp(&mut stage, 500, 500);
+        stage.use_item(1, super::QUICK_HP, &mut out);
+        assert!(refused(&out, "hp_full"), "{out:?}");
+        assert_eq!(fighter(&mut stage).potions[0].1, 1);
+    }
+
+    #[test]
+    fn auto_use_drinks_below_the_threshold_and_respects_the_cooldown() {
+        use crate::world::protocol::UsePrefs;
+        let mut stage = stage();
+        carry(&mut stage, &[("red_potion", 5), ("blue_potion", 5)]);
+        set_hp(&mut stage, 60, 100);
+        {
+            let f = fighter(&mut stage);
+            (f.sp, f.max_sp) = (10, 100);
+        }
+        let mut out = Vec::new();
+        // Off: nothing.
+        stage.auto_use(&mut out);
+        assert!(out.is_empty());
+        // HP 60% is not below 50%; SP 10% is below 20%.
+        stage.use_prefs(1, UsePrefs { hp: 50, sp: 20 });
+        stage.auto_use(&mut out);
+        assert!(events(&out, 1).iter().any(|e| matches!(e, HubEvent::ItemUsed { item } if item == "blue_potion")), "{out:?}");
+        // HP drops below: the shared potion cooldown holds it back.
+        out.clear();
+        set_hp(&mut stage, 40, 100);
+        stage.auto_use(&mut out);
+        assert!(out.is_empty(), "cooldown: {out:?}");
+        stage.tick += 25;
+        stage.auto_use(&mut out);
+        assert!(events(&out, 1).iter().any(|e| matches!(e, HubEvent::ItemUsed { item } if item == "red_potion")), "{out:?}");
+        // A running regeneration is never replaced; the SP one is still
+        // running, so SP is not topped up again either.
+        out.clear();
+        stage.tick += 25;
+        stage.auto_use(&mut out);
+        assert!(out.is_empty(), "both regenerations still run: {out:?}");
+        // Abstinence and the downed: nothing, and no error spam.
+        carry(&mut stage, &[("red_potion", 5)]);
+        stage.tick += 25;
+        fighter(&mut stage).curses = crate::world::modifiers::ModFlags::NO_POTIONS;
+        stage.auto_use(&mut out);
+        assert!(out.is_empty(), "{out:?}");
+        fighter(&mut stage).curses = crate::world::modifiers::ModFlags::NONE;
+        // Not in town: no fighter, nothing.
+        let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet());
+        hub.join(profile(1), Uuid::nil(), None, 0, &mut out);
+        hub.use_prefs(1, UsePrefs { hp: 90, sp: 90 });
+        out.clear();
+        hub.auto_use(&mut out);
+        assert!(out.is_empty());
+        // Live: a tick of the stage drinks on its own.
+        stage.tick(&mut out);
+        assert!(events(&out, 1).iter().any(|e| matches!(e, HubEvent::ItemUsed { item } if item == "red_potion")), "{out:?}");
     }
 }

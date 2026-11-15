@@ -172,6 +172,10 @@ pub struct AreaFx {
     pub scatter: f32,
     /// Each hit on a different monster, nearest the point first.
     pub spread: bool,
+    /// Each hit seeks the densest knot of monsters within `scatter` of the
+    /// point (no knot left: a random spot, as `scatter`), and no two hits
+    /// pick the same knot while another one is left (Meteor Storm).
+    pub seek: bool,
 }
 
 impl AreaFx {
@@ -199,6 +203,9 @@ pub struct TimingFx {
     pub trigger: f32,
     /// A trap also goes off by itself after this many seconds (0 = never).
     pub fuse: f32,
+    /// Seconds each hit falls from the sky after it is picked: its spot is
+    /// shown (`SKILL_STRIKES`) that long before it lands (meteors).
+    pub fall: f32,
 }
 
 impl TimingFx {
@@ -229,7 +236,27 @@ pub struct DamageFx {
     /// Cells pushed away from the area's origin (along the aim for lines
     /// and rects); negative pulls in.
     pub knockback: Lin,
+    /// An arrow: the damage takes the element of the arrow nocked
+    /// ([`Effect::Quiver`]) when the caster holds a bow.
+    pub arrow: bool,
+    /// Struck from behind (the monster moving away from the caster) or out
+    /// of hiding: the dice count this fraction more (Back Stab).
+    pub flank: Lin,
+    /// Never misses and is never halved (acid eats through): no attack
+    /// roll, no save for half; the save still decides the rider (Acid
+    /// Terror, Acid Demonstration).
+    pub sure: bool,
+    /// Also this fraction of the target's maximum HP, at most
+    /// [`TOUGH_CAP`] × the rolled damage (× 1 on bosses): what is tough
+    /// melts faster (Acid Demonstration).
+    pub tough: Lin,
+    /// The dice count this fraction more per occupied bag stack, at most
+    /// double (the cart's weight: Cart Revolution, Cart Termination).
+    pub cart: Lin,
 }
+
+/// The `tough` bonus is at most this many times the rolled damage (bosses: 1).
+pub const TOUGH_CAP: f32 = 2.0;
 
 /// The condition a failed saving throw leaves, and for how long.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -301,7 +328,37 @@ pub struct BuffFx {
     pub riding: bool,
     /// ... or only with a weapon of this family in hand (Spear Mastery).
     pub weapon: Option<WeaponKind>,
+    /// Percent of melee blows parried, each answered by a riposte (Parry).
+    pub parry: Lin,
+    /// Cells: the next melee blow is caught and everything within this of
+    /// the caster is Stunned for `stun` seconds (Blade Stop).
+    pub catch: Lin,
+    pub stun: Lin,
+    /// Potions and food restore this fraction more (Learning Potion).
+    pub potion: Lin,
+    /// Conditions that do not take hold while it lasts (bits of
+    /// [`Condition::bit`]: Full Chemical Protection).
+    pub immune: u16,
+    /// Weapon dice roll their maximum (Maximize Power) ...
+    pub maximize: bool,
+    /// ... for this much SP a second (a draining toggle ends when the SP
+    /// runs out).
+    pub sp_drain: Lin,
+    /// Passives of the trade, read off the loadout rather than summed into
+    /// the fighter's modifiers: percent off shop prices (Discount) and
+    /// percent more for what is sold (Overcharge), [`SkillBook::haggle`] ...
+    pub buy: Lin,
+    pub sell: Lin,
+    /// ... bag stacks the cart adds (Pushcart, [`SkillBook::cart_stacks`])
+    /// ...
+    pub stacks: Lin,
+    /// ... and the Pharmacy's recipes (the skill level gates them,
+    /// [`SkillBook::pharmacy`]).
+    pub pharmacy: bool,
 }
+
+/// Most a shop price moves either way with Discount or Overcharge (percent).
+pub const MAX_HAGGLE: u8 = 25;
 
 impl BuffFx {
     /// The modifiers at skill level `slv`.
@@ -339,6 +396,13 @@ impl BuffFx {
             cloak: self.cloak,
             ambush: self.ambush,
             amplify: n(self.amplify).max(0.0),
+            parry: i(self.parry).clamp(0, 75) as u32,
+            catch: n(self.catch).max(0.0),
+            catch_secs: n(self.stun).max(0.0),
+            potion: n(self.potion).max(0.0),
+            immune: self.immune,
+            maximize: self.maximize,
+            sp_drain: n(self.sp_drain).max(0.0),
             ..Mods::NONE
         }
     }
@@ -381,6 +445,38 @@ pub enum Payload {
     Cure,
     /// Monster ground inside ends (Ganbantein).
     Dispel,
+    /// Calls out a companion or plants something (`what`: a
+    /// `hub::companion::Summon` id: homunculus, resurrect_homunculus,
+    /// flora, sphere_mine, cultivation). The skill level is the summon's.
+    Summon { what: String },
+    /// Throws one of the caster's own potions at the picked ally (every
+    /// ally inside an area: Slim Potion Pitcher, one potion for all): it
+    /// restores `mult` × as much, over `secs` instead of a drink's six.
+    Pitch { mult: Lin, secs: f32 },
+    /// Monster skills only: the monsters inside (the caster too) are
+    /// spurred on for a while or healed a share of their HP (War Cry,
+    /// Wolf Howl, Shelter).
+    Rally(RallyFx),
+}
+
+/// A monster skill's spur on the monsters around it (`type = "rally"`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RallyFx {
+    /// How long the spur lasts (0: a heal only).
+    pub secs: f32,
+    /// Added to their melee attack rolls.
+    pub to_hit: i32,
+    /// Faster walking, a fraction (0.25 = +25 %).
+    pub speed: f32,
+    /// Less damage taken, a fraction (0.3 = 30 % less).
+    pub resist: f32,
+    /// Healed at once, a fraction of each one's max HP.
+    pub heal: f32,
+    /// Only these monster kinds (ids; empty: every monster but plants and
+    /// objects). Bosses other than the caster are never spurred.
+    pub kinds: Vec<String>,
+    /// Only undead and demons.
+    pub evil: bool,
 }
 
 impl Payload {
@@ -395,7 +491,13 @@ impl Payload {
             Payload::Damage(_) | Payload::Push(_) => 0.5,
             Payload::Condition { .. } => 0.25,
             Payload::Heal(_) | Payload::Buff(_) | Payload::Revive { .. } => 1.0,
-            Payload::Barrier | Payload::Ward { .. } | Payload::Cure | Payload::Dispel => 0.0,
+            Payload::Barrier
+            | Payload::Ward { .. }
+            | Payload::Cure
+            | Payload::Dispel
+            | Payload::Summon { .. }
+            | Payload::Pitch { .. }
+            | Payload::Rally(_) => 0.0,
         }
     }
 }
@@ -408,6 +510,7 @@ pub struct Act {
     pub payload: Payload,
 }
 
+#[expect(clippy::large_enum_variant, reason = "a table built once at load: a passive's numbers inline are cheaper to read every tick than another box")]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Act(Box<Act>),
@@ -420,6 +523,11 @@ pub enum Effect {
     /// character, kept between sessions and toggled with `MOUNT_REQ`
     /// anywhere (town too), never cast.
     Mount,
+    /// Nocks the next arrow of the list (Arrow Change): skill level `slv`
+    /// opens the first `slv + 1`, the first being the plain one. Arrow
+    /// damage ([`DamageFx::arrow`]) and a bow's basic attack take its
+    /// element.
+    Quiver(Vec<DamageType>),
     /// Not cast by the server yet.
     Pending(String),
 }
@@ -463,17 +571,98 @@ pub struct SkillDef {
     pub riding: bool,
     /// ... or only with a weapon of this family in hand (Spear Quicken).
     pub weapon: Option<WeaponKind>,
+    /// Zeny each cast costs from the bag (Mammonite); without it the cast
+    /// is a plain swing (no extra dice, no cart).
+    pub zeny: Lin,
+    /// Items each cast uses up from the bag (Acid Demonstration's bottles):
+    /// with all of them it hits at full power, without at half the dice.
+    pub reagents: Vec<(String, u32)>,
+    /// An auto-cast slot never fires it (it spends items, or it commands a
+    /// companion).
+    pub manual: bool,
+    /// Usable in town (`town = true`): it shows on the town skill bar and
+    /// does its [`TownUse`] there ([`SkillDef::town_use`]).
+    pub town: bool,
+}
+
+/// What a town skill does in a town hub (the town skill bar, `TOWN_SKILL`):
+/// skills are not cast in town, these few act instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TownUse {
+    /// Mount or get off (Peco Peco Ride).
+    Mount,
+    /// Open the brewing window (Pharmacy).
+    Pharmacy,
+    /// Call the homunculus out or send it to rest; the type chooser when it
+    /// has none yet (Call Homunculus).
+    Homunculus,
 }
 
 impl SkillDef {
+    /// What it does in town: `None` unless marked `town = true` and one of
+    /// its effects is a town use.
+    pub fn town_use(&self) -> Option<TownUse> {
+        if !self.town {
+            return None;
+        }
+        self.effects.iter().find_map(|e| match e {
+            Effect::Mount => Some(TownUse::Mount),
+            Effect::Passive(b) if b.pharmacy => Some(TownUse::Pharmacy),
+            Effect::Act(a) if matches!(&a.payload, Payload::Summon { what } if what == "homunculus") => Some(TownUse::Homunculus),
+            _ => None,
+        })
+    }
+
     /// It toggles the mount (Peco Peco Ride).
     pub fn mounts(&self) -> bool {
         self.effects.iter().any(|e| matches!(e, Effect::Mount))
     }
 
+    /// The arrows it nocks in turn (Arrow Change), if it is a quiver.
+    pub fn quiver(&self) -> Option<&[DamageType]> {
+        self.effects.iter().find_map(|e| match e {
+            Effect::Quiver(arrows) => Some(arrows.as_slice()),
+            _ => None,
+        })
+    }
+
+    /// It strikes at monsters (damage, conditions, pushes, a blink behind
+    /// one): what ends a hiding, unlike a buff or a slide.
+    pub fn offensive(&self) -> bool {
+        self.effects.iter().any(|e| match e {
+            Effect::Act(a) => a.payload.hostile(),
+            Effect::Move { mode, .. } => *mode == MoveMode::Behind,
+            _ => false,
+        })
+    }
+
     /// Its riding and weapon requirements hold.
     pub fn usable_with(&self, riding: bool, weapon: WeaponKind) -> bool {
         (riding || !self.riding) && self.weapon.is_none_or(|w| w == weapon)
+    }
+
+    /// Auto-cast leaves it alone: it uses up items (reagents), cycles the
+    /// quiver, or is set so in the table (calling the homunculus).
+    pub fn never_auto(&self) -> bool {
+        self.manual || !self.reagents.is_empty() || self.quiver().is_some()
+    }
+
+    /// The companion or plant it summons, if it is a summon.
+    pub fn summons(&self) -> Option<&str> {
+        self.effects.iter().filter_map(Effect::act).find_map(|a| match &a.payload {
+            Payload::Summon { what } => Some(what.as_str()),
+            _ => None,
+        })
+    }
+
+    /// It throws potions (Potion Pitcher).
+    pub fn pitches(&self) -> bool {
+        self.effects.iter().filter_map(Effect::act).any(|a| matches!(a.payload, Payload::Pitch { .. }))
+    }
+
+    /// Zeny a cast at `slv` costs.
+    pub fn zeny_cost(&self, slv: u8) -> u64 {
+        self.zeny.at(slv).round().max(0.0) as u64
     }
 
     /// Every effect is one the server casts.
@@ -623,6 +812,13 @@ pub struct MonsterSkill {
     pub hp_below: f32,
     /// A ranged ward over the player stops it.
     pub ranged: bool,
+    /// Cast by the corpse: it resolves where the monster died, `cast`
+    /// seconds after the death (the fuse), and never as a wind-up.
+    pub on_death: bool,
+    /// The caster dies as it resolves (a self-destruct).
+    pub sacrifice: bool,
+    /// A hit that makes the caster flinch during the wind-up calls it off.
+    pub interrupt: bool,
     pub effects: Vec<Effect>,
 }
 
@@ -656,6 +852,9 @@ impl SkillBook {
                 requires.push((*i, lvl));
             }
             let effects = s.effects.iter().map(|e| RawEffect::parse(e, s.passive)).collect::<Result<Vec<_>, String>>().map_err(bad)?;
+            if effects.iter().any(|e| matches!(e.act().map(|a| &a.payload), Some(Payload::Rally(_)))) {
+                return Err(bad("rally is a monster skill payload".into()));
+            }
             skills.push(SkillDef {
                 id: s.id.clone(),
                 name: s.name.clone(),
@@ -677,14 +876,22 @@ impl SkillBook {
                 effects,
                 riding: s.riding,
                 weapon: weapon_kind(&s.weapon).map_err(bad)?,
+                zeny: s.zeny,
+                reagents: s.reagents.iter().map(|(k, &n)| (k.clone(), n.max(1))).collect(),
+                manual: s.manual,
+                town: s.town,
             });
         }
         let mut monster = Vec::with_capacity(raw.monster_skills.len());
         for m in &raw.monster_skills {
             let bad = |why: String| SkillBookError::Bad(m.id.clone(), why);
             let effects = m.effects.iter().map(|e| RawEffect::parse(e, false)).collect::<Result<Vec<_>, String>>().map_err(bad)?;
-            if effects.is_empty() || effects.iter().any(|e| matches!(e, Effect::Pending(_) | Effect::Passive(_) | Effect::Mount)) {
+            let foreign = |e: &Effect| matches!(e.act().map(|a| &a.payload), Some(Payload::Summon { .. } | Payload::Pitch { .. }));
+            if effects.is_empty() || effects.iter().any(|e| matches!(e, Effect::Pending(_) | Effect::Passive(_) | Effect::Mount | Effect::Quiver(_)) || foreign(e)) {
                 return Err(bad("a monster skill needs castable effects".into()));
+            }
+            if m.on_death && effects.iter().any(|e| matches!(e, Effect::Move { .. })) {
+                return Err(bad("a corpse cannot move (on_death with a move)".into()));
             }
             monster.push(MonsterSkill {
                 id: m.id.clone(),
@@ -696,6 +903,9 @@ impl SkillBook {
                 chance: m.chance.clamp(1, 100),
                 hp_below: m.hp_below,
                 ranged: m.ranged,
+                on_death: m.on_death,
+                sacrifice: m.sacrifice && !m.on_death,
+                interrupt: m.interrupt,
                 effects,
             });
         }
@@ -816,6 +1026,46 @@ impl SkillBook {
         loadout.mounted && self.skills.iter().any(|s| s.mounts() && loadout.level(&s.id) > 0)
     }
 
+    /// The trade passives of a loadout, summed over the learned skills.
+    fn trade(&self, loadout: &Loadout, f: impl Fn(&BuffFx, u8) -> f32) -> f32 {
+        let mut sum = 0.0;
+        for s in &self.skills {
+            let lvl = loadout.level(&s.id).min(s.max_level);
+            if lvl == 0 {
+                continue;
+            }
+            for e in &s.effects {
+                if let Effect::Passive(b) = e {
+                    sum += f(b, lvl);
+                }
+            }
+        }
+        sum
+    }
+
+    /// Percent off what a merchant sells and percent more for what is sold
+    /// to one (Discount, Overcharge), each at most [`MAX_HAGGLE`].
+    pub fn haggle(&self, loadout: &Loadout) -> (u8, u8) {
+        let pct = |v: f32| v.round().clamp(0.0, MAX_HAGGLE as f32) as u8;
+        (pct(self.trade(loadout, |b, l| b.buy.at(l))), pct(self.trade(loadout, |b, l| b.sell.at(l))))
+    }
+
+    /// Bag stacks the cart adds (Pushcart), at most
+    /// [`super::items::MAX_CART_STACKS`].
+    pub fn cart_stacks(&self, loadout: &Loadout) -> usize {
+        (self.trade(loadout, |b, l| b.stacks.at(l)).round().max(0.0) as usize).min(super::items::MAX_CART_STACKS)
+    }
+
+    /// Level of the learned Pharmacy (0 = none): it gates the recipes.
+    pub fn pharmacy(&self, loadout: &Loadout) -> u8 {
+        self.skills
+            .iter()
+            .filter(|s| s.effects.iter().any(|e| matches!(e, Effect::Passive(b) if b.pharmacy)))
+            .map(|s| loadout.level(&s.id).min(s.max_level))
+            .max()
+            .unwrap_or(0)
+    }
+
     /// The modifiers of the learned passives whose conditions hold (riding
     /// per [`Self::rides`], `weapon` in hand) for a character of `class`.
     pub fn passives(&self, class: Class, loadout: &Loadout, weapon: WeaponKind) -> Mods {
@@ -862,6 +1112,12 @@ struct RawMonsterSkill {
     hp_below: f32,
     #[serde(default)]
     ranged: bool,
+    #[serde(default)]
+    on_death: bool,
+    #[serde(default)]
+    sacrifice: bool,
+    #[serde(default)]
+    interrupt: bool,
     effects: Vec<serde_json::Value>,
 }
 
@@ -911,6 +1167,16 @@ struct RawSkill {
     /// Weapon family it needs in hand (`""` = any).
     #[serde(default)]
     weapon: String,
+    #[serde(default)]
+    zeny: Lin,
+    #[serde(default)]
+    reagents: BTreeMap<String, u32>,
+    /// `auto = false`: never fired by an auto-cast slot.
+    #[serde(default, rename = "auto", deserialize_with = "not")]
+    manual: bool,
+    /// `town = true`: usable in town (the town skill bar).
+    #[serde(default)]
+    town: bool,
     /// Parsed per type: effects the server does not cast yet may use any
     /// fields.
     #[serde(default)]
@@ -919,6 +1185,11 @@ struct RawSkill {
 
 fn one() -> u8 {
     1
+}
+
+/// `auto = false` in the file is `manual = true` here.
+fn not<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(!bool::deserialize(d)?)
 }
 
 /// A weapon family by its wire id (`""`: none asked for).
@@ -958,6 +1229,12 @@ struct RawEffect {
     #[serde(default)]
     ac: Option<Lin>,
     knockback: Option<Lin>,
+    #[serde(default)]
+    arrow: bool,
+    flank: Option<Lin>,
+    /// Quiver: damage type ids, the plain arrow first.
+    #[serde(default)]
+    arrows: Vec<String>,
     distance: Option<Lin>,
     mode: Option<MoveMode>,
     value: Option<Lin>,
@@ -997,6 +1274,9 @@ struct RawEffect {
     venom: Option<Lin>,
     loot: Option<Lin>,
     amplify: Option<Lin>,
+    parry: Option<Lin>,
+    catch: Option<Lin>,
+    stun: Option<Lin>,
     #[serde(default)]
     cloak: bool,
     #[serde(default)]
@@ -1007,6 +1287,31 @@ struct RawEffect {
     riding: bool,
     #[serde(default)]
     weapon: String,
+    potion: Option<Lin>,
+    #[serde(default)]
+    immune: Vec<String>,
+    #[serde(default)]
+    maximize: bool,
+    sp_drain: Option<Lin>,
+    // Trade passives (haggle, cart, pharmacy).
+    buy: Option<Lin>,
+    sell: Option<Lin>,
+    stacks: Option<Lin>,
+    // Damage riders.
+    #[serde(default)]
+    sure: bool,
+    tough: Option<Lin>,
+    cart: Option<Lin>,
+    // Summon and pitch.
+    #[serde(default)]
+    what: String,
+    regen: Option<f32>,
+    // Rally (monster skills).
+    heal: Option<f32>,
+    #[serde(default)]
+    kinds: Vec<String>,
+    #[serde(default)]
+    evil: bool,
     // Area.
     #[serde(default)]
     shape: Shape,
@@ -1027,6 +1332,8 @@ struct RawEffect {
     scatter: f32,
     #[serde(default)]
     spread: bool,
+    #[serde(default)]
+    seek: bool,
     // Timing.
     count: Option<Lin>,
     #[serde(default)]
@@ -1039,6 +1346,8 @@ struct RawEffect {
     trigger: f32,
     #[serde(default)]
     fuse: f32,
+    #[serde(default)]
+    fall: f32,
 }
 
 #[derive(Deserialize)]
@@ -1048,8 +1357,10 @@ struct RawSave {
 }
 
 /// Effect types the server casts.
-const CAST: &[&str] =
-    &["damage", "heal", "condition", "push", "buff", "ward", "barrier", "revive", "move", "sp_regen", "cure", "dispel", "mount"];
+const CAST: &[&str] = &[
+    "damage", "heal", "condition", "push", "buff", "ward", "barrier", "revive", "move", "sp_regen", "cure", "dispel", "mount", "quiver",
+    "summon", "pitch", "haggle", "cart", "pharmacy", "rally",
+];
 
 fn cells(l: Option<Lin>) -> Lin {
     let l = l.unwrap_or_default();
@@ -1122,6 +1433,19 @@ impl RawEffect {
                 toggle: self.toggle,
                 riding: self.riding,
                 weapon: weapon_kind(&self.weapon)?,
+                parry: self.parry.unwrap_or_default(),
+                catch: cells(self.catch),
+                stun: self.stun.unwrap_or(Lin(1.0, 0.0)),
+                potion: self.potion.unwrap_or_default(),
+                immune: self.immune.iter().try_fold(0u16, |bits, c| {
+                    Condition::from_id(c).map(|c| bits | c.bit()).ok_or_else(|| format!("unknown condition {c} in immune"))
+                })?,
+                maximize: self.maximize,
+                sp_drain: self.sp_drain.unwrap_or_default(),
+                buy: self.buy.unwrap_or_default(),
+                sell: self.sell.unwrap_or_default(),
+                stacks: self.stacks.unwrap_or_default(),
+                pharmacy: self.kind == "pharmacy",
             })
         };
         let payload = match self.kind.as_str() {
@@ -1131,7 +1455,21 @@ impl RawEffect {
             // A riding buff is a passive of a mounted rider even on an
             // active skill (Peco Peco Ride's pace).
             "sp_regen" | "buff" if passive || self.riding => return Ok(Effect::Passive(buff()?)),
+            // The trade passives: numbers read off the loadout.
+            "haggle" | "cart" | "pharmacy" if passive => return Ok(Effect::Passive(buff()?)),
+            "haggle" | "cart" | "pharmacy" => return Err(format!("{} belongs on a passive skill", self.kind)),
             "mount" => return Ok(Effect::Mount),
+            "quiver" => {
+                let arrows = self
+                    .arrows
+                    .iter()
+                    .map(|d| DamageType::from_id(d).ok_or_else(|| format!("unknown arrow {d}")))
+                    .collect::<Result<Vec<_>, String>>()?;
+                if arrows.is_empty() {
+                    return Err("a quiver needs arrows".into());
+                }
+                return Ok(Effect::Quiver(arrows));
+            }
             "sp_regen" => return Err("sp_regen is a passive".into()),
             "damage" => Payload::Damage(DamageFx {
                 dice: match self.dice.as_str() {
@@ -1148,6 +1486,11 @@ impl RawEffect {
                 },
                 save,
                 knockback: cells(self.knockback),
+                arrow: self.arrow,
+                flank: self.flank.unwrap_or_default(),
+                sure: self.sure,
+                tough: self.tough.unwrap_or_default(),
+                cart: self.cart.unwrap_or_default(),
             }),
             "heal" => Payload::Heal(HealFx { dice: parse_dice(&self.dice)?, scale_k: self.scale == "k", mult: self.mult.unwrap_or(one) }),
             "condition" => {
@@ -1168,12 +1511,33 @@ impl RawEffect {
             "revive" => Payload::Revive { hp: self.hp.unwrap_or(Lin(0.25, 0.0)) },
             "cure" => Payload::Cure,
             "dispel" => Payload::Dispel,
+            "summon" if self.what.is_empty() => return Err("a summon needs what it summons".into()),
+            "summon" => Payload::Summon { what: self.what.clone() },
+            "pitch" => Payload::Pitch { mult: self.mult.unwrap_or(one), secs: self.regen.unwrap_or(2.0).max(0.1) },
+            "rally" => {
+                let r = RallyFx {
+                    secs: self.secs.unwrap_or_default().at(1).max(0.0),
+                    to_hit: self.to_hit.unwrap_or_default().at(1).round() as i32,
+                    speed: self.speed.unwrap_or_default().at(1),
+                    resist: self.resist.unwrap_or_default().at(1).clamp(-1.0, 0.9),
+                    heal: self.heal.unwrap_or(0.0).clamp(0.0, 1.0),
+                    kinds: self.kinds.clone(),
+                    evil: self.evil,
+                };
+                let spur = r.secs > 0.0 && (r.to_hit != 0 || r.speed != 0.0 || r.resist != 0.0);
+                if !spur && r.heal <= 0.0 {
+                    return Err("a rally needs secs with to_hit / speed / resist, or heal".into());
+                }
+                Payload::Rally(r)
+            }
             other => return Ok(Effect::Pending(other.to_string())),
         };
         // A buff's `secs` is how long it lasts on whoever gets it; only a
         // pulsing buff (an aura) is ground that lasts.
         let ground = match payload {
             Payload::Buff(_) => self.pulse.is_some(),
+            // A rally's secs is the spur's, never ground.
+            Payload::Rally(_) => false,
             _ => true,
         };
         let secs = if ground { self.secs.unwrap_or_default() } else { Lin::default() };
@@ -1203,6 +1567,7 @@ impl RawEffect {
                 jump: if self.jump > 0.0 { self.jump * CELLS } else { 6.0 },
                 scatter: self.scatter * CELLS,
                 spread: self.spread,
+                seek: self.seek,
             },
             timing: TimingFx {
                 count: self.count.unwrap_or(one),
@@ -1212,6 +1577,7 @@ impl RawEffect {
                 pulse: self.pulse.unwrap_or_else(|| payload.default_pulse()),
                 trigger: self.trigger * CELLS,
                 fuse: self.fuse,
+                fall: self.fall.max(0.0),
             },
             payload,
         })))
@@ -1236,6 +1602,7 @@ pub fn parse_dice(s: &str) -> Result<Dice, String> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::assert_matches;
     use super::*;
 
     /// A small neutral table: two basics, a mage line with a prerequisite,
@@ -1363,7 +1730,7 @@ pub(crate) mod tests {
         assert_eq!((ward.area.radius.at(1), &ward.payload), (4.0, &Payload::Ward { hits: Lin(1.0, 1.0), ranged: false }));
         let pneuma = b.find("pneuma").unwrap().1;
         assert!(pneuma.ready());
-        assert!(matches!(pneuma.effects[0].act().unwrap().payload, Payload::Ward { ranged: true, .. }));
+        assert_matches!(pneuma.effects[0].act().unwrap().payload, Payload::Ward { ranged: true, .. });
     }
 
     #[test]
@@ -1381,7 +1748,7 @@ pub(crate) mod tests {
         assert_eq!((h.mods(3).ac, h.mods(3).haste, h.secs.at(1)), (3, 0.5, 10.0));
         let homing = b.find("homing").unwrap().1.effects[0].act().unwrap();
         assert_eq!((homing.area.follow, homing.timing.speed), (Follow::Target, 10.0));
-        assert!(matches!(b.find("mastery").unwrap().1.effects[0], Effect::Passive(BuffFx { .. })));
+        assert_matches!(b.find("mastery").unwrap().1.effects[0], Effect::Passive(BuffFx { .. }));
         assert_eq!(b.find("pull").unwrap().1.effects[0].act().unwrap().payload, Payload::Push(Lin(-4.0, 0.0)));
         assert!(SkillBook::from_json(r#"{"skills":[{"id":"t","name":"T","class":"basic","effects":[{"type":"damage","dice":"1d4","trigger":1}]}]}"#).is_err(), "a trap needs secs");
     }

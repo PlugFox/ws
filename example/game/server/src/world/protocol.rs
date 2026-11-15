@@ -27,7 +27,7 @@
 //! 0x26 NPC_DIALOG      str npc, str name, str kind, var n, n × mission
 //! 0x27 HUB_LEFT        code reason
 //! 0x28 HUB_ERROR       code, str message
-//! 0x29 PLAYER_LOOK     var entity_id, look (a player on the map restyled)
+//! 0x29                 retired (PLAYER_LOOK: now inside PLAYER_APPEARANCE)
 //! 0x2A PLAYER_VITALS   var entity_id, var hp, var max_hp, var sp, var max_sp,
 //!                      u8 state (0 up, 1 downed, 2 dead)
 //! 0x2B COMBAT          var n, n × {var entity_id, u8 facing, var target}
@@ -71,13 +71,14 @@
 //!                      (0xFF none), var price, u8 classes, str description}
 //!                      (the catalogue; once per instance join)
 //! 0x3C SHOP            str npc, str name, var n, n × str item (a merchant
-//!                      the recipient talked to; prices in ITEM_DEFS)
+//!                      the recipient talked to; prices in ITEM_DEFS),
+//!                      u8 buy_pct (off every price: Discount), u8 sell_pct
+//!                      (more for every sale: Overcharge)
 //! 0x3D ITEM_USED       str item, var cooldown_ms (the recipient drank it)
-//! 0x3E PLAYER_GEAR     var entity_id, str weapon (a player on the map
-//!                      changed weapon)
-//! 0x8B PLAYER_HEADGEAR var entity_id, var n, n × str item (the headgear a
-//!                      player on the map wears, any slot; on arrival for
-//!                      everyone there, and after each change)
+//! 0x3E, 0x8B, 0x90     retired (PLAYER_GEAR, PLAYER_HEADGEAR, PLAYER_MOUNT:
+//!                      now inside PLAYER_APPEARANCE)
+//! 0xA6 PLAYER_APPEARANCE var entity_id, appearance (class, tier, look,
+//!                      weapon, headgear, mount): see `protocol/appearance.rs`
 //! 0x3F LOOT            var entity_id (the monster), pos x, pos y, str item
 //!                      (`zeny` = zeny), var count, u8 flags (1 rare)
 //!                      (a kill dropped this for the recipient; already in
@@ -144,6 +145,17 @@
 //! 0x95 CARDED          u8 op, str item, str card (a CARD went through:
 //!                      `item` is the host's key now; the new INVENTORY
 //!                      comes before it)
+//! 0x9D QUIVER         var entity_id, u8 element (the damage type id of a
+//!                      HIT's flags: 0 the plain steel arrow, 1 fire, 2
+//!                      cold, 3 lightning, 4 earth, 6 radiant): the arrow an
+//!                      archer has nocked (Arrow Change), to everyone on the
+//!                      stage when it changes and to a player joining it
+//!                      (non-plain ones only); clients tint those arrows
+//! 0x9E SKILL_STRIKES  var caster (entity id), str skill, pos radius (of
+//!                      each hit), var n, n × {pos x, pos y, var delay_ms}:
+//!                      where each seeking hit of a landed cast falls and
+//!                      when (Meteor Storm), to everyone on the stage as it
+//!                      lands
 //! 0x6A BOSS_CAST, 0x6B BOSS_ZONES, 0x6F BOSS_SHOUT, 0x72 BOSS_BAR
 //!                      scripted elite and boss fights (`hub::boss`): see
 //!                      `protocol/boss.rs` for their bodies
@@ -154,6 +166,13 @@
 //!                      max, rounded up; 0 = gone)}: the bars under the
 //!                      stage's elites and bosses (`hub::plates`), on
 //!                      change and every few seconds, to everyone on the map
+//! 0xA3 COMPANIONS, 0xA4 COMPANION_STATE
+//!                      the Merchant line's homunculus, plants and sphere
+//!                      mines (entity ids from `COMPANION_ENTITY_BASE`,
+//!                      0x600000): see `protocol/companion.rs`
+//! 0x99 QUESTS, 0x9B PARTIES
+//!                      a recipe giver's recipes and a craft's receipt; the
+//!                      Kafra's list of public parties: see `protocol/town.rs`
 //! 0x70 PARTY_INVITE    u8 op: 0 offer (to the invitee): var from (the
 //!                      inviter's entity id), str name, str mission (its
 //!                      name), var ttl_ms (answer within; then it lapses);
@@ -228,6 +247,14 @@
 //!                      (auto-cast slots, bit i = slot i: they only fire at
 //!                      a target that needs them). Kept by the connection,
 //!                      sent again on change
+//! 0x9C QUIVER_REQ     u8 element (as QUIVER; 0xFF = the next one): nock
+//!                      that arrow (Arrow Change learned, the element open
+//!                      at its level; on a stage), answered by QUIVER
+//! 0xA7 USE_PREFS       u8 hp, u8 sp (auto-use: drink the best HP / SP
+//!                      consumable on a mission once HP / SP falls below
+//!                      that percent; 0 = off, at most 95). Kept by the
+//!                      connection like CAST_PREFS, sent again on change
+//! 0xA8 COMPANION_CMD   homunculus commands: see `protocol/companion.rs`
 //! 0x40 PING
 //! 0x41 HUB_JOIN        var channel + 1 (0 = server picks)
 //! 0x42 HUB_LEAVE
@@ -266,7 +293,8 @@
 //!                      answered by CARDED or HUB_ERROR)
 //! 0x56 EQUIP           str item, u8 slot (0xFF = its own slot; town only)
 //! 0x57 UNEQUIP         u8 slot (town only)
-//! 0x58 ITEM_USE        str item (a potion, on a mission)
+//! 0x58 ITEM_USE        str item (a potion, on a mission; `@hp` / `@sp`:
+//!                      the server picks the best one, the quick-use keys)
 //! 0x59 PARTY           u8 op: 0 invite: var entity_id (a player on the
 //!                      map; the leader, or anyone not in a party);
 //!                      1 answer: var from (the inviter), bool accept
@@ -293,6 +321,10 @@
 //!                      `quick_start`: alone at a Kafra it launches a party
 //!                      of one at once; a party leader starts the party's
 //!                      run under the lobby rules)
+//! 0x98 QUEST, 0x9A PARTIES
+//!                      a craft at a recipe giver; the public party list,
+//!                      joining one (a running mission too), the leader's
+//!                      public flag: see `protocol/town.rs`
 //! 0x5F STAGE_RESUME    bool accept (after RESUMABLE, or right after a
 //!                      reconnect from a stage: true re-attaches to the
 //!                      link-dead fighter, false forfeits it; either way
@@ -317,15 +349,24 @@ use uuid::Uuid;
 pub use super::wire::{decode_pos, encode_pos};
 
 mod affixes;
+mod appearance;
 mod boss;
+mod companion;
 mod mission;
 mod modifiers;
 mod results;
+mod town;
 pub use modifiers::{ModifierInfo, ModifierStep, RewardStep};
 pub use affixes::{affix_state, AffixEvent, AffixInfo, MonsterAffix};
+pub use appearance::Appearance;
 pub use boss::{cast_flags, zone_flags, BossBarInfo, BossZone};
+pub use companion::{
+    companion_class, companion_cmd, companion_flags, companion_state, hom_type, stance, CompanionCmd, CompanionInfo, CompanionState,
+    COMPANION_ENTITY_BASE,
+};
 pub use mission::{hazard_ability, phase as env_phase};
 pub use results::{mark, seat_flags, RunBucket, RunMark, RunSeat};
+pub use town::{party_state, ListedMember, PartyListing, RecipeInfo};
 
 pub const SNAPSHOT_KIND: u8 = 0x01;
 pub const INPUT_KIND: u8 = 0x02;
@@ -352,13 +393,14 @@ pub mod kind {
     pub const NPC_DIALOG: u8 = 0x26;
     pub const HUB_LEFT: u8 = 0x27;
     pub const HUB_ERROR: u8 = 0x28;
-    pub const PLAYER_LOOK: u8 = 0x29;
     pub const PLAYER_VITALS: u8 = 0x2A;
     pub const COMBAT: u8 = 0x2B;
     pub const PROGRESS: u8 = 0x2C;
     pub const SKILLS: u8 = 0x2D;
     pub const CAST: u8 = 0x2E;
     pub const ZONE_END: u8 = 0x2F;
+    pub const SKILL_STRIKES: u8 = 0x9E;
+    pub const QUIVER: u8 = 0x9D;
     pub const STAGE_JOINED: u8 = 0x30;
     pub const LOBBY_STATE: u8 = 0x31;
     pub const LOBBY_LEFT: u8 = 0x32;
@@ -373,9 +415,10 @@ pub mod kind {
     pub const ITEM_DEFS: u8 = 0x3B;
     pub const SHOP: u8 = 0x3C;
     pub const ITEM_USED: u8 = 0x3D;
-    pub const PLAYER_GEAR: u8 = 0x3E;
-    pub const PLAYER_HEADGEAR: u8 = 0x8B;
-    pub const PLAYER_MOUNT: u8 = 0x90;
+    /// A player's whole appearance (`protocol/appearance.rs`); replaces
+    /// 0x29 PLAYER_LOOK, 0x3E PLAYER_GEAR, 0x8B PLAYER_HEADGEAR and 0x90
+    /// PLAYER_MOUNT (retired: never reuse them).
+    pub const PLAYER_APPEARANCE: u8 = 0xA6;
     pub const LOOT: u8 = 0x3F;
     pub const COMBO: u8 = 0x60;
     pub const REVIVE: u8 = 0x61;
@@ -410,6 +453,12 @@ pub mod kind {
     pub const AFFIX_EVENT: u8 = 0xA1;
     pub const AFFIX_DEFS: u8 = 0xA2;
     pub const MONSTER_HP: u8 = 0xA5;
+    /// Merchant-line companions (`protocol/companion.rs`).
+    pub const COMPANIONS: u8 = 0xA3;
+    pub const COMPANION_STATE: u8 = 0xA4;
+    /// Town services (`protocol/town.rs`): recipes, parties.
+    pub const QUESTS: u8 = 0x99;
+    pub const PARTIES: u8 = 0x9B;
 
     pub const PING: u8 = 0x40;
     pub const HUB_JOIN: u8 = 0x41;
@@ -432,6 +481,9 @@ pub mod kind {
     pub const EMOTE_REQ: u8 = 0x51;
     pub const POSE_REQ: u8 = 0x52;
     pub const MOUNT_REQ: u8 = 0x91;
+    /// A town skill from the town skill bar (`ClientMsg::TownSkill`).
+    pub const TOWN_SKILL: u8 = 0xA9;
+    pub const QUIVER_REQ: u8 = 0x9C;
     pub const FLAG_REQ: u8 = 0x53;
     pub const SHOP_BUY: u8 = 0x54;
     pub const SHOP_SELL: u8 = 0x55;
@@ -451,13 +503,21 @@ pub mod kind {
     pub const LOBBY_MODIFIERS: u8 = 0x77;
     pub const MISSION_START: u8 = 0x63;
     pub const CAST_PREFS: u8 = 0x85;
+    pub const USE_PREFS: u8 = 0xA7;
+    /// The owner's homunculus commands (`protocol/companion.rs`).
+    pub const COMPANION_CMD: u8 = 0xA8;
+    /// Town services (`protocol/town.rs`): a craft, the party list.
+    pub const QUEST_REQ: u8 = 0x98;
+    pub const PARTIES_REQ: u8 = 0x9A;
 }
 
 /// Highest valid emote id.
 pub const MAX_EMOTE: u8 = 127;
+/// `QUIVER_REQ`: the next arrow open instead of a given one.
+pub const QUIVER_NEXT: u8 = 0xFF;
 /// Highest valid flag (ping marker) id.
 pub const MAX_FLAG: u8 = 9;
-/// [`ServerMsg::PlayerMount`] values.
+/// [`Appearance::mount`] values.
 pub mod mount {
     pub const NONE: u8 = 0;
     /// A Peco Peco (Grand Peco): the Crusader's and Paladin's bird.
@@ -594,11 +654,11 @@ pub struct PlayerInfo {
     pub x: f32,
     pub y: f32,
     pub facing: u8,
-    pub look: Look,
-    /// Character level (the client draws the body of its tier).
+    /// Character level (the player menu; the body's tier is in
+    /// `appearance`).
     pub level: u32,
-    /// Held weapon id (`combat::weapon`), for its sprite and sounds.
-    pub weapon: String,
+    /// How the character is drawn, whole (`protocol/appearance.rs`).
+    pub appearance: Appearance,
 }
 
 impl PlayerInfo {
@@ -609,9 +669,8 @@ impl PlayerInfo {
         b.put_pos(self.x);
         b.put_pos(self.y);
         b.put_u8(self.facing);
-        self.look.put(b);
         b.put_var(self.level.into());
-        b.put_str(&self.weapon);
+        self.appearance.put(b);
     }
 
     fn read(r: &mut Reader<'_>) -> Option<Self> {
@@ -622,9 +681,8 @@ impl PlayerInfo {
             x: r.pos()?,
             y: r.pos()?,
             facing: r.u8()?,
-            look: Look::read(r)?,
             level: r.var32()?,
-            weapon: r.str()?,
+            appearance: Appearance::read(r)?,
         })
     }
 }
@@ -1018,8 +1076,9 @@ pub enum ServerMsg {
     },
     HubLeft { reason: String },
     HubError { code: String, message: String },
-    /// A player on the recipient's map (possibly the recipient) restyled.
-    PlayerLook { entity_id: u32, look: Look },
+    /// How a player on the recipient's map (possibly the recipient) looks
+    /// now, whole: after MAP_ENTER for the recipient, then on any change.
+    PlayerAppearance { entity_id: u32, appearance: Appearance },
     /// Health and spell points of a player on the recipient's map (stages);
     /// sent on join and whenever they change.
     /// `status`: condition bits (as on monsters); `light`: extra light
@@ -1040,6 +1099,9 @@ pub enum ServerMsg {
     Cast { caster: u32, skill: String, x: f32, y: f32, cast_ms: u32, cooldown_ms: u32, areas: Vec<Telegraph>, level: u8 },
     /// Ground `id` (a ward, a trap) ended before its time.
     ZoneEnd { id: u32 },
+    /// Where the seeking hits of a cast that just landed fall: `(x, y,
+    /// delay_ms)` each, in cells and from now (meteors on the densest knots).
+    SkillStrikes { caster: u32, skill: String, radius: f32, strikes: Vec<(f32, f32, u32)> },
     /// The mission is over for the recipient's map: the result screen, and
     /// everyone leaves through the exit after `leave_ms`.
     StageEnd { victory: bool, secs: u32, kills: u32, exp: u64, leave_ms: u32 },
@@ -1061,8 +1123,9 @@ pub enum ServerMsg {
         /// sent) only within it. 0 when the stage has no monsters.
         light_radius: f32,
     },
-    /// The recipient is in a lobby; sent on every change.
-    LobbyState { lobby: LobbyInfo },
+    /// The recipient is in a lobby; sent on every change. Boxed: the
+    /// largest variant by far, every other message would carry its size.
+    LobbyState { lobby: Box<LobbyInfo> },
     /// The recipient is no longer in a party: `left`, `kicked`, `expired`
     /// (offline too long). A party outlives its missions, so `launched`
     /// is no longer sent.
@@ -1076,11 +1139,9 @@ pub enum ServerMsg {
     Emote { entity_id: u32, emote: u8 },
     /// An entity on the recipient's map sat down (1) or stood up (0).
     Pose { entity_id: u32, pose: u8 },
-    /// A player on the recipient's map rides `mount` ([`mount`]; `NONE`:
-    /// got off), `speed` percent faster in town (and from the mount in a
-    /// stage: what the rider's own client predicts with). Sent on arrival
-    /// for everyone riding there, the recipient included, then on changes.
-    PlayerMount { entity_id: u32, mount: u8, speed: u8 },
+    /// The arrow an archer on the stage has nocked: a damage type id
+    /// (0 = the plain arrow; Arrow Change).
+    Quiver { entity_id: u32, element: u8 },
     /// A player on the recipient's map pinged a spot.
     Flag { entity_id: u32, flag: u8, x: f32, y: f32 },
     /// The recipient's belongings: zeny, bag stacks and the ten equipment
@@ -1088,8 +1149,11 @@ pub enum ServerMsg {
     Inventory { zeny: u64, items: Vec<(String, u32)>, equip: Vec<String>, stats: String },
     /// The item catalogue (on join).
     ItemDefs { items: Vec<ItemDef> },
-    /// A merchant's goods (answer to `npc_interact` at a `shop` NPC).
-    Shop { npc: String, name: String, items: Vec<String> },
+    /// A merchant's goods (answer to `npc_interact` at a `shop` NPC), and
+    /// the recipient's haggling: `buy_pct` off every price (Discount),
+    /// `sell_pct` more for every sale (Overcharge); the server charges
+    /// these, the client only shows them.
+    Shop { npc: String, name: String, items: Vec<String>, buy_pct: u8, sell_pct: u8 },
     /// The recipient's merchant order went through.
     ShopDone { spent: u64, earned: u64 },
     /// The recipient's refine attempt: `item` is the key it has now.
@@ -1100,11 +1164,6 @@ pub enum ServerMsg {
     Carded { op: u8, item: String, card: String },
     /// The recipient drank `item`; the next potion waits `cooldown_ms`.
     ItemUsed { item: String, cooldown_ms: u32 },
-    /// A player on the recipient's map now holds `weapon`.
-    PlayerGear { entity_id: u32, weapon: String },
-    /// A player on the recipient's map wears `items` on the head (item
-    /// ids, '' slots left out).
-    PlayerHeadgear { entity_id: u32, items: Vec<String> },
     /// The monster `entity_id` (at `x`, `y`) dropped `count` of `item`
     /// (`zeny`: zeny) for the recipient; `rare` drops get a toast.
     Loot { entity_id: u32, x: f32, y: f32, item: String, count: u32, rare: bool },
@@ -1205,6 +1264,17 @@ pub enum ServerMsg {
     AffixEvents { events: Vec<AffixEvent> },
     /// The affix table (`combat::affixes::defs_msg`) and the reward per star.
     AffixDefs { defs: Vec<AffixInfo>, ranks: Vec<String>, exp_pct: u32, drop_pct: u32, extra_pct: u32, hp_pct: u32 },
+    /// A recipe giver's recipes (`protocol/town.rs`).
+    Recipes { npc: String, name: String, recipes: Vec<RecipeInfo> },
+    /// A craft went through (after the new `inventory`).
+    Crafted { recipe: String, item: String },
+    /// The Kafra's list of public parties.
+    Parties { parties: Vec<PartyListing> },
+    /// Companions on the map: the whole list on map enter, then changed
+    /// records (`protocol/companion.rs`).
+    Companions { list: Vec<CompanionInfo> },
+    /// The owner's homunculus panel.
+    CompanionState(CompanionState),
 }
 
 /// The client blinks a pickup bonus over this last stretch of its life.
@@ -1223,6 +1293,8 @@ impl ServerMsg {
             m @ (ServerMsg::RunStats { .. } | ServerMsg::RunRewards { .. }) => results::encode(m, &mut b),
             m @ (ServerMsg::MonsterAffixes { .. } | ServerMsg::AffixEvents { .. } | ServerMsg::AffixDefs { .. }) => affixes::encode(m, &mut b),
             m @ (ServerMsg::MissionList { .. } | ServerMsg::EnvLight { .. } | ServerMsg::EnvEvent { .. } | ServerMsg::EnvShake { .. }) => mission::encode(m, &mut b),
+            m @ (ServerMsg::Recipes { .. } | ServerMsg::Crafted { .. } | ServerMsg::Parties { .. }) => town::encode(m, &mut b),
+            m @ (ServerMsg::Companions { .. } | ServerMsg::CompanionState(_)) => companion::encode(m, &mut b),
             ServerMsg::Connected { user_id, session_id, server_version } => {
                 b.put_u8(kind::CONNECTED);
                 b.put_var((*user_id).into());
@@ -1298,10 +1370,10 @@ impl ServerMsg {
                 b.put_code(code);
                 b.put_str(message);
             }
-            ServerMsg::PlayerLook { entity_id, look } => {
-                b.put_u8(kind::PLAYER_LOOK);
+            ServerMsg::PlayerAppearance { entity_id, appearance } => {
+                b.put_u8(kind::PLAYER_APPEARANCE);
                 b.put_var((*entity_id).into());
-                look.put(&mut b);
+                appearance.put(&mut b);
             }
             ServerMsg::PlayerVitals { entity_id, hp, max_hp, sp, max_sp, state, status, temp_hp, light, level } => {
                 b.put_u8(kind::PLAYER_VITALS);
@@ -1391,6 +1463,17 @@ impl ServerMsg {
                 b.put_u8(kind::ZONE_END);
                 b.put_var((*id).into());
             }
+            ServerMsg::SkillStrikes { caster, skill, radius, strikes } => {
+                b.put_u8(kind::SKILL_STRIKES);
+                b.put_var((*caster).into());
+                b.put_str(skill);
+                b.put_pos(*radius);
+                put_list(&mut b, strikes, |b, (x, y, ms)| {
+                    b.put_pos(*x);
+                    b.put_pos(*y);
+                    b.put_var((*ms).into());
+                });
+            }
             ServerMsg::StageJoined { stage_id, mission, tick_rate, entity_id, monsters, light_radius } => {
                 b.put_u8(kind::STAGE_JOINED);
                 b.put_var((*stage_id).into());
@@ -1435,11 +1518,10 @@ impl ServerMsg {
                 b.put_var((*entity_id).into());
                 b.put_u8(*pose);
             }
-            ServerMsg::PlayerMount { entity_id, mount, speed } => {
-                b.put_u8(kind::PLAYER_MOUNT);
+            ServerMsg::Quiver { entity_id, element } => {
+                b.put_u8(kind::QUIVER);
                 b.put_var((*entity_id).into());
-                b.put_u8(*mount);
-                b.put_u8(*speed);
+                b.put_u8(*element);
             }
             ServerMsg::PlayerLink { entity_id, online } => {
                 b.put_u8(kind::PLAYER_LINK);
@@ -1482,11 +1564,13 @@ impl ServerMsg {
                 b.put_u8(kind::ITEM_DEFS);
                 put_list(&mut b, items, |b, d| d.put(b));
             }
-            ServerMsg::Shop { npc, name, items } => {
+            ServerMsg::Shop { npc, name, items, buy_pct, sell_pct } => {
                 b.put_u8(kind::SHOP);
                 b.put_str(npc);
                 b.put_str(name);
                 put_list(&mut b, items, |b, i| b.put_str(i));
+                b.put_u8(*buy_pct);
+                b.put_u8(*sell_pct);
             }
             ServerMsg::ShopDone { spent, earned } => {
                 b.put_u8(kind::SHOP_DONE);
@@ -1510,16 +1594,6 @@ impl ServerMsg {
                 b.put_u8(kind::ITEM_USED);
                 b.put_str(item);
                 b.put_var((*cooldown_ms).into());
-            }
-            ServerMsg::PlayerGear { entity_id, weapon } => {
-                b.put_u8(kind::PLAYER_GEAR);
-                b.put_var((*entity_id).into());
-                b.put_str(weapon);
-            }
-            ServerMsg::PlayerHeadgear { entity_id, items } => {
-                b.put_u8(kind::PLAYER_HEADGEAR);
-                b.put_var((*entity_id).into());
-                put_list(&mut b, items, |b, i| b.put_str(i));
             }
             ServerMsg::PartyInvite { from, name, mission, ttl_ms } => {
                 b.put_u8(kind::PARTY_INVITE);
@@ -1679,6 +1753,8 @@ impl ServerMsg {
             kind::RUN_STATS | kind::RUN_REWARDS => results::decode(k, &mut r)?,
             kind::MONSTER_AFFIXES | kind::AFFIX_EVENT | kind::AFFIX_DEFS => affixes::decode(k, &mut r)?,
             kind::MISSION_LIST | kind::ENVIRONMENT => mission::decode(k, &mut r)?,
+            kind::QUESTS | kind::PARTIES => town::decode(k, &mut r)?,
+            kind::COMPANIONS | kind::COMPANION_STATE => companion::decode(k, &mut r)?,
             kind::CONNECTED => ServerMsg::Connected {
                 user_id: r.var32()?,
                 session_id: Uuid::from_slice(r.bytes(16)?).ok()?,
@@ -1722,7 +1798,7 @@ impl ServerMsg {
             },
             kind::HUB_LEFT => ServerMsg::HubLeft { reason: r.code()? },
             kind::HUB_ERROR => ServerMsg::HubError { code: r.code()?, message: r.str()? },
-            kind::PLAYER_LOOK => ServerMsg::PlayerLook { entity_id: r.var32()?, look: Look::read(&mut r)? },
+            kind::PLAYER_APPEARANCE => ServerMsg::PlayerAppearance { entity_id: r.var32()?, appearance: Appearance::read(&mut r)? },
             kind::PLAYER_VITALS => ServerMsg::PlayerVitals {
                 entity_id: r.var32()?,
                 hp: r.var32()?,
@@ -1770,6 +1846,12 @@ impl ServerMsg {
                 level: r.u8()?,
             },
             kind::ZONE_END => ServerMsg::ZoneEnd { id: r.var32()? },
+            kind::SKILL_STRIKES => ServerMsg::SkillStrikes {
+                caster: r.var32()?,
+                skill: r.str()?,
+                radius: r.pos()?,
+                strikes: read_list(&mut r, |r| Some((r.pos()?, r.pos()?, r.var32()?)))?,
+            },
             kind::STAGE_END => ServerMsg::StageEnd {
                 victory: r.bool()?,
                 secs: r.var32()?,
@@ -1788,7 +1870,7 @@ impl ServerMsg {
                 light_radius: r.f32()?,
             },
             kind::LOBBY_STATE => ServerMsg::LobbyState {
-                lobby: LobbyInfo {
+                lobby: Box::new(LobbyInfo {
                     lobby_id: r.var32()?,
                     code: r.str()?,
                     mission: read_mission(&mut r)?,
@@ -1806,13 +1888,13 @@ impl ServerMsg {
                             offline_secs: r.var32()?,
                         })
                     })?,
-                },
+                }),
             },
             kind::LOBBY_LEFT => ServerMsg::LobbyLeft { reason: r.code()? },
             kind::LOBBY_ERROR => ServerMsg::LobbyError { code: r.code()?, message: r.str()? },
             kind::EMOTE => ServerMsg::Emote { entity_id: r.var32()?, emote: r.u8()? },
             kind::POSE => ServerMsg::Pose { entity_id: r.var32()?, pose: r.u8()? },
-            kind::PLAYER_MOUNT => ServerMsg::PlayerMount { entity_id: r.var32()?, mount: r.u8()?, speed: r.u8()? },
+            kind::QUIVER => ServerMsg::Quiver { entity_id: r.var32()?, element: r.u8()? },
             kind::PLAYER_LINK => ServerMsg::PlayerLink { entity_id: r.var32()?, online: r.bool()? },
             kind::MONSTER_HP => ServerMsg::MonsterHp { bars: read_list(&mut r, |r| Some((r.var32()?, r.u8()?)))? },
             kind::RESUMABLE => ServerMsg::Resumable { stage_id: r.var32()?, mission: r.str()?, left_ms: r.var32()? },
@@ -1824,13 +1906,11 @@ impl ServerMsg {
                 stats: r.str()?,
             },
             kind::ITEM_DEFS => ServerMsg::ItemDefs { items: read_list(&mut r, ItemDef::read)? },
-            kind::SHOP => ServerMsg::Shop { npc: r.str()?, name: r.str()?, items: read_list(&mut r, |r| r.str())? },
+            kind::SHOP => ServerMsg::Shop { npc: r.str()?, name: r.str()?, items: read_list(&mut r, |r| r.str())?, buy_pct: r.u8()?, sell_pct: r.u8()? },
             kind::SHOP_DONE => ServerMsg::ShopDone { spent: r.var()?, earned: r.var()? },
             kind::REFINED => ServerMsg::Refined { item: r.str()?, ok: r.u8()? != 0, refine: r.u8()?, slip: r.u8()? },
             kind::CARDED => ServerMsg::Carded { op: r.u8()?, item: r.str()?, card: r.str()? },
             kind::ITEM_USED => ServerMsg::ItemUsed { item: r.str()?, cooldown_ms: r.var32()? },
-            kind::PLAYER_GEAR => ServerMsg::PlayerGear { entity_id: r.var32()?, weapon: r.str()? },
-            kind::PLAYER_HEADGEAR => ServerMsg::PlayerHeadgear { entity_id: r.var32()?, items: read_list(&mut r, |r| r.str())? },
             kind::PARTY_INVITE => match r.u8()? {
                 0 => ServerMsg::PartyInvite { from: r.var32()?, name: r.str()?, mission: r.str()?, ttl_ms: r.var32()? },
                 1 => ServerMsg::PartyAnswer { entity_id: r.var32()?, name: r.str()?, accepted: r.bool()? },
@@ -1911,6 +1991,20 @@ pub struct CastPrefs {
     pub auto: u16,
 }
 
+/// Auto-use of consumables (`USE_PREFS`): the percent of HP and SP below
+/// which the server drinks the best one on a mission; 0 = off. The
+/// connection keeps it and hands it to the instance with every input.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UsePrefs {
+    pub hp: u8,
+    pub sp: u8,
+}
+
+impl UsePrefs {
+    /// Highest threshold (a full bar never triggers anyway).
+    pub const MAX: u8 = 95;
+}
+
 /// Client → server messages.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ClientMsg {
@@ -1927,6 +2021,8 @@ pub enum ClientMsg {
     Input { seq: u32, dx: f32, dy: f32, aim: [i8; 2], slots: u16 },
     /// Manual aiming and the auto-cast slots.
     CastPrefs(CastPrefs),
+    /// Auto-use thresholds of HP / SP consumables.
+    UsePrefs(UsePrefs),
     /// Talk to an NPC on the current map; must be within its radius.
     NpcInteract { npc: String },
     /// Pick a mission at a Kafra employee or mission board the player is
@@ -1966,8 +2062,15 @@ pub enum ClientMsg {
     /// Sit down (1, hubs only) or stand up (0).
     Pose { pose: u8 },
     /// Mount (true) or get off the Peco Peco: needs a learned mount skill
-    /// (Peco Peco Ride), anywhere; answered with `player_mount`.
+    /// (Peco Peco Ride), anywhere; answered with `player_appearance`.
     Mount { on: bool },
+    /// Use learned skill `skill` in town (the town skill bar; `town = true`
+    /// in skills.toml): it mounts, opens the Pharmacy, calls the homunculus
+    /// (`SkillDef::town_use`). Anything else, or on a stage: `hub_error`.
+    TownSkill { skill: String },
+    /// Nock the arrow of damage type id `element` (`QUIVER_NEXT`: the next
+    /// one open; Arrow Change); answered with `quiver`.
+    Quiver { element: u8 },
     /// Ping a spot near the player with marker `flag` (`0..=MAX_FLAG`).
     Flag { flag: u8, x: f32, y: f32 },
     /// Buy `count` of `item` from the merchant `npc` (standing at it).
@@ -2006,6 +2109,16 @@ pub enum ClientMsg {
     /// Back into the stage the character is link-dead in (`accept`), or
     /// forfeit it; then the town.
     StageResume { accept: bool },
+    /// Make `recipe` at the recipe giver `npc` (`protocol/town.rs`).
+    Craft { npc: String, recipe: String },
+    /// The Kafra's list of public parties.
+    PartyList,
+    /// Join a public party (or go to the own party's running mission).
+    PartyJoin { lobby_id: u32 },
+    /// The leader lists (`true`) or hides the party.
+    PartyPublic { public: bool },
+    /// A homunculus command (`protocol/companion.rs`).
+    CompanionCmd(CompanionCmd),
 }
 
 /// Why a client frame was rejected.
@@ -2021,6 +2134,8 @@ impl ClientMsg {
     pub fn encode(&self) -> Bytes {
         let mut b = BytesMut::with_capacity(16);
         match self {
+            m @ (ClientMsg::Craft { .. } | ClientMsg::PartyList | ClientMsg::PartyJoin { .. } | ClientMsg::PartyPublic { .. }) => town::encode_client(m, &mut b),
+            m @ ClientMsg::CompanionCmd(_) => companion::encode_client(m, &mut b),
             ClientMsg::Ping => b.put_u8(kind::PING),
             ClientMsg::HubJoin { channel } => {
                 b.put_u8(kind::HUB_JOIN);
@@ -2041,6 +2156,11 @@ impl ClientMsg {
                 b.put_u8(kind::CAST_PREFS);
                 b.put_u8(u8::from(p.manual_aim));
                 b.put_u16_le(p.auto);
+            }
+            ClientMsg::UsePrefs(p) => {
+                b.put_u8(kind::USE_PREFS);
+                b.put_u8(p.hp);
+                b.put_u8(p.sp);
             }
             ClientMsg::NpcInteract { npc } => {
                 b.put_u8(kind::NPC_INTERACT);
@@ -2103,6 +2223,14 @@ impl ClientMsg {
             ClientMsg::Mount { on } => {
                 b.put_u8(kind::MOUNT_REQ);
                 b.put_bool(*on);
+            }
+            ClientMsg::TownSkill { skill } => {
+                b.put_u8(kind::TOWN_SKILL);
+                b.put_str(skill);
+            }
+            ClientMsg::Quiver { element } => {
+                b.put_u8(kind::QUIVER_REQ);
+                b.put_u8(*element);
             }
             ClientMsg::Flag { flag, x, y } => {
                 b.put_u8(kind::FLAG_REQ);
@@ -2208,6 +2336,7 @@ impl ClientMsg {
                     ClientMsg::Input { seq, dx, dy, aim, slots }
                 }
                 kind::CAST_PREFS => ClientMsg::CastPrefs(CastPrefs { manual_aim: r.u8()? & 1 != 0, auto: r.u16()? }),
+                kind::USE_PREFS => ClientMsg::UsePrefs(UsePrefs { hp: r.u8()?.min(UsePrefs::MAX), sp: r.u8()?.min(UsePrefs::MAX) }),
                 kind::NPC_INTERACT => ClientMsg::NpcInteract { npc: r.str()? },
                 kind::MISSION_SELECT => ClientMsg::MissionSelect { mission: r.str()?, public: r.bool()? },
                 kind::LOBBY_JOIN => ClientMsg::LobbyJoin { code: r.str()? },
@@ -2226,6 +2355,8 @@ impl ClientMsg {
                 kind::EMOTE_REQ => ClientMsg::Emote { emote: r.u8()? },
                 kind::POSE_REQ => ClientMsg::Pose { pose: r.u8()? },
                 kind::MOUNT_REQ => ClientMsg::Mount { on: r.bool()? },
+                kind::TOWN_SKILL => ClientMsg::TownSkill { skill: r.str()? },
+                kind::QUIVER_REQ => ClientMsg::Quiver { element: r.u8()? },
                 kind::FLAG_REQ => ClientMsg::Flag { flag: r.u8()?, x: r.pos()?, y: r.pos()? },
                 kind::SHOP_BUY => ClientMsg::ShopBuy { npc: r.str()?, item: r.str()?, count: r.var32()? },
                 kind::SHOP_SELL => ClientMsg::ShopSell { npc: r.str()?, item: r.str()?, count: r.var32()? },
@@ -2254,11 +2385,13 @@ impl ClientMsg {
                         user_agent: r.str()?,
                     },
                 },
+                kind::QUEST_REQ | kind::PARTIES_REQ => town::decode_client(k, r)?,
+                kind::COMPANION_CMD => companion::decode_client(r)?,
                 _ => return None,
             })
         };
         // The retired ready flag (`LOBBY_READY`) is unknown now: ignored.
-        let known = k != kind::LOBBY_READY && matches!(k, INPUT_KIND | kind::PING..=kind::ITEM_USE | kind::CHAT_REQ | kind::PARTY_REQ | kind::INSPECT_REQ | kind::FRIEND_REQ | kind::TRADE_REQ | kind::FEEDBACK_REQ | kind::STAGE_RESUME | kind::LOBBY_MODIFIERS | kind::MISSION_START | kind::CAST_PREFS | kind::SHOP_DEAL | kind::REFINE | kind::CARD | kind::MOUNT_REQ);
+        let known = k != kind::LOBBY_READY && matches!(k, INPUT_KIND | kind::PING..=kind::ITEM_USE | kind::CHAT_REQ | kind::PARTY_REQ | kind::INSPECT_REQ | kind::FRIEND_REQ | kind::TRADE_REQ | kind::FEEDBACK_REQ | kind::STAGE_RESUME | kind::LOBBY_MODIFIERS | kind::MISSION_START | kind::CAST_PREFS | kind::SHOP_DEAL | kind::REFINE | kind::CARD | kind::MOUNT_REQ | kind::USE_PREFS | kind::QUIVER_REQ | kind::QUEST_REQ | kind::PARTIES_REQ | kind::COMPANION_CMD | kind::TOWN_SKILL);
         if !known {
             return Err(Unknown);
         }
@@ -2419,6 +2552,8 @@ mod tests {
             ClientMsg::Input { seq: 7, dx: 1.0, dy: -0.5, aim: [-12, 100], slots: 0b10_0000_0101 },
             ClientMsg::CastPrefs(CastPrefs { manual_aim: true, auto: 0b1001 }),
             ClientMsg::CastPrefs(CastPrefs::default()),
+            ClientMsg::UsePrefs(UsePrefs { hp: 40, sp: 0 }),
+            ClientMsg::ItemUse { item: "@hp".into() },
             ClientMsg::SkillLearn { skill: "bolt".into() },
             ClientMsg::SkillReset,
             ClientMsg::SkillSlot { slot: 4, skill: "slide".into() },
@@ -2436,6 +2571,7 @@ mod tests {
             ClientMsg::Emote { emote: 127 },
             ClientMsg::Pose { pose: 1 },
             ClientMsg::Mount { on: true },
+            ClientMsg::Quiver { element: 4 },
             ClientMsg::Flag { flag: 9, x: 120.5, y: 33.25 },
             ClientMsg::ShopBuy { npc: "tool".into(), item: "red_potion".into(), count: 12 },
             ClientMsg::ShopSell { npc: "tool".into(), item: "jellopy".into(), count: 300 },
@@ -2486,7 +2622,9 @@ mod tests {
     #[test]
     fn server_messages_round_trip() {
         let mission = missions::MISSIONS[0].clone();
-        let player = PlayerInfo { entity_id: 5, name: "Ann".into(), archetype: "novice".into(), x: 10.5, y: 3.25, facing: 2, look: Look { gender: 1, hair: 7, hair_color: 3, body_color: 5 }, level: 31, weapon: "katana".into() };
+        let player = PlayerInfo { entity_id: 5, name: "Ann".into(), archetype: "novice".into(), x: 10.5, y: 3.25, facing: 2, level: 31, appearance: Appearance { class: "novice".into(), tier: 2, look: Look { gender: 1, hair: 7, hair_color: 3, body_color: 5 }, weapon: "two_hand_sword:katana".into(), headgear: vec!["hat".into()], mount: mount::NONE, speed: 0, cart: 0 } };
+        let rider = Appearance { class: "swordsman".into(), tier: 3, weapon: "spear:pike".into(), mount: mount::PECO, speed: 25, ..Appearance::default() };
+        let worn = player.appearance.clone();
         let all = vec![
             ServerMsg::Connected { user_id: 9, session_id: Uuid::from_u128(0x1234), server_version: String::new() },
             ServerMsg::Connected { user_id: 9, session_id: Uuid::from_u128(0x1234), server_version: "0.1.0+abc".into() },
@@ -2535,7 +2673,8 @@ mod tests {
             ServerMsg::NpcDialog { npc: "board".into(), name: "Board".into(), kind: "mission_board".into(), missions: vec![mission.clone()] },
             ServerMsg::HubLeft { reason: "evicted".into() },
             ServerMsg::HubError { code: "bad_message".into(), message: "nope".into() },
-            ServerMsg::PlayerLook { entity_id: 5, look: Look { gender: 0, hair: 3, hair_color: 9, body_color: 2 } },
+            ServerMsg::PlayerAppearance { entity_id: 5, appearance: worn },
+            ServerMsg::PlayerAppearance { entity_id: 5, appearance: rider.clone() },
             ServerMsg::PlayerVitals { entity_id: 5, hp: 40, max_hp: 122, sp: 0, max_sp: 131, state: 1, status: 640, temp_hp: 3, light: 4, level: 31 },
             ServerMsg::StageEnd { victory: true, secs: 421, kills: 1234, exp: 98765, leave_ms: 10000 },
             ServerMsg::Boss { entity_id: 0x800005, name: "Baphomet".into(), hp: 2000, max_hp: 2790 },
@@ -2558,6 +2697,7 @@ mod tests {
             },
             ServerMsg::Cast { caster: 300, skill: String::new(), x: 0.0, y: 0.0, cast_ms: 0, cooldown_ms: 0, areas: vec![], level: 0 },
             ServerMsg::ZoneEnd { id: 9 },
+            ServerMsg::SkillStrikes { caster: 300, skill: "meteor_storm".into(), radius: 3.5, strikes: vec![(10.5, 3.25, 600), (12.0, 4.5, 850)] },
             ServerMsg::StageJoined {
                 stage_id: 4,
                 mission: mission.id.into(),
@@ -2567,7 +2707,7 @@ mod tests {
                 light_radius: 40.0,
             },
             ServerMsg::LobbyState {
-                lobby: LobbyInfo {
+                lobby: Box::new(LobbyInfo {
                     lobby_id: 2,
                     code: "AB2CD".into(),
                     mission,
@@ -2576,13 +2716,13 @@ mod tests {
                         LobbyMemberInfo { entity_id: 5, name: "Ann".into(), archetype: "novice".into(), leader: true, online: true, away: false, level: 12, offline_secs: 0 },
                         LobbyMemberInfo { entity_id: 6, name: "Bo".into(), archetype: "mage".into(), leader: false, online: false, away: true, level: 3, offline_secs: 86_400 },
                     ],
-                },
+                }),
             },
             ServerMsg::LobbyLeft { reason: "some_new_reason".into() },
             ServerMsg::LobbyError { code: "lobby_full".into(), message: "full".into() },
             ServerMsg::Emote { entity_id: RESIDENT_ENTITY_BASE + 3, emote: 46 },
             ServerMsg::Pose { entity_id: 5, pose: pose::SIT },
-            ServerMsg::PlayerMount { entity_id: 5, mount: mount::PECO, speed: 25 },
+            ServerMsg::Quiver { entity_id: 5, element: 6 },
             ServerMsg::Flag { entity_id: 5, flag: 3, x: 140.75, y: 12.5 },
             ServerMsg::Inventory {
                 zeny: 1_234_567,
@@ -2591,11 +2731,8 @@ mod tests {
                 stats: r#"{"ac":14}"#.into(),
             },
             ServerMsg::ItemDefs { items: ItemDef::catalogue() },
-            ServerMsg::Shop { npc: "dega".into(), name: "Dega".into(), items: vec!["sword".into(), "knife".into()] },
+            ServerMsg::Shop { npc: "dega".into(), name: "Dega".into(), items: vec!["sword".into(), "knife".into()], buy_pct: 9, sell_pct: 0 },
             ServerMsg::ItemUsed { item: "red_potion".into(), cooldown_ms: 1000 },
-            ServerMsg::PlayerGear { entity_id: 5, weapon: "katana".into() },
-            ServerMsg::PlayerHeadgear { entity_id: 5, items: vec!["hat".into(), "sunglasses".into()] },
-            ServerMsg::PlayerHeadgear { entity_id: 5, items: Vec::new() },
             ServerMsg::Loot { entity_id: MONSTER_ENTITY_BASE + 7, x: 12.5, y: 3.25, item: "jellopy".into(), count: 2, rare: false },
             ServerMsg::Loot { entity_id: 5, x: 0.0, y: 0.0, item: "zeny".into(), count: 1500, rare: true },
             ServerMsg::Combo { count: 187, rank: 5, window_ms: 3000, left_ms: 2950 },
@@ -2695,9 +2832,17 @@ pub(crate) mod golden {
                         x: 3.0,
                         y: 4.0,
                         facing: 6,
-                        look: Look { gender: 1, hair: 4, hair_color: 2, body_color: 3 },
                         level: 31,
-                        weapon: "bow".into(),
+                        appearance: Appearance {
+                            class: "archer".into(),
+                            tier: 2,
+                            look: Look { gender: 1, hair: 4, hair_color: 2, body_color: 3 },
+                            weapon: "bow:bow".into(),
+                            headgear: vec!["hat".into(), "flu_mask".into()],
+                            mount: mount::NONE,
+                            speed: 0,
+                            cart: 0,
+                        },
                     }],
                 }
                 .encode(),
@@ -2705,22 +2850,34 @@ pub(crate) mod golden {
             (
                 "lobby_state",
                 ServerMsg::LobbyState {
-                    lobby: LobbyInfo {
+                    lobby: Box::new(LobbyInfo {
                         lobby_id: 1,
                         code: "AB2CD".into(),
                         mission,
                         public: false,
                         members: vec![LobbyMemberInfo { entity_id: 9, name: "Bo".into(), archetype: "novice".into(), leader: true, online: true, away: false, level: 1, offline_secs: 0 }],
-                    },
+                    }),
                 }
                 .encode(),
             ),
             ("lobby_left", ServerMsg::LobbyLeft { reason: "custom".into() }.encode()),
             ("pong", ServerMsg::Pong { ts: -3 }.encode()),
             (
-                "player_look",
-                ServerMsg::PlayerLook { entity_id: 300, look: Look { gender: 0, hair: 12, hair_color: 15, body_color: 7 } }
-                    .encode(),
+                "player_appearance",
+                ServerMsg::PlayerAppearance {
+                    entity_id: 300,
+                    appearance: Appearance {
+                        class: "swordsman".into(),
+                        tier: 3,
+                        look: Look { gender: 0, hair: 12, hair_color: 15, body_color: 7 },
+                        weapon: "spear:pike".into(),
+                        headgear: vec!["hat".into()],
+                        mount: mount::PECO,
+                        speed: 25,
+                        cart: 1,
+                    },
+                }
+                .encode(),
             ),
             ("player_vitals", ServerMsg::PlayerVitals { entity_id: 300, hp: 40, max_hp: 122, sp: 7, max_sp: 131, state: 1, status: 640, temp_hp: 3, light: 4, level: 31 }.encode()),
             (
@@ -2774,10 +2931,8 @@ pub(crate) mod golden {
                 }
                 .encode(),
             ),
-            ("shop", ServerMsg::Shop { npc: "dega".into(), name: "Dega".into(), items: vec!["sword".into()] }.encode()),
+            ("shop", ServerMsg::Shop { npc: "dega".into(), name: "Dega".into(), items: vec!["sword".into()], buy_pct: 25, sell_pct: 13 }.encode()),
             ("item_used", ServerMsg::ItemUsed { item: "red_potion".into(), cooldown_ms: 1000 }.encode()),
-            ("player_gear", ServerMsg::PlayerGear { entity_id: 300, weapon: "bow".into() }.encode()),
-            ("player_headgear", ServerMsg::PlayerHeadgear { entity_id: 300, items: vec!["hat".into(), "flu_mask".into()] }.encode()),
             (
                 "loot",
                 ServerMsg::Loot { entity_id: 0x800005, x: 10.5, y: 3.25, item: "knife".into(), count: 1, rare: true }.encode(),
@@ -2897,7 +3052,7 @@ pub(crate) mod golden {
         ("stage_joined", "30ac02016d14070206706f72696e6705666162726500002042"),
         (
             "map_enter",
-            "210166054669656c64029003020000003f00000034c200002041000020420000a04106612e6f676702006000900000010902426f066e6f76696365c000000106010402031f03626f77",
+            "210166054669656c64029003020000003f00000034c200002041000020420000a04106612e6f676702006000900000010902426f066e6f76696365c0000001061f06617263686572020104020307626f773a626f77020368617408666c755f6d61736b000000",
         ),
         (
             "lobby_state",
@@ -2905,7 +3060,7 @@ pub(crate) mod golden {
         ),
         ("lobby_left", "32ff06637573746f6d"),
         ("pong", "1105"),
-        ("player_look", "29ac02000c0f07"),
+        ("player_appearance", "a6ac020973776f7264736d616e03000c0f070a73706561723a70696b650103686174011901"),
         ("player_vitals", "2aac02287a07830101800503041f"),
         ("combat", "2b01ac0206878080040287808004c80115ac020002"),
         ("progress", "2c1fd8a705e8f505e102"),
@@ -2917,10 +3072,8 @@ pub(crate) mod golden {
         ("buffs", "36010568617374659423"),
         ("inventory", "3aac02010a7265645f706f74696f6e050000000c636f74746f6e5f73686972740573776f72640000000000097b226163223a31327d"),
         ("item_defs", "3b0203636170034361700500a01f0b052b31204143020401000000000a64726f70735f636172640a44726f7073204361726409ff90031f04436172640000000300084b696e646c696e670564726f7073"),
-        ("shop", "3c04646567610444656761010573776f7264"),
+        ("shop", "3c04646567610444656761010573776f7264190d"),
         ("item_used", "3d0a7265645f706f74696f6ee807"),
-        ("player_gear", "3eac0203626f77"),
-        ("player_headgear", "8bac02020368617408666c755f6d61736b"),
         ("loot", "3f85808004a002d000056b6e6966650101"),
         ("combo", "60bb0105b8178617"),
         ("revive", "61ac022de28601"),
@@ -2974,6 +3127,33 @@ pub(crate) mod golden {
         let b = ClientMsg::CastPrefs(prefs).encode();
         assert_eq!(hex(&b), "85010980");
         assert_eq!(ClientMsg::decode(&b), Ok(ClientMsg::CastPrefs(prefs)));
+    }
+
+    /// Auto-use thresholds (0xA7). Change only together with
+    /// `client_test.dart` (`use prefs golden`).
+    #[test]
+    fn use_prefs_match_the_dart_golden() {
+        let prefs = UsePrefs { hp: 40, sp: 25 };
+        let b = ClientMsg::UsePrefs(prefs).encode();
+        assert_eq!(hex(&b), "a72819");
+        assert_eq!(ClientMsg::decode(&b), Ok(ClientMsg::UsePrefs(prefs)));
+        // Thresholds above the cap are clamped, never refused.
+        assert_eq!(ClientMsg::decode(&[0xA7, 100, 255]), Ok(ClientMsg::UsePrefs(UsePrefs { hp: UsePrefs::MAX, sp: UsePrefs::MAX })));
+        assert!(ClientMsg::decode(&[0xA7, 10]).is_err(), "short");
+        // The quick-use key's ITEM_USE (`ClientMsg.quickHp`).
+        assert_eq!(hex(&ClientMsg::ItemUse { item: crate::world::hub::QUICK_HP.into() }.encode()), "5803406870");
+    }
+
+    const SKILL_STRIKES_GOLDEN: &str = "9eac02066d6574656f72d00001a002d000d804";
+
+    /// 0x9E SKILL_STRIKES; change together with `client_test.dart`
+    /// (`skill strikes golden`).
+    #[test]
+    fn skill_strikes_match_the_dart_golden() {
+        let m = ServerMsg::SkillStrikes { caster: 300, skill: "meteor".into(), radius: 3.25, strikes: vec![(10.5, 3.25, 600)] };
+        let b = m.encode();
+        assert_eq!(hex(&b), SKILL_STRIKES_GOLDEN);
+        assert_eq!(ServerMsg::decode(&b), Some(m));
     }
 
     /// Change these only together with `client_test.dart`.
@@ -3201,18 +3381,49 @@ pub(crate) mod golden {
         assert_eq!(got, want);
     }
 
-    /// Mount frames (0x90 PLAYER_MOUNT, 0x91 MOUNT_REQ). Change these only
-    /// together with `client_test.dart` (`mount goldens`).
+    /// Town skill frames (0xA9 TOWN_SKILL). Change these only together
+    /// with `client_test.dart` (`town skill goldens`).
+    #[test]
+    fn town_skill_frames_match_the_dart_goldens() {
+        let b = ClientMsg::TownSkill { skill: "pharmacy".into() }.encode();
+        assert_eq!(hex(&b), "a908706861726d616379");
+        assert_eq!(ClientMsg::decode(&b), Ok(ClientMsg::TownSkill { skill: "pharmacy".into() }));
+        assert_eq!(ClientMsg::decode(&[kind::TOWN_SKILL]), Err(ClientDecodeError::Malformed));
+    }
+
+    /// Mount frames (0x91 MOUNT_REQ; the mount itself rides in 0xA6
+    /// PLAYER_APPEARANCE). Change these only together with
+    /// `client_test.dart` (`mount goldens`).
     #[test]
     fn mount_frames_match_the_dart_goldens() {
-        let b = ServerMsg::PlayerMount { entity_id: 300, mount: mount::PECO, speed: 25 }.encode();
-        assert_eq!(hex(&b), "90ac020119");
+        let rider = Appearance { class: "swordsman".into(), tier: 2, weapon: "spear:pike".into(), mount: mount::PECO, speed: 25, ..Appearance::default() };
+        let b = ServerMsg::PlayerAppearance { entity_id: 300, appearance: rider }.encode();
+        assert_eq!(hex(&b), "a6ac020973776f7264736d616e02000100000a73706561723a70696b6500011900");
         assert_eq!(ServerMsg::decode(&b).unwrap().encode(), b);
-        assert!(ServerMsg::decode(&b[..b.len() - 1]).is_none());
+        for cut in 1..b.len() {
+            assert!(ServerMsg::decode(&b[..cut]).is_none(), "truncated at {cut}");
+        }
         let req = ClientMsg::Mount { on: false }.encode();
         assert_eq!(hex(&req), "9100");
         assert_eq!(ClientMsg::decode(&req), Ok(ClientMsg::Mount { on: false }));
         assert_eq!(ClientMsg::decode(&[kind::MOUNT_REQ]), Err(ClientDecodeError::Malformed));
+    }
+
+    /// Quiver frames (0x9C QUIVER_REQ, 0x9D QUIVER: Arrow Change). Change
+    /// these only together with `client_test.dart` (`quiver goldens`).
+    #[test]
+    fn quiver_frames_match_the_dart_goldens() {
+        let b = ServerMsg::Quiver { entity_id: 300, element: 1 }.encode();
+        assert_eq!(hex(&b), "9dac0201");
+        assert_eq!(ServerMsg::decode(&b), Some(ServerMsg::Quiver { entity_id: 300, element: 1 }));
+        for cut in 1..b.len() {
+            assert!(ServerMsg::decode(&b[..cut]).is_none(), "truncated at {cut}");
+        }
+        let req = ClientMsg::Quiver { element: QUIVER_NEXT }.encode();
+        assert_eq!(hex(&req), "9cff");
+        assert_eq!(ClientMsg::decode(&req), Ok(ClientMsg::Quiver { element: QUIVER_NEXT }));
+        assert_eq!(ClientMsg::decode(&[kind::QUIVER_REQ, 6]), Ok(ClientMsg::Quiver { element: 6 }));
+        assert_eq!(ClientMsg::decode(&[kind::QUIVER_REQ]), Err(ClientDecodeError::Malformed));
     }
 
     /// Disconnect frames (0x73 PLAYER_LINK, 0x75 RESUMABLE, 0x5F

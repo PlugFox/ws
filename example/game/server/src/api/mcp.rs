@@ -31,7 +31,7 @@ use axum::{
 use serde_json::{json, Map, Value};
 use chrono::{DateTime, Utc};
 use sqlx::types::Json as Jsonb;
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 use std::collections::BTreeMap;
 use tracing::{info, warn};
 
@@ -627,8 +627,8 @@ async fn get_character(state: &AppState, args: &Value) -> ToolResult {
                c.last_location_id, c.inventory, c.equipment, c.loadout, c.stats, c.created_at, c.updated_at \
                FROM characters c JOIN users u ON u.id = c.user_id WHERE ";
     let row = match (id, name) {
-        (Some(id), _) => sqlx::query(&format!("{sql}c.id = $1")).bind(id).fetch_optional(&state.pool).await,
-        (None, Some(n)) => sqlx::query(&format!("{sql}lower(c.name) = lower($1)")).bind(n.trim().to_string()).fetch_optional(&state.pool).await,
+        (Some(id), _) => sqlx::query(AssertSqlSafe(format!("{sql}c.id = $1"))).bind(id).fetch_optional(&state.pool).await,
+        (None, Some(n)) => sqlx::query(AssertSqlSafe(format!("{sql}lower(c.name) = lower($1)"))).bind(n.trim().to_string()).fetch_optional(&state.pool).await,
         (None, None) => return Err("pass id or name".into()),
     }
     .map_err(|e| format!("database error: {e}"))?;

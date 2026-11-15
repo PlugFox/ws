@@ -174,6 +174,8 @@ impl Class {
             // for the Assassin; here the Thief body shows a dagger instead).
             // Dual wielding is not modelled: one weapon slot.
             Class::Thief => matches!(kind, Dagger | Sword | Katar),
+            // RO's Merchant set: axes (one and two hands) are the line's.
+            Class::Merchant => matches!(kind, Dagger | Sword | Axe | TwoHandAxe | Mace),
         }
     }
 
@@ -185,6 +187,7 @@ impl Class {
             Class::Mage => "rod",
             Class::Acolyte => "rod",
             Class::Thief => "knife",
+            Class::Merchant => "axe",
         }
     }
 }
@@ -276,6 +279,7 @@ impl Weapon {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use super::*;
 
     #[test]
@@ -324,7 +328,7 @@ mod tests {
         let staff = Weapon::find("staff").unwrap();
         // Casters swing staves as clubs: one d8, A = 5 at 60, +2 for a level-3 staff.
         assert_eq!(staff.damage(Class::Mage, 60), (Dice::new(1, 8, 7), DamageType::Physical));
-        assert!(matches!(staff.reach, Reach::Melee { .. }), "no ranged basic attack without a bow");
+        assert_matches!(staff.reach, Reach::Melee { .. }, "no ranged basic attack without a bow");
         assert!(WEAPONS.iter().all(|w| matches!(w.reach, Reach::Melee { .. }) == (w.kind != WeaponKind::Bow)));
         assert_eq!(staff.to_hit(1), 2 + 3 + 2);
     }
@@ -339,5 +343,14 @@ mod tests {
         let katar = Weapon::find("jamadhar").unwrap();
         assert!(katar.kind.two_handed() && katar.interval_ms < Weapon::find("sword").unwrap().interval_ms);
         assert_eq!((katar.kind.crit(), WeaponKind::Dagger.crit()), (1, 0));
+    }
+
+    #[test]
+    fn merchants_hold_axes_and_maces() {
+        assert_eq!(Weapon::held(Class::Merchant, "").id, "axe");
+        assert_eq!(Weapon::held(Class::Merchant, "battle_axe").id, "battle_axe");
+        assert_eq!(Weapon::held(Class::Merchant, "mace").id, "mace");
+        assert_eq!(Weapon::held(Class::Merchant, "katar").id, "axe", "no katars");
+        assert_eq!(Weapon::held(Class::Merchant, "bow").id, "axe", "no bows");
     }
 }

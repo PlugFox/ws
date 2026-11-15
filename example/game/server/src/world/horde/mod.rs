@@ -42,7 +42,7 @@ use director::{Director, Formation, Pack, WaveRules};
 use field::{FlowField, UNREACHABLE};
 use grid::SpatialGrid;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use crate::world::combat::{Archetype, Condition, MonsterBlock};
 use crate::world::modifiers::{Modifiers, MonsterScale};
 use std::sync::Arc;
@@ -61,6 +61,23 @@ pub struct PlayerView {
     /// target: with no target at all, monsters lose interest and roam.
     pub hunted: bool,
 }
+
+/// A companion as the horde sees it (`hub::companion`): monsters taunted
+/// by `id` (`store.taunter`, `LURE_BASE + companion id`) walk to it, and
+/// it body-blocks within `radius` cells (an immovable disk, like a player).
+/// Set every tick from `Companions::lures` ([`Horde::set_lures`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lure {
+    pub x: f32,
+    pub y: f32,
+    /// `LURE_BASE + companion id` (disjoint from user ids).
+    pub id: u32,
+    /// Body radius, cells.
+    pub radius: f32,
+}
+
+/// First lure id: taunter values at or above it are companions, not users.
+pub const LURE_BASE: u32 = 0x8000_0000;
 
 /// A flow field toward one taunting player.
 struct TauntField {
@@ -279,6 +296,9 @@ pub struct Horde {
     /// Monster affixes: the run's odds, the density cap's count, news for
     /// the clients (`affixes.rs`).
     affixes: affixes::AffixBook,
+    /// Companions as the horde sees them (taunt targets, body blocks):
+    /// copied in each tick, reserved once.
+    lures: Vec<Lure>,
 }
 
 impl Horde {
@@ -301,7 +321,7 @@ impl Horde {
         let director = Director::new(config.waves.clone());
         let rng = match config.seed {
             Some(s) => StdRng::seed_from_u64(s),
-            None => StdRng::from_entropy(),
+            None => rand::make_rng(),
         };
         let max_radius = catalog.defs().iter().map(|d| d.radius).fold(0.0, f32::max);
         let scale = config.modifiers.monsters();
@@ -335,6 +355,7 @@ impl Horde {
             scale,
             plants: 0,
             affixes,
+            lures: Vec::with_capacity(64),
         };
         horde.plant_flora();
         horde
@@ -380,6 +401,17 @@ impl Horde {
         while let Some(&slot) = self.store.alive().last() {
             self.despawn(slot);
         }
+    }
+
+    /// The run is closing in (the poison fog rose): the game master buys
+    /// no more waves; the monsters on the field stay (`Director::close`).
+    pub fn close_spawning(&mut self) {
+        self.director.close(&self.catalog);
+    }
+
+    /// Whether [`Horde::close_spawning`] was called.
+    pub fn spawning_closed(&self) -> bool {
+        self.director.is_closed()
     }
 
     pub fn director_elapsed(&self) -> f32 {
@@ -467,8 +499,10 @@ impl Horde {
             // Its hit count, untouched by the modifiers.
             return MonsterBlock { hp: def.hits.1.max(1) as i32, ..MonsterBlock::new(1, Archetype::Plant, 1) };
         }
-        let block = self.scale.apply(MonsterBlock::new(self.store.level[s] as u32, def.archetype, self.party));
-        self.affix_block(slot, block)
+        let mut block = self.affix_block(slot, self.scale.apply(MonsterBlock::new(self.store.level[s] as u32, def.archetype, self.party)));
+        // A rally's spur: better melee attack rolls while it lasts.
+        block.attack += self.store.rally_of(slot).to_hit as i32;
+        block
     }
 
     /// The mission modifiers this horde runs under.
@@ -668,6 +702,18 @@ impl Horde {
         }
     }
 
+    /// The companions on the map (`hub::companion`): monsters taunted by a
+    /// lure walk to it, every lure body-blocks. Copied into a reused buffer.
+    pub fn set_lures(&mut self, lures: &[Lure]) {
+        self.lures.clear();
+        self.lures.extend_from_slice(lures);
+    }
+
+    /// The lures of the last [`Self::set_lures`].
+    pub fn lures(&self) -> &[Lure] {
+        &self.lures
+    }
+
     /// [`Self::tick_views`] with the default light radius for everyone.
     pub fn tick(&mut self, tick: u32, tick_hz: u32, players: &[(f32, f32)]) {
         let light = self.config.light_radius;
@@ -841,8 +887,9 @@ impl Horde {
                 continue; // frozen, stunned, petrified, rooted or flinching
             }
             let def = self.catalog.get(s.kind[k]);
-            // Hasted and frenzied monsters (affixes.rs) walk faster.
-            let pace = pace * affixes::pace(s.affix[k], s.affix_state[k]);
+            // Hasted and frenzied monsters (affixes.rs) walk faster, and
+            // so do spurred ones (a rally: storage::Rally).
+            let pace = pace * affixes::pace(s.affix[k], s.affix_state[k]) * s.rally_of(slot).pace();
             if self.targets.is_empty() {
                 // Nobody to hunt: lose interest and roam.
                 if let Some((ux, uy)) = roam_heading(slot, s.generation[k], tick, self.hz) {
@@ -851,20 +898,29 @@ impl Horde {
                 }
                 continue;
             }
-            // A taunted monster hunts its taunter while they are here.
-            let hunted = if status.has(Condition::Taunted) {
-                self.targets.iter().find(|p| p.id != 0 && p.id == s.taunter[k])
+            // A taunted monster hunts its taunter while they are here: a
+            // player, or a companion's lure (`hub::companion`). Lures get no
+            // taunt field: straight at it while in sight, else the players'
+            // field (it follows the crowd and finds the lure on the way).
+            // Only taunted monsters pay for the lookup.
+            let (hunted, lure) = if status.has(Condition::Taunted) {
+                let id = s.taunter[k];
+                if id >= LURE_BASE {
+                    (None, self.lures.iter().find(|l| l.id == id))
+                } else {
+                    (self.targets.iter().find(|p| p.id != 0 && p.id == id), None)
+                }
             } else {
-                None
+                (None, None)
             };
-            let (ndx, ndy, nd2) = match hunted {
-                Some(p) => {
-                    let (dx, dy) = (p.x - x, p.y - y);
+            let (ndx, ndy, nd2) = match (hunted, lure) {
+                (Some(&PlayerView { x: tx, y: ty, .. }), _) | (None, Some(&Lure { x: tx, y: ty, .. })) => {
+                    let (dx, dy) = (tx - x, ty - y);
                     (dx, dy, dx * dx + dy * dy)
                 }
-                None => Self::nearest(&self.targets, x, y),
+                (None, None) => Self::nearest(&self.targets, x, y),
             };
-            let contact = def.radius + c.player_radius;
+            let contact = def.radius + lure.map_or(c.player_radius, |l| l.radius);
             if nd2 <= contact * contact {
                 continue; // touching: Phase 6 turns this into attacks
             }
@@ -957,6 +1013,21 @@ impl Horde {
             for &PlayerView { x: qx, y: qy, .. } in &self.players {
                 let rr = ra + c.player_radius;
                 let (dx, dy) = (s.x[ai] - qx, s.y[ai] - qy);
+                let d2 = dx * dx + dy * dy;
+                if d2 < rr * rr && d2 > 1e-8 {
+                    let d = d2.sqrt();
+                    px += dx * (rr - d) / d;
+                    py += dy * (rr - d) / d;
+                }
+            }
+            // So are companions (`hub::companion`): Amistr and plants
+            // body-block, nothing pushes them.
+            for l in &self.lures {
+                let rr = ra + l.radius;
+                let (dx, dy) = (s.x[ai] - l.x, s.y[ai] - l.y);
+                if dx.abs() >= rr || dy.abs() >= rr {
+                    continue;
+                }
                 let d2 = dx * dx + dy * dy;
                 if d2 < rr * rr && d2 > 1e-8 {
                     let d = d2.sqrt();
@@ -1094,7 +1165,7 @@ impl Horde {
     fn off_screen(&mut self, player: usize, angle: f32) -> (f32, f32) {
         let p = self.targets[player];
         let (lo, hi) = self.config.waves.spawn_margin;
-        let d = p.light + self.rng.gen_range(lo..hi.max(lo + 0.01));
+        let d = p.light + self.rng.random_range(lo..hi.max(lo + 0.01));
         (p.x + angle.cos() * d, p.y + angle.sin() * d)
     }
 
@@ -1105,8 +1176,8 @@ impl Horde {
             return None;
         }
         for _ in 0..16 {
-            let who = self.rng.gen_range(0..self.targets.len());
-            let a = self.rng.gen_range(0.0..std::f32::consts::TAU);
+            let who = self.rng.random_range(0..self.targets.len());
+            let a = self.rng.random_range(0.0..std::f32::consts::TAU);
             let (x, y) = self.off_screen(who, a);
             if self.spawnable(x, y) {
                 return Some((x, y));
@@ -1149,7 +1220,7 @@ impl Horde {
                 let spread = (count as f32).sqrt() + 1.0;
                 for _ in 0..count {
                     for _ in 0..6 {
-                        let (x, y) = (cx + self.rng.gen_range(-spread..spread), cy + self.rng.gen_range(-spread..spread));
+                        let (x, y) = (cx + self.rng.random_range(-spread..spread), cy + self.rng.random_range(-spread..spread));
                         if put(self, x, y) {
                             break;
                         }
@@ -1159,11 +1230,11 @@ impl Horde {
             // Closing in on one player from all sides, unevenly: jittered
             // angles and distances, so it reads as a crowd, not a circle.
             Formation::Surround => {
-                let who = self.rng.gen_range(0..self.targets.len());
-                let base = self.rng.gen_range(0.0..std::f32::consts::TAU);
+                let who = self.rng.random_range(0..self.targets.len());
+                let base = self.rng.random_range(0.0..std::f32::consts::TAU);
                 let step = std::f32::consts::TAU / count as f32;
                 for i in 0..count {
-                    let a = base + step * (i as f32 + self.rng.gen_range(-0.45..0.45));
+                    let a = base + step * (i as f32 + self.rng.random_range(-0.45..0.45));
                     let (x, y) = self.off_screen(who, a);
                     put(self, x, y);
                 }
@@ -1195,7 +1266,7 @@ fn roam_heading(slot: u16, generation: u8, tick: u32, hz: u32) -> Option<(f32, f
 
 /// Whether the straight segment stays on walkable cells (sampled every half
 /// cell; corner grazes may pass, wall sliding handles those).
-fn line_clear(walk: &crate::world::map::WalkGrid, x0: f32, y0: f32, x1: f32, y1: f32) -> bool {
+pub(crate) fn line_clear(walk: &crate::world::map::WalkGrid, x0: f32, y0: f32, x1: f32, y1: f32) -> bool {
     let (dx, dy) = (x1 - x0, y1 - y0);
     let n = (dx.abs().max(dy.abs()) * 2.0).ceil() as i32;
     (1..n).all(|i| {

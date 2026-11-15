@@ -4,7 +4,7 @@ use crate::session::registry::TownSpot;
 use crate::world::stage::Resumable;
 use crate::world::combat::items::{ItemError, Slot};
 use crate::world::combat::{Bag, Class, Loadout};
-use crate::world::protocol::{CastPrefs, ItemDef};
+use crate::world::protocol::{CastPrefs, ItemDef, UsePrefs};
 use crate::world::trade::{ShopOrder, MAX_ORDER_COUNT};
 use crate::world::map::LocationKind;
 use crate::world::protocol::ClientDecodeError;
@@ -23,6 +23,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::mem::DropGuard;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -32,6 +33,9 @@ use uuid::Uuid;
 #[derive(Deserialize)]
 pub struct WsAuthQuery {
     pub token: Option<String>,
+    /// The client's build (`version::client_build`): another build is
+    /// told to reload and closed before it touches the session.
+    pub build: Option<String>,
 }
 
 /// WebSocket upgrade handler authenticated via query param `?token=...` or Authorization header.
@@ -62,7 +66,37 @@ pub async fn ws_handler(
 
     let user_id = claims.sub;
 
-    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, user_id, session_id)))
+    let check = crate::version::check_client_build(query.build.as_deref(), crate::version::client_build());
+    Ok(ws.on_upgrade(move |socket| async move {
+        if check == crate::version::ClientBuild::Current {
+            handle_socket(socket, state, user_id, session_id).await;
+        } else {
+            refuse_build(socket, user_id, query.build.as_deref(), check).await;
+        }
+    }))
+}
+
+/// What a client of another build is told before the close.
+pub const UPDATE_NOTICE: &str = "A new version of Mobbed! is out: reload the page (Ctrl+Shift+R) to play.";
+
+/// Closes the socket of a client of another build without touching the
+/// session (a stale tab must not displace the player's current one). A
+/// client that sent its build gets [`CLOSE_UPDATE_REQUIRED`](crate::version::CLOSE_UPDATE_REQUIRED)
+/// with this server's build in the reason; one from before the check
+/// (no build) a notification it shows and the 4008 it does not retry.
+async fn refuse_build(mut socket: WebSocket, user_id: u32, given: Option<&str>, check: crate::version::ClientBuild) {
+    let server = crate::version::client_build();
+    info!("user {user_id}: client build {given:?} refused (server {server})");
+    let code = match check {
+        crate::version::ClientBuild::Missing => {
+            let note = ServerMsg::Notification { message: UPDATE_NOTICE.into() };
+            let _ = socket.send(Message::Binary(note.encode())).await;
+            4008
+        }
+        _ => crate::version::CLOSE_UPDATE_REQUIRED,
+    };
+    let frame = axum::extract::ws::CloseFrame { code, reason: format!("update_required:{server}").into() };
+    let _ = socket.send(Message::Close(Some(frame))).await;
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session_id: Uuid) {
@@ -89,7 +123,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (lobby_tx, mut lobby_rx) = mpsc::channel(LOBBY_CHANNEL_CAPACITY);
     let (friend_tx, mut friend_rx) = mpsc::channel(crate::world::friends::FRIEND_CHANNEL_CAPACITY);
-    let mut conn = Conn {
+    let conn = Conn {
         state: state.clone(),
         session: Arc::clone(&session),
         conn_id: Uuid::new_v4(),
@@ -103,7 +137,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
         friend_tx,
         superseded: false,
         cast_prefs: CastPrefs::default(),
+        use_prefs: UsePrefs::default(),
     };
+    let mut conn = guarded(conn);
 
     // Send welcome / connected frame
     let welcome = ServerMsg::Connected { user_id, session_id, server_version: crate::version::version().into() };
@@ -209,15 +245,22 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
         }
     }
 
-    // On disconnect, go offline in the party (it stays the account's),
-    // leave the instance and flush dirty character state
-    info!("Cleaning up WebSocket session for user {}", user_id);
-    if let Some(lobbies) = &state.lobbies {
-        lobbies.detach(user_id, conn.conn_id);
-    }
-    conn.drop_link().await;
-    state.friends.gone(user_id, conn.conn_id).await;
-    let _ = StateFlusher::flush_session(&state.pool, &session).await;
+    DropGuard::dismiss(conn).finish().await;
+}
+
+/// `conn` with its cleanup ([`Conn::finish`]) armed: when the socket task
+/// unwinds (a handler panicked) or is dropped before it reaches its own
+/// awaited cleanup, the guard runs it on a task of its own, so no ghost
+/// stays in the hub channel, the party or the friends' lists and dirty
+/// character state is still flushed. The normal path dismisses the guard
+/// and awaits the same cleanup in place.
+fn guarded(conn: Conn) -> DropGuard<Conn, impl FnOnce(Conn)> {
+    DropGuard::new(conn, |conn: Conn| {
+        warn!("WebSocket task of user {} ended without its cleanup: cleaning up now", conn.user_id());
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(conn.finish());
+        }
+    })
 }
 
 #[path = "ws_friends.rs"]
@@ -283,10 +326,12 @@ struct Conn {
     /// Manual aiming and auto-cast slots (`CAST_PREFS`), handed to the
     /// instance with every input.
     cast_prefs: CastPrefs,
+    /// Auto-use thresholds (`USE_PREFS`), handed over with every input.
+    use_prefs: UsePrefs,
 }
 
 /// A remembered town spot is used by a reconnect within this long.
-const TOWN_SPOT_TTL: Duration = Duration::from_secs(15 * 60);
+const TOWN_SPOT_TTL: Duration = Duration::from_mins(15);
 
 fn hub_error(code: &str, message: impl Into<String>) -> Out {
     Out::Msg(ServerMsg::HubError { code: code.into(), message: message.into() })
@@ -297,6 +342,19 @@ fn lobby_error(code: &str, message: impl Into<String>) -> Out {
 }
 
 impl Conn {
+    /// The socket is gone: go offline in the party (it stays the
+    /// account's), leave the instance and flush dirty character state.
+    async fn finish(mut self) {
+        let user_id = self.user_id();
+        info!("Cleaning up WebSocket session for user {}", user_id);
+        if let Some(lobbies) = &self.state.lobbies {
+            lobbies.detach(user_id, self.conn_id);
+        }
+        self.drop_link().await;
+        self.state.friends.gone(user_id, self.conn_id).await;
+        let _ = StateFlusher::flush_session(&self.state.pool, &self.session).await;
+    }
+
     fn user_id(&self) -> u32 {
         self.session.user_id
     }
@@ -318,6 +376,7 @@ impl Conn {
             weapon: ch.weapon.clone(),
             loadout: ch.loadout.clone(),
             bag: ch.bag.clone(),
+            homunculus: ch.homunculus.clone(),
         })
     }
 
@@ -428,6 +487,7 @@ impl Conn {
                 match lobbies.stages().rejoin(r.stage_id, profile.clone(), self.session_id(), tx, self.next_epoch) {
                     Ok(commands) => {
                         self.link = Some(Link { place: Place::Stage { stage_id: r.stage_id }, commands, events: rx });
+                        self.push_prefs();
                         self.attach_party(&profile, true);
                         return out;
                     }
@@ -507,9 +567,19 @@ impl Conn {
                 {
                     lobbies.stages().leave(stage_id, self.user_id(), self.session_id(), true);
                 }
+                self.push_prefs();
                 Vec::new()
             }
             Err(err) => self.join_failed(hub_error(err.code(), err.to_string())),
+        }
+    }
+
+    /// Hands the new instance this connection's cast and auto-use
+    /// preferences (inputs carry them too, but only once the player moves).
+    fn push_prefs(&self) {
+        if let Some(link) = &self.link {
+            let (prefs, uses) = (self.cast_prefs, self.use_prefs);
+            let _ = link.commands.try_send(HubCommand::Prefs { user_id: self.user_id(), prefs, uses });
         }
     }
 
@@ -594,11 +664,12 @@ impl Conn {
                 }
                 vec![Out::Msg(msg)]
             }
-            Some(HubEvent::Shop(order)) => {
-                // All or nothing (`ShopOrder::apply`); the receipt follows
-                // the new inventory.
+            Some(HubEvent::Shop(order, haggle)) => {
+                // All or nothing (`ShopOrder::apply`), at the prices the
+                // hub read off the loadout; the receipt follows the new
+                // inventory.
                 let mut receipt = None;
-                let mut out = self.change_bag(|_, bag| order.apply(bag).map(|r| receipt = Some(r))).await;
+                let mut out = self.change_bag(|_, bag| order.apply_at(bag, haggle).map(|r| receipt = Some(r))).await;
                 if let Some(r) = receipt {
                     out.push(Out::Msg(ServerMsg::ShopDone { spent: r.spent, earned: r.earned }));
                 }
@@ -615,12 +686,30 @@ impl Conn {
                 out.extend(self.share_bag().await);
                 out
             }
+            Some(HubEvent::Craft { recipe, count }) => {
+                let Some(r) = crate::world::combat::quests::find(recipe) else { return Vec::new() };
+                let mut done = false;
+                let mut out = self.change_bag(|_, bag| crate::world::combat::quests::craft_n(bag, r, count).map(|()| done = true)).await;
+                if done {
+                    out.push(Out::Msg(ServerMsg::Crafted { recipe: r.id.into(), item: r.item.into() }));
+                }
+                out.extend(self.share_bag().await);
+                out
+            }
             // A player trade went through (already stored by the vault).
             Some(HubEvent::BagChanged) => self.inventory().await.into_iter().collect(),
             Some(HubEvent::ItemUsed { item }) => self.change_bag(|_, bag| bag.take(&item, 1)).await,
             Some(HubEvent::Zeny { amount }) => {
                 self.change_bag(|_, bag| {
                     bag.earn(amount);
+                    Ok(())
+                })
+                .await
+            }
+            // Mammonite: the hub's copy of the bag paid it already.
+            Some(HubEvent::ZenySpent { amount }) => {
+                self.change_bag(|_, bag| {
+                    bag.zeny = bag.zeny.saturating_sub(amount);
                     Ok(())
                 })
                 .await
@@ -653,6 +742,12 @@ impl Conn {
             Some(HubEvent::Record(delta)) => {
                 if let Some(ch) = self.session.character.write().await.as_mut() {
                     ch.add_record(&delta);
+                }
+                Vec::new()
+            }
+            Some(HubEvent::Homunculus(save)) => {
+                if let Some(ch) = self.session.character.write().await.as_mut() {
+                    ch.set_homunculus(save);
                 }
                 Vec::new()
             }
@@ -689,9 +784,11 @@ impl Conn {
                 }
                 self.stranded = true;
                 // Back from a mission: the town's return point (any other
-                // target keeps the portal's arrival).
-                let back = self.mission_return().filter(|r| r.map == target_map);
-                self.join_hub(None, back.or(Some(Arrival { map: target_map, x, y }))).await
+                // target keeps the portal's arrival; none, from a stage
+                // without a walk-out portal, is the return point too).
+                let back = self.mission_return().filter(|r| r.map == target_map || target_map.is_empty());
+                let portal = (!target_map.is_empty()).then_some(Arrival { map: target_map, x, y });
+                self.join_hub(None, back.or(portal)).await
             }
             None => {
                 // A newer socket took our stage slot over (it re-attached):
@@ -741,6 +838,7 @@ impl Conn {
                     Ok(commands) => {
                         self.leave_link();
                         self.link = Some(Link { place: Place::Stage { stage_id: ticket.stage_id }, commands, events: rx });
+                        self.push_prefs();
                     }
                     Err(e) => {
                         lobbies.stages().abandon(ticket.stage_id, self.user_id());
@@ -774,20 +872,27 @@ impl Conn {
             ClientMsg::Input { seq, dx, dy, aim, slots } => {
                 if let Some(link) = &self.link {
                     // Inputs are latest-wins; dropping one under backpressure is fine.
-                    let prefs = self.cast_prefs;
-                    let _ = link.commands.try_send(HubCommand::Input { user_id, seq, dx, dy, aim, slots, prefs });
+                    let (prefs, uses) = (self.cast_prefs, self.use_prefs);
+                    let _ = link.commands.try_send(HubCommand::Input { user_id, seq, dx, dy, aim, slots, prefs, uses });
                 }
                 Vec::new()
             }
             ClientMsg::CastPrefs(prefs) => {
                 self.cast_prefs = prefs;
+                self.push_prefs();
+                Vec::new()
+            }
+            ClientMsg::UsePrefs(prefs) => {
+                self.use_prefs = prefs;
+                self.push_prefs();
                 Vec::new()
             }
             ClientMsg::SkillLearn { skill } => self.change_loadout(SkillChange::Learn(skill)).await,
             ClientMsg::SkillSlot { slot, skill } => self.change_loadout(SkillChange::Slot(slot, skill)).await,
             // Riding is part of the loadout: the hub re-equips the fighter
-            // and tells the map (`player_mount`).
+            // and shows the map its new appearance (`player_appearance`).
             ClientMsg::Mount { on } => self.change_loadout(SkillChange::Mount(on)).await,
+            ClientMsg::TownSkill { skill } => self.town_skill(&skill).await,
             ClientMsg::SkillReset => {
                 if matches!(self.link, Some(Link { place: Place::Stage { .. }, .. })) {
                     return vec![hub_error("not_in_hub", "skills are reset in town")];
@@ -807,6 +912,9 @@ impl Conn {
             // outside an instance or under backpressure.
             ClientMsg::Emote { emote } => self.cosmetic(HubCommand::Emote { user_id, emote }),
             ClientMsg::Pose { pose } => self.cosmetic(HubCommand::Pose { user_id, pose }),
+            // The arrow nocked (stages); the hub checks Arrow Change.
+            ClientMsg::Quiver { element } => self.cosmetic(HubCommand::Quiver { user_id, element }),
+            ClientMsg::CompanionCmd(cmd) => self.cosmetic(HubCommand::Companion { user_id, cmd }),
             ClientMsg::Flag { flag, x, y } => self.cosmetic(HubCommand::Flag { user_id, flag, x, y }),
             ClientMsg::Chat { text } => {
                 // Nothing left after cleaning: nothing to say.
@@ -944,6 +1052,34 @@ impl Conn {
                 Some(l) if l.leave(user_id, session_id, "left") => Vec::new(),
                 _ => vec![Out::Msg(LobbyError::NotInLobby.to_msg())],
             },
+            // The Kafra's party list (`lobby.rs` `public_parties`): look,
+            // join (a running mission too), list or hide one's own.
+            ClientMsg::PartyList => match &self.state.lobbies {
+                Some(l) => vec![Out::Msg(ServerMsg::Parties { parties: l.public_parties(user_id) })],
+                None => vec![Out::Msg(ServerMsg::Parties { parties: Vec::new() })],
+            },
+            ClientMsg::PartyJoin { lobby_id } => {
+                let Some(lobbies) = self.state.lobbies.clone() else {
+                    return vec![lobby_error("mission_unavailable", "parties are not available on this server")];
+                };
+                if !self.in_hub() {
+                    return vec![lobby_error("not_in_hub", "join a party in town")];
+                }
+                let Some(profile) = self.profile().await else {
+                    return vec![hub_error("no_character", "select a character first")];
+                };
+                lobby_result(lobbies.join_public(profile, session_id, lobby_id, self.lobby_tx.clone()).map(|_| ()))
+            }
+            ClientMsg::PartyPublic { public } => match &self.state.lobbies {
+                Some(l) => lobby_result(l.set_public(user_id, session_id, public)),
+                None => vec![Out::Msg(LobbyError::NotInLobby.to_msg())],
+            },
+            ClientMsg::Craft { npc, recipe } => {
+                if !self.in_hub() {
+                    return vec![hub_error("not_in_hub", "Crafting is done in town.")];
+                }
+                self.forward(HubCommand::Craft { user_id, npc, recipe })
+            }
             // The player context menu (`lobby.rs` has the party rules).
             ClientMsg::PartyInvite { entity_id } => {
                 let Some(lobbies) = self.state.lobbies.clone() else {
@@ -998,6 +1134,30 @@ enum SkillChange {
 }
 
 impl Conn {
+    /// The town skill bar (`TOWN_SKILL`): one path for every skill usable
+    /// in town. Learned and marked `town = true` (`SkillDef::town_use`), it
+    /// mounts here (riding is the loadout's) or goes to the hub (the
+    /// Pharmacy, the homunculus); anything else, or on a stage, is refused.
+    async fn town_skill(&mut self, id: &str) -> Vec<Out> {
+        use crate::world::combat::skills::TownUse;
+        if matches!(self.link, Some(Link { place: Place::Stage { .. }, .. })) {
+            return vec![hub_error("not_in_town", "On a mission skills are cast from the hotbar.")];
+        }
+        let book = Arc::clone(&self.state.skills);
+        let (level, mounted) = match self.session.character.read().await.as_ref() {
+            Some(ch) => (ch.loadout.level(id), ch.loadout.mounted),
+            None => return vec![hub_error("no_character", "select a character first")],
+        };
+        if level == 0 {
+            return vec![hub_error("not_learned", "You have not learned that skill.")];
+        }
+        match book.find(id).and_then(|(_, d)| d.town_use()) {
+            None => vec![hub_error("not_in_town", "That skill is not used in town.")],
+            Some(TownUse::Mount) => self.change_loadout(SkillChange::Mount(!mounted)).await,
+            Some(town) => self.forward(HubCommand::TownSkill { user_id: self.user_id(), town }),
+        }
+    }
+
     /// Learns, slots or resets on the session's character, then hands the
     /// new loadout to the current hub or stage (which answers `skills`).
     async fn change_loadout(&mut self, change: SkillChange) -> Vec<Out> {
@@ -1027,6 +1187,9 @@ impl Conn {
             if let Err(e) = result {
                 return vec![hub_error(e.code(), e.to_string())];
             }
+            // Mounted only while a mount skill is learned: a reset (or any
+            // change) that drops it gets the rider off, here and saved.
+            l.mounted = book.rides(&l);
             ch.set_loadout(l.clone());
             l
         };
@@ -1067,6 +1230,8 @@ impl Conn {
             };
             let class = Class::from_id(&ch.archetype).unwrap_or(Class::Swordsman);
             let mut bag = ch.bag.clone();
+            // The cart's stacks (Pushcart) come with the learned skills.
+            bag.cart = self.state.skills.cart_stacks(&ch.loadout) as u16;
             if let Err(e) = change(class, &mut bag) {
                 return vec![hub_error(e.code(), e.message())];
             }
@@ -1092,5 +1257,99 @@ async fn remember_location(session: &ActiveSession, map_id: &str) {
         && ch.last_location_id != map_id
     {
         ch.set_location(map_id.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::world::friends::Presence;
+
+    fn conn(state: &AppState, user_id: u32) -> Conn {
+        let (session, _signals) = ActiveSession::new(Uuid::new_v4(), user_id, None, None);
+        Conn {
+            state: state.clone(),
+            session,
+            conn_id: Uuid::new_v4(),
+            link: None,
+            lobby_tx: mpsc::channel(1).0,
+            next_epoch: 0,
+            last_channel: None,
+            stranded: false,
+            items_due: false,
+            chat: ChatLimiter::default(),
+            friend_tx: mpsc::channel(1).0,
+            superseded: false,
+            cast_prefs: CastPrefs::default(),
+            use_prefs: UsePrefs::default(),
+        }
+    }
+
+    fn presence(conn: &Conn) -> Presence {
+        Presence {
+            conn_id: conn.conn_id,
+            character_id: 1,
+            name: "Ghost".into(),
+            class: "novice".into(),
+            level: 1,
+            map: "prontera".into(),
+            channel: 1,
+            tx: conn.friend_tx.clone(),
+        }
+    }
+
+    /// A handler that panics mid-socket still takes the player offline: the
+    /// guard runs the cleanup the unwound task never reached.
+    #[tokio::test]
+    async fn a_panicking_socket_task_still_cleans_up() {
+        let (_, state) = crate::create_app(AppConfig::test_config().await).await.unwrap();
+        let c = conn(&state, 7);
+        state.friends.present(7, presence(&c)).await;
+        assert!(state.friends.presence(7).is_some());
+        let task = tokio::spawn(async move {
+            let conn = guarded(c);
+            assert!(!conn.superseded, "the guard derefs to the connection");
+            panic!("a handler bug");
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        let gone = async {
+            while state.friends.presence(7).is_some() {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), gone).await.expect("the guard's cleanup ran");
+    }
+
+    /// A cancelled socket task (dropped mid-await) cleans up the same way.
+    #[tokio::test]
+    async fn a_cancelled_socket_task_still_cleans_up() {
+        let (_, state) = crate::create_app(AppConfig::test_config().await).await.unwrap();
+        let c = conn(&state, 8);
+        state.friends.present(8, presence(&c)).await;
+        let task = tokio::spawn(async move {
+            let _conn = guarded(c);
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let gone = async {
+            while state.friends.presence(8).is_some() {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), gone).await.expect("the guard's cleanup ran");
+    }
+
+    /// The normal path dismisses the guard: the cleanup runs once, awaited
+    /// in place, and the record of a newer socket of the account stays.
+    #[tokio::test]
+    async fn the_normal_path_cleans_up_once_in_place() {
+        let (_, state) = crate::create_app(AppConfig::test_config().await).await.unwrap();
+        let c = conn(&state, 9);
+        state.friends.present(9, presence(&c)).await;
+        DropGuard::dismiss(guarded(c)).finish().await;
+        assert!(state.friends.presence(9).is_none(), "awaited, not deferred");
     }
 }

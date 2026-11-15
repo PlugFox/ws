@@ -14,6 +14,7 @@ use crate::world::map::{CameraConstraint, LocationKind};
 use crate::world::protocol::{Look, MONSTER_ENTITY_BASE};
 use std::sync::Arc;
 use uuid::Uuid;
+use std::assert_matches;
 
 /// Simulated seconds per measurement.
 const MINUTE: u32 = 60;
@@ -53,6 +54,7 @@ fn field(catalog: MonsterCatalog, book: SkillBook, seed: u64) -> HubInstance {
         weapon: String::new(),
         loadout: Default::default(),
         bag: Default::default(),
+        homunculus: None,
     };
     let mut out = Vec::new();
     stage.join(profile, Uuid::nil(), None, 0, &mut out);
@@ -212,8 +214,9 @@ fn potions_restore_what_their_tooltip_says_over_its_time() {
 }
 
 /// Timed buffs that are windows, not states to keep up: Mystical
-/// Amplification's empowered next spell and Enchant Deadly Poison's burst.
-const BURSTS: &[&str] = &["mystical_amplification", "enchant_deadly_poison"];
+/// Amplification's empowered next spell, Enchant Deadly Poison's burst,
+/// Blade Stop's catch and Steel Body's slow armour.
+const BURSTS: &[&str] = &["mystical_amplification", "enchant_deadly_poison", "blade_stop", "steel_body"];
 
 /// Every timed buff a player casts again and again (Blessing, Increase AGI,
 /// Improve Concentration, Endure, ...) outlasts its cooldown and wind-up at
@@ -260,23 +263,44 @@ fn fire_wall_widens_with_its_level() {
     assert_eq!((flames(1), flames(5), flames(10)), (3, 6, 10));
 }
 
-/// Izlude's Food Vendor stands with the other merchants and sells the food
-/// stock: cheap HP, and grapes for SP.
+/// Izlude's Food Vendor keeps a stall in the market south-west of the
+/// square (the other merchants and the smith keep shop indoors) and sells
+/// the food stock: cheap HP, and grapes for SP.
 #[test]
 fn izlude_has_a_food_vendor() {
     use crate::world::combat::items::{self, Effect, Kind};
     let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/dist");
-    let Ok(world) = HubWorld::load(&dist, &["izlude".into()], "izlude") else { return };
-    let npcs = &world.map(world.entry()).manifest.npcs;
+    let Ok(world) = HubWorld::load(&dist, &["izlude".into(), "izlude_in".into()], "izlude") else { return };
+    let town = world.map(world.entry());
+    let npcs = &town.manifest.npcs;
     let Some(vendor) = npcs.iter().find(|n| n.id == "food_vendor") else { panic!("no food vendor in izlude") };
     assert_eq!((vendor.kind.as_str(), vendor.shop.as_str()), (super::SHOP, "food"));
-    let tools = npcs.iter().find(|n| n.id == "tool_dealer").unwrap();
-    assert!((vendor.x as i32 - tools.x as i32).abs() + (vendor.y as i32 - tools.y as i32).abs() <= 12, "beside the Tool Dealer");
+    let (vx, vy) = vendor.center();
+    assert!(
+        town.manifest.residents.spots.iter().any(|s| s.tag.as_deref() == Some("stall") && (s.x - vx).hypot(s.y - vy) <= 8.0),
+        "by the market stalls"
+    );
+    let kafra = npcs.iter().find(|n| n.id == "kafra").unwrap();
+    assert!((vx - kafra.center().0).hypot(vy - kafra.center().1) > 12.0, "not piled up at the Kafra");
+    for (i, a) in npcs.iter().enumerate() {
+        assert!(town.walk.is_walkable(a.center().0, a.center().1), "{} stands on the street", a.id);
+        for b in &npcs[i + 1..] {
+            let d = (a.center().0 - b.center().0).hypot(a.center().1 - b.center().1);
+            assert!(d >= 3.0, "{} and {} crowd each other ({d:.1} cells)", a.id, b.id);
+        }
+    }
+    if let Some(inside) = world.map_index("izlude_in") {
+        let indoors = &world.map(inside).manifest.npcs;
+        for id in ["tool_dealer", "dega", "armor_dealer", "hollgrehenn"] {
+            let n = indoors.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("{id} keeps shop indoors"));
+            assert!(world.map(inside).walk.is_walkable(n.center().0, n.center().1), "{id} stands on the floor");
+        }
+    }
     let stock = items::shop("food").unwrap();
     let red = items::find("red_potion").unwrap().price;
     for id in stock {
         let e = items::find(id).unwrap();
-        assert!(matches!(e.kind, Kind::Consumable(Effect::Heal(_) | Effect::Spirit(_))), "{id} restores something");
+        assert_matches!(e.kind, Kind::Consumable(Effect::Heal(_) | Effect::Spirit(_)), "{id} restores something");
         assert!(e.price < red, "{id} is cheaper than a Red Potion");
     }
     assert!(stock.iter().any(|id| matches!(items::find(id).unwrap().kind, Kind::Consumable(Effect::Spirit(_)))), "grapes for SP");
@@ -305,4 +329,72 @@ fn a_periapt_makes_potions_restore_half_again() {
     let total = stage.players[0].fighter.as_ref().unwrap().regen[0].expect("it runs").total;
     let (lo, hi) = ((lo as f32 * 1.5).round() as i32, (hi as f32 * 1.5).round() as i32);
     assert!((lo..=hi).contains(&total), "{total} not in {lo}..={hi}");
+}
+
+/// A homunculus deals 20–45 % of an equal-level owner's basic-attack DPS
+/// (design §3 "Stats"), every type at every level, against the swarm's
+/// armour and save. Expected values: the chance to hit (or the save's
+/// half) times the dice's average over the interval. The owner swings the
+/// Merchant's starting axe with Extra Attack from tier 2.
+#[test]
+fn a_homunculus_deals_a_fifth_to_under_half_of_its_owners_basic_attack() {
+    use super::companion::{hom_dice, hom_interval_ms, hom_to_hit, HomType};
+    use crate::world::combat::{save_dc, Archetype, Class, MonsterBlock, Weapon};
+    let chance = |bonus: i32, against: i32| ((21 - (against - bonus)) as f32 / 20.0).clamp(0.05, 0.95);
+    for level in [1u32, 5, 10, 20, 29, 30, 45, 59, 60, 75, 99] {
+        let block = MonsterBlock::new(level, Archetype::Swarm, 1);
+        let axe = Weapon::held(Class::Merchant, "axe");
+        let (dice, _) = axe.damage(Class::Merchant, level);
+        let owner = chance(axe.to_hit(level), block.ac) * dice.average_x2() as f32 / 2.0
+            * Class::Merchant.attacks_per_action(level) as f32
+            / (axe.interval_ms as f32 / 1000.0);
+        for t in HomType::ALL {
+            let l = level as u8;
+            let avg = hom_dice(t, l).average_x2() as f32 / 2.0;
+            let per_blow = if t.ranged() { avg * (1.0 - chance(block.save, save_dc(level)) / 2.0) } else { chance(hom_to_hit(l, false), block.ac) * avg };
+            let share = per_blow / (hom_interval_ms(t) as f32 / 1000.0) / owner;
+            assert!((0.20..=0.45).contains(&share), "{t:?} at {level}: {:.0} % of the owner's", share * 100.0);
+        }
+    }
+}
+
+/// Past the cap (docs/locations/ladder_60_99.md §3.1): Thanatos Tower's
+/// monsters reach level 104 and its boss 109 while players stop at 99.
+/// The level-difference rule tops out at +50 % (never a jackpot), a level
+/// 89-99 party still shares a 104 kill sensibly, a capped player's basic
+/// attacks still land on more than half the swings against the band's top
+/// and on half against the boss, and its spells still beat a monster's
+/// save often enough to matter.
+#[test]
+fn past_the_cap_numbers_stay_in_reach() {
+    use crate::world::combat::{
+        class_mod, exp_to_next, kill_value, level_diff_percent, proficiency, save_dc, share_kill, Archetype, MonsterBlock, MAX_LEVEL,
+    };
+    let chance = |bonus: i32, against: i32| ((21 - (against - bonus)) as f32 / 20.0).clamp(0.05, 0.95);
+    // Experience: +5 % a level above, capped; the cap level earns nothing more.
+    assert_eq!((level_diff_percent(104 - 99), level_diff_percent(109 - 99), level_diff_percent(109 - 89)), (125, 150, 150));
+    assert_eq!(exp_to_next(MAX_LEVEL), 0);
+    for l in 89..MAX_LEVEL {
+        // A swarm kill at 104 is worth under a 2 % of the level at any point.
+        let one = share_kill(kill_value(104, Archetype::Swarm), 104, &[l])[0];
+        assert!(one * 50 < exp_to_next(l), "level {l}: {one} of {}", exp_to_next(l));
+    }
+    // A party across the band: everyone gets a share, the closest the most.
+    let shares = share_kill(kill_value(104, Archetype::Chaser), 104, &[89, 95, 99]);
+    assert!(shares.iter().all(|&s| s > 0) && shares[0] < shares[1] && shares[1] < shares[2], "{shares:?}");
+    // To hit at the cap with a +0 weapon: the band's top and the boss.
+    let bonus = proficiency(99) + class_mod(99);
+    for (level, arch, floor) in [(104, Archetype::Swarm, 0.65), (104, Archetype::Tank, 0.55), (104, Archetype::Elite, 0.55), (109, Archetype::Boss, 0.45)] {
+        let ac = MonsterBlock::new(level, arch, 1).ac;
+        let c = chance(bonus, ac);
+        println!("level 99 vs {arch:?} {level}: AC {ac}, {:.0} % to hit", c * 100.0);
+        assert!(c >= floor, "{arch:?} {level}: {:.0} %", c * 100.0);
+    }
+    // Spells: a monster at the band's top fails a capped player's save DC
+    // at least a third of the time, the boss (before its Legendary
+    // Resistance) at least a fifth.
+    for (level, arch, floor) in [(104, Archetype::Swarm, 0.33), (109, Archetype::Boss, 0.2)] {
+        let fail = 1.0 - chance(MonsterBlock::new(level, arch, 1).save, save_dc(99));
+        assert!(fail >= floor, "{arch:?} {level}: fails {:.0} %", fail * 100.0);
+    }
 }

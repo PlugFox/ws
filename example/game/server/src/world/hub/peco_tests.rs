@@ -12,7 +12,7 @@ use crate::world::combat::{self, Loadout, SkillBook};
 use crate::world::horde::catalog::{test_def, MonsterCatalog};
 use crate::world::horde::{Horde, HordeConfig};
 use crate::world::map::{CameraConstraint, LocationKind};
-use crate::world::protocol::{mount, MONSTER_ENTITY_BASE};
+use crate::world::protocol::{mount, Appearance, MONSTER_ENTITY_BASE};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -30,8 +30,30 @@ fn controls(out: &Outgoing, user: u32) -> Vec<ServerMsg> {
         .collect()
 }
 
-fn mounts(out: &Outgoing, user: u32) -> Vec<ServerMsg> {
-    controls(out, user).into_iter().filter(|m| matches!(m, ServerMsg::PlayerMount { .. })).collect()
+/// `(entity, mount, speed)` of every appearance user `user` got, from
+/// `player_appearance` and the players of `map_enter` / `player_appeared`.
+fn mounts(out: &Outgoing, user: u32) -> Vec<(u32, u8, u8)> {
+    controls(out, user)
+        .into_iter()
+        .flat_map(|m| match m {
+            ServerMsg::PlayerAppearance { entity_id, appearance } => vec![(entity_id, appearance)],
+            ServerMsg::MapEnter { players, .. } => players.into_iter().map(|p| (p.entity_id, p.appearance)).collect(),
+            ServerMsg::PlayerAppeared { player } => vec![(player.entity_id, player.appearance)],
+            _ => Vec::new(),
+        })
+        .map(|(id, a)| (id, a.mount, a.speed))
+        .collect()
+}
+
+/// The appearance updates (`player_appearance`) user `user` got.
+fn shown(out: &Outgoing, user: u32) -> Vec<(u32, Appearance)> {
+    controls(out, user)
+        .into_iter()
+        .filter_map(|m| match m {
+            ServerMsg::PlayerAppearance { entity_id, appearance } => Some((entity_id, appearance)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A level-40 crusader (user `user`) holding `weapon`, with `loadout`.
@@ -54,14 +76,15 @@ fn a_rider_is_shown_to_the_map_and_walks_faster_in_town() {
     let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet()).with_skills(book());
     let mut out = Vec::new();
     hub.join(crusader(1, "", rider(true)), Uuid::new_v4(), None, 0, &mut out);
-    let on = ServerMsg::PlayerMount { entity_id: 101, mount: mount::PECO, speed: 25 };
-    assert_eq!(mounts(&out, 1), vec![on.clone()], "a rider learns its own mount on arrival");
+    let on = (101, mount::PECO, 25);
+    assert_eq!(mounts(&out, 1), vec![on], "a rider learns its own mount on arrival");
 
-    // A newcomer on foot sees the rider; the rider hears nothing of mounts.
+    // A newcomer on foot sees the rider (in map_enter) and its own walk; the
+    // rider learns the newcomer walks.
     out.clear();
     hub.join(profile(2), Uuid::new_v4(), None, 0, &mut out);
-    assert_eq!(mounts(&out, 2), vec![on.clone()]);
-    assert!(mounts(&out, 1).is_empty(), "the newcomer walks");
+    assert_eq!(mounts(&out, 2), vec![on, (102, mount::NONE, 0)]);
+    assert_eq!(mounts(&out, 1), vec![(102, mount::NONE, 0)], "the newcomer walks");
 
     // The rider walks 25 % farther (rows 1..5 of the town, no portals).
     put(&mut hub, 1, 4.5, 1.5);
@@ -78,8 +101,8 @@ fn a_rider_is_shown_to_the_map_and_walks_faster_in_town() {
     // Getting off: the whole map sees it, and the rider walks normally.
     out.clear();
     hub.set_loadout(1, rider(false), &mut out);
-    let off = ServerMsg::PlayerMount { entity_id: 101, mount: mount::NONE, speed: 0 };
-    assert_eq!((mounts(&out, 1), mounts(&out, 2)), (vec![off.clone()], vec![off]));
+    let off = (101, mount::NONE, 0);
+    assert_eq!((mounts(&out, 1), mounts(&out, 2)), (vec![off], vec![off]));
     assert_eq!(hub.players[hub.find(1).unwrap()].ride, 0.0);
     // A loadout change that keeps the rider on foot says nothing.
     out.clear();
@@ -90,6 +113,90 @@ fn a_rider_is_shown_to_the_map_and_walks_faster_in_town() {
     unskilled.skills.remove("peco_ride");
     hub.set_loadout(1, unskilled, &mut out);
     assert!(mounts(&out, 2).is_empty());
+}
+
+#[test]
+fn a_skill_reset_that_drops_the_mount_skill_dismounts() {
+    let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet()).with_skills(book());
+    let mut out = Vec::new();
+    hub.join(crusader(1, "pike", rider(true)), Uuid::new_v4(), None, 0, &mut out);
+    hub.join(profile(2), Uuid::new_v4(), None, 0, &mut out);
+    out.clear();
+    // The reset hands back an empty loadout; a stale `mounted` (a hand
+    // edit, an old client) must not keep the rider up either.
+    let reset = Loadout { mounted: true, ..Loadout::default() };
+    hub.set_loadout(1, reset, &mut out);
+    let off = (101, mount::NONE, 0);
+    assert_eq!((mounts(&out, 1), mounts(&out, 2)), (vec![off], vec![off]), "the map sees the rider get off");
+    let p = &hub.players[hub.find(1).unwrap()];
+    assert!(!p.profile.loadout.mounted && p.ride == 0.0, "on foot, walking at its own pace");
+    // Learning the skill again does not put it back on the bird.
+    out.clear();
+    hub.set_loadout(1, rider(false), &mut out);
+    assert!(mounts(&out, 2).is_empty(), "{out:?}");
+    // Arriving again (another map, a reconnect) re-states it whole.
+    out.clear();
+    hub.join(crusader(1, "pike", rider(false)), Uuid::new_v4(), None, 0, &mut out);
+    assert_eq!(shown(&out, 1).into_iter().map(|(id, a)| (id, a.mount, a.speed)).collect::<Vec<_>>(), vec![off]);
+}
+
+#[test]
+fn a_skill_reset_on_a_stage_gets_the_fighter_off_too() {
+    let mut st = stage(crusader(1, "javelin", rider(true)));
+    assert!(st.players[0].fighter.as_ref().unwrap().riding);
+    let mut out = Vec::new();
+    st.set_loadout(1, Loadout { mounted: true, ..Loadout::default() }, &mut out);
+    assert!(!st.players[0].fighter.as_ref().unwrap().riding, "the fighter loses the riding passives");
+    assert_eq!(shown(&out, 1).iter().map(|(id, a)| (*id, a.mount)).collect::<Vec<_>>(), vec![(101, mount::NONE)]);
+}
+
+#[test]
+fn the_held_weapon_is_part_of_the_own_and_the_peers_appearance() {
+    let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet()).with_skills(book());
+    let mut out = Vec::new();
+    // A level-10 swordsman holding a pike: its own client is told so right
+    // after map_enter (it used to fall back to the class's sword).
+    let pike = PlayerProfile { archetype: "swordsman".into(), level: 10, weapon: "pike".into(), ..profile(1) };
+    hub.join(pike, Uuid::new_v4(), None, 0, &mut out);
+    let own = shown(&out, 1);
+    assert_eq!(own.len(), 1, "{own:?}");
+    let (id, a) = &own[0];
+    assert_eq!((*id, a.class.as_str(), a.tier, a.weapon.as_str(), a.mount), (101, "swordsman", 1, "spear:pike", mount::NONE));
+    // A peer gets the same appearance inside map_enter.
+    out.clear();
+    hub.join(profile(2), Uuid::new_v4(), None, 0, &mut out);
+    let listed = controls(&out, 2).into_iter().find_map(|m| match m {
+        ServerMsg::MapEnter { players, .. } => players.into_iter().find(|p| p.entity_id == 101).map(|p| p.appearance),
+        _ => None,
+    });
+    assert_eq!(listed.as_ref(), Some(a));
+}
+
+#[test]
+fn appearances_are_re_derived_so_a_missed_change_heals_within_a_second() {
+    let mut hub = HubInstance::new(1, Arc::new(test_world()), quiet()).with_skills(book());
+    let mut out = Vec::new();
+    hub.join(crusader(1, "", rider(false)), Uuid::new_v4(), None, 0, &mut out);
+    hub.join(profile(2), Uuid::new_v4(), None, 0, &mut out);
+    // Nothing changed: the sweep says nothing (idempotent).
+    out.clear();
+    for _ in 0..hub.config.tick_hz * super::appearance::SWEEP_SECS {
+        hub.tick(&mut out);
+    }
+    assert!(shown(&out, 2).is_empty(), "{:?}", shown(&out, 2));
+    // An input changed behind the instance's back (a level, a field no
+    // path announces): the next sweep shows it to the map, once.
+    let i = hub.find(1).unwrap();
+    hub.players[i].profile.level = 60;
+    hub.players[i].profile.loadout.mounted = true;
+    out.clear();
+    for _ in 0..hub.config.tick_hz * super::appearance::SWEEP_SECS * 2 {
+        hub.tick(&mut out);
+    }
+    let seen = shown(&out, 2);
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!((seen[0].1.tier, seen[0].1.mount, seen[0].1.speed), (3, mount::PECO, 25));
+    assert_eq!(shown(&out, 1).len(), 1, "the player too");
 }
 
 /// A 20 × 9 field (cells 1..21 × 1..10) with sturdy, nearly still blobs;

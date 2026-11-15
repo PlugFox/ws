@@ -81,7 +81,15 @@ Future<void> _bot(Uri server, String name, int index, int count, String party) a
         break;
     }
   });
-  final wsUri = server.replace(scheme: server.scheme == 'https' ? 'wss' : 'ws', path: '/api/ws', query: 'token=$token');
+  // The server refuses another client build: a bot is whatever it takes
+  // (`GET /api/online` says, `update.dart`).
+  final online = await (await http.getUrl(server.resolve('/api/online'))).close();
+  final build = (jsonDecode(await online.transform(utf8.decoder).join()) as Map<String, Object?>)['build'] ?? 'dev';
+  final wsUri = server.replace(
+    scheme: server.scheme == 'https' ? 'wss' : 'ws',
+    path: '/api/ws',
+    queryParameters: {'token': token, 'build': '$build'},
+  );
   await ws.connect(wsUri.toString());
   await ws.push(ClientMsg.hubJoin());
   stdout.writeln('$name joined');

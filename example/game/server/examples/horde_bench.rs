@@ -10,7 +10,7 @@
 use game_server::world::horde::catalog::MonsterCatalog;
 use game_server::world::horde::{Horde, HordeConfig};
 use game_server::world::hub::HubWorld;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -35,9 +35,9 @@ fn main() {
             let mut placed = 0;
             while placed < n {
                 let (x, y) = if layout == "spread" {
-                    (rng.gen_range(0.0..map.walk.width() as f32), rng.gen_range(0.0..map.walk.height() as f32))
+                    (rng.random_range(0.0..map.walk.width() as f32), rng.random_range(0.0..map.walk.height() as f32))
                 } else {
-                    (cx + rng.gen_range(-12.0..12.0), cy + rng.gen_range(-12.0..12.0))
+                    (cx + rng.random_range(-12.0..12.0), cy + rng.random_range(-12.0..12.0))
                 };
                 if map.is_reachable_cell(x as u32, y as u32) && horde.spawn(regular[placed % regular.len()], x, y).is_some() {
                     placed += 1;

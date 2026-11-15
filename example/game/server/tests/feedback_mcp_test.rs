@@ -111,7 +111,7 @@ async fn next_msg(ws: &mut Ws) -> ServerMsg {
 
 /// Connects and joins the hub; checks the versioned welcome.
 async fn enter(addr: SocketAddr, token: &str) -> Ws {
-    let (mut ws, _) = connect_async(format!("ws://{addr}/api/ws?token={token}")).await.unwrap();
+    let (mut ws, _) = connect_async(format!("ws://{addr}/api/ws?token={token}&build={}", game_server::version::client_build())).await.unwrap();
     match next_msg(&mut ws).await {
         ServerMsg::Connected { server_version, .. } => assert_eq!(server_version, game_server::version::version()),
         other => panic!("expected connected, got {other:?}"),
@@ -190,6 +190,7 @@ async fn feedback_is_checked_stored_rate_limited_and_worked_through_mcp() {
     let online: Value = reqwest::get(format!("http://{addr}/api/online")).await.unwrap().json().await.unwrap();
     assert_eq!(online["online"], 1);
     assert!(online["server_time"].as_i64().unwrap() > 1_700_000_000_000);
+    assert_eq!(online["build"], game_server::version::client_build());
 
     // MCP: handshake.
     let (status, init) = mcp(

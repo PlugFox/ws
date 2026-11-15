@@ -27,7 +27,7 @@
 use super::storage::FLAG_PLANT;
 use super::{in_radius, Horde};
 use crate::world::map::{MapData, MapError, WalkGrid};
-use rand::Rng;
+use rand::RngExt;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -163,21 +163,21 @@ impl Horde {
         if cells.is_empty() {
             return 0;
         }
-        let want = self.rng.gen_range(rules.count.0..=rules.count.1) as usize;
+        let want = self.rng.random_range(rules.count.0..=rules.count.1) as usize;
         let mut placed: Vec<(f32, f32)> = Vec::with_capacity(want);
         let mut tries = want * TRIES_PER_PLANT;
         while placed.len() < want && tries > 0 {
             tries -= 1;
-            let (cx, cy) = cells[self.rng.gen_range(0..cells.len())];
-            let x = cx as f32 + 0.5 + self.rng.gen_range(-JITTER..JITTER);
-            let y = cy as f32 + 0.5 + self.rng.gen_range(-JITTER..JITTER);
+            let (cx, cy) = cells[self.rng.random_range(0..cells.len())];
+            let x = cx as f32 + 0.5 + self.rng.random_range(-JITTER..JITTER);
+            let y = cy as f32 + 0.5 + self.rng.random_range(-JITTER..JITTER);
             if placed.iter().any(|&(px, py)| in_radius(x - px, y - py, rules.spacing)) {
                 continue;
             }
-            let roll = self.rng.gen_range(0..total);
+            let roll = self.rng.random_range(0..total);
             let kind = picks.iter().find(|(_, acc)| roll < *acc).expect("roll below the total").0;
             let (lo, hi) = self.catalog.get(kind).hits;
-            let hp = self.rng.gen_range(lo..=hi);
+            let hp = self.rng.random_range(lo..=hi);
             if self.spawn_plant(kind, x, y, hp).is_none() {
                 break; // pool full
             }
@@ -188,7 +188,7 @@ impl Horde {
     }
 
     /// A rooted plant of `kind` that takes `hits` blows.
-    pub(super) fn spawn_plant(&mut self, kind: u8, x: f32, y: f32, hits: u16) -> Option<u16> {
+    pub fn spawn_plant(&mut self, kind: u8, x: f32, y: f32, hits: u16) -> Option<u16> {
         let slot = self.store.spawn(kind, x, y, hits.max(1) as i32, FLAG_PLANT)?;
         self.plants += 1;
         if !self.index.hold && !self.index.fresh.contains(&slot) && self.index.fresh.len() < super::MAX_FRESH {
@@ -209,7 +209,7 @@ impl Horde {
             return None;
         }
         let (lo, hi) = def.hits;
-        let hits = self.rng.gen_range(lo..=hi.max(lo));
+        let hits = self.rng.random_range(lo..=hi.max(lo));
         self.spawn_plant(kind, x, y, hits)
     }
 

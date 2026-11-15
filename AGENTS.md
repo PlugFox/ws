@@ -22,7 +22,7 @@ ws/
         ├── recipe.toml Declarative asset & balance bake recipe
         ├── pipeline/  ETL pipeline (Python / Node.js)
         ├── engine/    TypeScript Three.js engine runtime (Vite bundle)
-        └── dist/      Baked client & server packs (KTX2, heightmaps, walkability.bin)
+        └── dist/      Baked client & server packs (PNG/WebP atlases, heightmaps, walkability.bin)
 ```
 
 ---
@@ -34,7 +34,7 @@ ws/
    - All proprietary asset processing logic belongs strictly inside `example/assets/` (`ws-game-assets` submodule).
 2. **Clean Game Engine Contracts**:
    - The game client and server in `example/` only consume generic, industry-standard game formats:
-     - Textures: KTX2 texture arrays / atlases (`.ktx2`)
+     - Textures: PNG / WebP atlases and flipbook sheets (`.png`, `.webp`), loaded with three's `TextureLoader`; no KTX2 / `KTX2Loader` (docs/DECISIONS.md D56)
      - Animations: JSON manifests (`manifest.json`)
      - Terrains: 16-bit PNG heightmaps (`heightmap.png`)
      - Physics / Pathfinding: Binary walkability grids (`walkability.bin`)
@@ -56,7 +56,7 @@ ws/
 - **Data-Oriented Design (DoD)**:
   - Do NOT use heavy object-oriented hierarchies (`Vec<Box<dyn Monster>>`).
   - Use **Struct-of-Arrays (SoA)**: parallel contiguous arrays for positions, velocities, health, and state flags (`HordeStorage`) to maximize CPU L1/L2 cache locality and enable automatic SIMD vectorization (AVX2 / ARM NEON).
-  - Use `rayon` for parallel iteration over spatial sectors.
+  - No `rayon` inside an instance: hub channels and stages already run in parallel as Tokio tasks, and one tick stays far under its 50 ms budget (measured: example/docs/ROADMAP.md Phase 5, re-checked in docs/DECISIONS.md D56).
 - **Zero-Allocation Runtime**:
   - Pre-allocate entity pools using generational indexing / free-list stacks (`free_slots: Vec<u16>`). Spawning and killing entities must never call system `malloc`/`free`.
 - **Spatial Partitioning**:
@@ -95,7 +95,7 @@ dart test
 cd native/rust && cargo test
 
 # Bake game assets & server databases from recipe.toml
-cd example/assets/pipeline && python3 bake.py
+cd example/assets/pipeline && uv run bake.py   # Pillow and numpy from pipeline/uv.lock
 # or from example/assets root:
 npm run bake
 

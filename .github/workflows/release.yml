@@ -40,8 +40,8 @@ permissions:
   contents: read
 
 env:
-  DART_VERSION: 3.13.7 # mise.toml
-  FLUTTER_VERSION: 3.47.9 # ships Dart 3.13.7
+  DART_VERSION: 3.14.0 # mise.toml
+  FLUTTER_VERSION: 3.50.0 # ships Dart 3.14.0
 
 jobs:
   check:
@@ -80,7 +80,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: 🦀 Rust from rust-toolchain.toml
         run: tool/rust_toolchain.sh
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-about@0.9.3
       - run: tool/third_party_licenses.sh out/THIRD_PARTY_LICENSES

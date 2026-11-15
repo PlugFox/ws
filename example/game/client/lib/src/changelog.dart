@@ -6,6 +6,59 @@ typedef ChangelogEntry = ({String title, String date, List<String> items});
 
 const changelog = <ChangelogEntry>[
   (
+    title: 'Five new expeditions and a clearer HUD',
+    date: '2026-11-15',
+    items: [
+      'Orc Village (levels 60–68): a daylight war camp. Banners rally the orcs who fight under them, so cut them down; a war horn names a side and a whole column marches in from there while arrows rain. The Orc Lord comes last.',
+      'Toy Factory (levels 66–75): conveyor belts carry you and the monsters alike, the shift whistle reverses them while cranes drop crates, and a switch stops the belts near it for half a minute. The Stormy Knight tries to blow you onto them.',
+      'Glast Heim Churchyard (levels 73–83): restless graves keep sending Ghouls until you break and consecrate them, holy fonts heal you and burn the dead, and when the bell tolls thirteen every grave opens again. The Dark Lord waits at the chapel.',
+      'Thor Volcano (levels 81–91): lava surges flood one side\'s chambers at a time and bombs fall from the smoke; a cold spell on lava leaves obsidian, safe ground for a few seconds. Ifrit rises at the end.',
+      'Thanatos Tower (levels 89–99): a climb in three acts on one map, with new stairs at 3:00 and 6:00: books and mimics, then plasma of five colours hatching from specimen tubes, then the angels of the sanctum and the beams of Judgment. Thanatos waits at the summit.',
+      'Each new place brings its own monsters, mini-bosses with affixes, monster skills, cards with art and loot; the twelve older cards that still showed a sprite stand-in got their own art too. Every map has a new painted minimap.',
+      'Loot shows in a short feed over the SP orb instead of toasts down the middle: repeats merge ("Jellopy ×2"), zeny sums up, and only real finds (equipment, cards, magic items, valuables) get a card in their rarity colour.',
+      'The run timeline has a "Lv +N" chip: how many levels the monsters have gained so far, with the rule in its tooltip. Your buffs and conditions sit in rows under the minimap, each with a tooltip: what it does, the time left and where it came from.',
+      'Underlined rules words (dice, AC, saves, conditions, damage types, affixes) open a glossary tooltip anywhere in the game, on cards, skills, items and the boss bar; click one to pin it, and words inside it link on.',
+      'New UI sizes 0.5× and 0.75× in Settings leave more of the game in view on small screens.',
+    ],
+  ),
+  (
+    title: 'Liquid HP and SP orbs',
+    date: '2026-11-15',
+    items: [
+      'The HP and SP orbs are glass spheres of moving liquid: a hit leaves a pale trail of what you lost, a potion pours in with a shimmer, regeneration bubbles up, and below 30% the HP orb pulses red.',
+      'The orbs no longer drink potions on a click: use R / T, or turn on Auto-use potions in the settings.',
+      'On phones and tablets the orbs are the sticks: drag from the HP orb (bottom left) to walk, and from the SP orb (bottom right, under the big skill button) to aim it.',
+    ],
+  ),
+  (
+    title: 'The Merchant, Alchemist and Creator',
+    date: '2026-11-15',
+    items: [
+      'New class line: the Merchant, the Alchemist and the Creator. Mammonite pays zeny for a heavy swing, Cart Revolution and Cart Termination hit harder the fuller your bag, Discount and Overcharge make every shop kinder, and the Pushcart (+20 bag slots a level) rolls behind you for everyone to see.',
+      'Alchemists keep a homunculus: choose Lif, Amistr, Filir or Vanilmirth, and it follows you everywhere, Izlude included, and fights beside you on missions. It levels with you and grows its Bond on missions you clear together; evolve it with a Stone of Sage. Changing its type costs 5,000 zeny in town.',
+      'Summon Flora plants fighting plants, Sphere Mine sets a Marine Sphere that pulls monsters and blows up, Plant Cultivation grows herbs and mushrooms, Potion Pitcher throws your potions to allies, Acid Demonstration burns through tough monsters with acid bottles.',
+      'In town the hotbar becomes a town skill bar with the skills you can use there: the Pharmacy brews potions, acid bottles and the Stone of Sage, Peco Peco Ride mounts, Call Homunculus calls it or sends it to rest.',
+    ],
+  ),
+  (
+    title: 'Hats, new skills and a tidier Izlude',
+    date: '2026-11-15',
+    items: [
+      'Once the poison fog starts closing in, no more monsters arrive: clear what is left and survive. Mini-bosses and bigger waves now show up much earlier, and every expedition has a new one in its first minute: the Toad, the Vampire Bat, the Scorpion King and the Skeleton Captain, each with loot and a rare card.',
+      "When a mission ends, win or lose, a 'Return to town' button counts down 5 seconds and takes you home; the results stay open in town.",
+      "Mirabel the Hatter has a stall in the north-west market: bring her jellopy, fluff, feathers, spores, shells and a few coins for a Ribbon, a Hat, a Flu Mask, Sunglasses, a Bandit's Cap or a Plague Doctor's Mask.",
+      "Izlude's merchants moved indoors: Dega and the Armor Dealer in the west hall, the Tool Dealer in the east house, Hollgrehenn at his forge in the round house; the Food Vendor sells from the stalls south-west of the square. The portal on Prontera field's bridge is gone.",
+      "Kafra: 'Parties looking for adventurers' lists public parties in town or out on an expedition. Join one and go: if they are already fighting, you land beside them. Leaders can list or hide their party.",
+      'Thief: Hiding sinks you into the ground; nothing swings or auto-casts while you are under and monsters lose you. Back Stab is a tier-1 skill that hits far harder from behind or out of hiding. New: Poison Bomb, Smoke Bomb, Venom Knife, Improve Dodge; Tunnel Drive is open from the start and goes further.',
+      'Archer: Arrow Change nocks Steel, Fire, Crystal, Wind, Stone or Silver arrows: your bow and arrow skills deal that element, the tips glow with it, and the nocked arrow shows by your buffs. New: Arrow Vulcan (a volley that rains down arrow by arrow), Musical Strike, Frost Joke.',
+      'Paladin learns Lord Knight arts: Parry (with a sword; a parried blow answers with an instant riposte), Aura Blade and Bowling Bash. Priest learns Blade Stop and Steel Body. Wizard: new Magic Armor; Meteor Storm reworked: meteors seek the thickest crowds, mark where they fall and hit harder.',
+      'New ground effects for Sanctuary, Magnus Exorcismus, Battle Chant, Grand Cross, Basilica, Storm Gust, Lord of Vermilion, Gravitation Field, Quagmire, Fire Wall and the new bombs; Ice Wall is a real wall of ice that shatters.',
+      'Hold Shift over equipment to compare it with what you wear. Items with card slots show how many: Stinging Sword of Kindling [3].',
+      'The healing key (R) drinks the potion that fits the wound, a real potion before food. New in Settings: auto-use potions and food below the HP and SP you choose.',
+      'Fixed characters looking wrong (a Paladin kept his Peco after a skill reset, riders were invisible in town, a pike was drawn as a sword): the whole look now comes from the server. When a new version is out, the game reloads itself or offers a Reload button.',
+    ],
+  ),
+  (
     title: 'Monster cards',
     date: '2026-11-14',
     items: [

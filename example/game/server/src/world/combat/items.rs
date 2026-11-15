@@ -152,7 +152,8 @@ const AR: u8 = 1 << Class::Archer as u8;
 const MG: u8 = 1 << Class::Mage as u8;
 const AC: u8 = 1 << Class::Acolyte as u8;
 const TH: u8 = 1 << Class::Thief as u8;
-pub const ALL_CLASSES: u8 = SW | AR | MG | AC | TH;
+const MC: u8 = 1 << Class::Merchant as u8;
+pub const ALL_CLASSES: u8 = SW | AR | MG | AC | TH | MC;
 
 /// What a worn item adds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -220,15 +221,15 @@ pub const ITEMS: &[Item] = &[
     item("silk_robe", "Silk Robe", Kind::Armour(Weight::Light, 11), 1500, MG | AC, sp(10), "A robe of fine silk that helps a caster focus."),
     item("tights", "Tights", Kind::Armour(Weight::Light, 12), 4000, AR | TH, save(Save::Reflex, 1), "Close-fitting clothes that never catch on a branch."),
     item("silver_robe", "Silver Robe", Kind::Armour(Weight::Light, 12), 6000, MG, sp(20), "A robe woven with silver thread."),
-    item("wooden_mail", "Wooden Mail", Kind::Armour(Weight::Medium, 12), 1200, SW | AR | AC | TH, Bonus::NONE, "Armour of hardened wooden plates."),
-    item("coat", "Coat", Kind::Armour(Weight::Medium, 13), 2500, SW | AR | AC | TH, Bonus::NONE, "A long coat with leather padding."),
+    item("wooden_mail", "Wooden Mail", Kind::Armour(Weight::Medium, 12), 1200, SW | AR | AC | TH | MC, Bonus::NONE, "Armour of hardened wooden plates."),
+    item("coat", "Coat", Kind::Armour(Weight::Medium, 13), 2500, SW | AR | AC | TH | MC, Bonus::NONE, "A long coat with leather padding."),
     item("saints_robe", "Saint's Robe", Kind::Armour(Weight::Medium, 13), 5000, AC, save(Save::Mind, 1), "A blessed robe for servants of God."),
-    item("padded_armor", "Padded Armor", Kind::Armour(Weight::Medium, 14), 6000, SW | AR | AC | TH, Bonus::NONE, "Thick layers of quilted cloth."),
+    item("padded_armor", "Padded Armor", Kind::Armour(Weight::Medium, 14), 6000, SW | AR | AC | TH | MC, Bonus::NONE, "Thick layers of quilted cloth."),
     item("holy_robe", "Holy Robe", Kind::Armour(Weight::Medium, 15), 14000, AC, save(Save::Mind, 1), "Vestments that turn evil aside."),
     item("chain_mail", "Chain Mail", Kind::Armour(Weight::Heavy, 16), 9000, SW, Bonus::NONE, "Interlocking rings of steel."),
     item("full_plate", "Full Plate", Kind::Armour(Weight::Heavy, 18), 30000, SW, Bonus::NONE, "Shaped steel plates over the whole body."),
     // Shields: +2 AC (5e), not with a two-handed weapon.
-    item("guard", "Guard", Kind::Shield, 50, SW | MG | AC | TH, ac(2), "A small round shield."),
+    item("guard", "Guard", Kind::Shield, 50, SW | MG | AC | TH | MC, ac(2), "A small round shield."),
     item("buckler", "Buckler", Kind::Shield, 1500, SW | AC, Bonus { ac: 2, save: Some((Save::Reflex, 1)), ..Bonus::NONE }, "A light shield that turns blows aside."),
     item("shield", "Shield", Kind::Shield, 9000, SW, Bonus { ac: 2, hp: 15, ..Bonus::NONE }, "A heavy shield of iron."),
     item("mirror_shield", "Mirror Shield", Kind::Shield, 16000, SW | AC, Bonus { ac: 2, save: Some((Save::Mind, 1)), ..Bonus::NONE }, "A polished shield that throws spells back."),
@@ -238,7 +239,7 @@ pub const ITEMS: &[Item] = &[
     item("hat", "Hat", Kind::Headgear(Slot::UpperHead), 1000, ALL_CLASSES, hp(8), "A hat with a broad brim."),
     item("biretta", "Biretta", Kind::Headgear(Slot::UpperHead), 3000, AC, save(Save::Mind, 1), "A square cap of the clergy."),
     item("circlet", "Circlet", Kind::Headgear(Slot::UpperHead), 3000, MG | AC, sp(12), "A thin band of metal around the brow."),
-    item("cap", "Cap", Kind::Headgear(Slot::UpperHead), 4000, SW | AR | AC | TH, ac(1), "A leather cap with metal studs."),
+    item("cap", "Cap", Kind::Headgear(Slot::UpperHead), 4000, SW | AR | AC | TH | MC, ac(1), "A leather cap with metal studs."),
     item("helm", "Helm", Kind::Headgear(Slot::UpperHead), 12000, SW, Bonus { ac: 1, hp: 10, ..Bonus::NONE }, "A steel helmet."),
     item("sunglasses", "Sunglasses", Kind::Headgear(Slot::MidHead), 2000, ALL_CLASSES, save(Save::Reflex, 1), "Keeps the glare out of your eyes."),
     item("geek_glasses", "Geek Glasses", Kind::Headgear(Slot::MidHead), 2000, ALL_CLASSES, save(Save::Mind, 1), "Thick lenses for thick books."),
@@ -246,10 +247,10 @@ pub const ITEMS: &[Item] = &[
     // Garments, shoes, accessories.
     item("hood", "Hood", Kind::Garment, 300, ALL_CLASSES, hp(5), "A hooded cape."),
     item("muffler", "Muffler", Kind::Garment, 2500, ALL_CLASSES, save(Save::Body, 1), "A warm scarf."),
-    item("manteau", "Manteau", Kind::Garment, 8000, SW | AR | AC | TH, ac(1), "A thick cloak that takes a blow."),
+    item("manteau", "Manteau", Kind::Garment, 8000, SW | AR | AC | TH | MC, ac(1), "A thick cloak that takes a blow."),
     item("sandals", "Sandals", Kind::Shoes, 300, ALL_CLASSES, hp(4), "Simple sandals."),
     item("shoes", "Shoes", Kind::Shoes, 2000, ALL_CLASSES, hp(10), "Leather shoes."),
-    item("boots", "Boots", Kind::Shoes, 7000, SW | AR | AC | TH, hp(18), "Sturdy boots for long marches."),
+    item("boots", "Boots", Kind::Shoes, 7000, SW | AR | AC | TH | MC, hp(18), "Sturdy boots for long marches."),
     item("clip", "Clip", Kind::Accessory, 1500, ALL_CLASSES, sp(10), "A hair clip that clears the mind."),
     item("rosary", "Rosary", Kind::Accessory, 2500, ALL_CLASSES, save(Save::Mind, 1), "Prayer beads."),
     item("ring", "Ring", Kind::Accessory, 2500, ALL_CLASSES, save(Save::Body, 1), "A plain iron ring."),
@@ -278,10 +279,10 @@ pub const ITEMS: &[Item] = &[
     // Magic items (magic.rs: rarity and enchantment): drops only, never
     // in a shop. The rows here are their plain numbers.
     item("mithril_shirt", "Mithril Shirt", Kind::Armour(Weight::Light, 13), 6000, ALL_CLASSES, Bonus::NONE, "Links of mithril, light as silk and hard as steel."),
-    item("elven_mail", "Elven Mail", Kind::Armour(Weight::Medium, 14), 14000, SW | AR | AC | TH, save(Save::Reflex, 1), "Leaf-thin plates that never slow a step."),
+    item("elven_mail", "Elven Mail", Kind::Armour(Weight::Medium, 14), 14000, SW | AR | AC | TH | MC, save(Save::Reflex, 1), "Leaf-thin plates that never slow a step."),
     item("apprentice_robe", "Apprentice's Robe", Kind::Armour(Weight::Light, 11), 5000, MG | AC, sp(15), "Embroidered with runes that hum in the dark."),
     item("dwarven_plate", "Dwarven Plate", Kind::Armour(Weight::Heavy, 18), 20000, SW, Bonus::NONE, "Forged deep under the mountains; blows glance off."),
-    item("sentinel_shield", "Sentinel Shield", Kind::Shield, 6000, SW | MG | AC | TH, Bonus { ac: 2, save: Some((Save::Reflex, 1)), ..Bonus::NONE }, "An open eye is painted on it, and it glows."),
+    item("sentinel_shield", "Sentinel Shield", Kind::Shield, 6000, SW | MG | AC | TH | MC, Bonus { ac: 2, save: Some((Save::Reflex, 1)), ..Bonus::NONE }, "An open eye is painted on it, and it glows."),
     item("spellward_buckler", "Spellward Buckler", Kind::Shield, 7000, SW | AC, Bonus { ac: 2, save: Some((Save::Mind, 1)), ..Bonus::NONE }, "Spells lose their bite against its silver rim."),
     item("focus_circlet", "Circlet of Focus", Kind::Headgear(Slot::UpperHead), 6000, MG | AC, sp(12), "A cold band of silver that keeps the mind clear."),
     item("night_goggles", "Goggles of Night", Kind::Headgear(Slot::MidHead), 5000, ALL_CLASSES, Bonus::NONE, "Dark lenses that make the night look like dusk."),
@@ -309,7 +310,7 @@ pub const ITEMS: &[Item] = &[
     item("plague_mask", "Plague Doctor's Mask", Kind::Headgear(Slot::LowerHead), 5000, ALL_CLASSES, save(Save::Body, 1), "The beak is stuffed with herbs that make every draught stronger."),
     item("quickness_ring", "Ring of Quickness", Kind::Accessory, 7000, ALL_CLASSES, Bonus::NONE, "A thin band of quicksilver that never sits still."),
     item("wellspring_earring", "Earring of the Wellspring", Kind::Accessory, 6000, MG | AC, sp(10), "A drop of blue water that is never used up."),
-    item("valor_medal", "Medal of Valor", Kind::Accessory, 6000, SW | AR | TH, Bonus::NONE, "Given for a battle nobody else survived."),
+    item("valor_medal", "Medal of Valor", Kind::Accessory, 6000, SW | AR | TH | MC, Bonus::NONE, "Given for a battle nobody else survived."),
     item("dawn_rosary", "Rosary of the Dawn", Kind::Accessory, 6000, AC, Bonus::NONE, "Beads of sunstone; the dead flinch at their light."),
     // Loot (Etc): sold at any merchant for half the price.
     item("jellopy", "Jellopy", Kind::Etc, 6, 0, Bonus::NONE, "A small crystal left behind by Porings."),
@@ -342,6 +343,11 @@ pub const ITEMS: &[Item] = &[
     item("emveretarcon", "Emveretarcon", Kind::Etc, 1000, 0, Bonus::NONE, "A harder metal for refining. A smith takes it for +5 to +7."),
     item("oridecon", "Oridecon", Kind::Etc, 5000, 0, Bonus::NONE, "A rare metal that refines a weapon from +8 to +10."),
     item("elunium", "Elunium", Kind::Etc, 5000, 0, Bonus::NONE, "A rare metal that refines armour from +8 to +10."),
+    // Alchemy (the Pharmacy, quests.rs): Acid Demonstration throws a
+    // bottle of each at full power; the Stone of Sage evolves a homunculus.
+    item("acid_bottle", "Acid Bottle", Kind::Etc, 120, 0, Bonus::NONE, "A corked flask of acid. Acid Demonstration hits at full power with one of these and a Bottle Grenade."),
+    item("bottle_grenade", "Bottle Grenade", Kind::Etc, 120, 0, Bonus::NONE, "A flask of oil with a rag for a fuse. Thrown by Acid Demonstration with an Acid Bottle."),
+    item("stone_of_sage", "Stone of Sage", Kind::Etc, 12000, 0, Bonus::NONE, "A philosopher's stone of the alchemists' guild. A bonded homunculus evolves with it."),
 ];
 
 /// Merchants and what they sell (`shop` of a `"shop"` NPC).
@@ -456,7 +462,7 @@ fn describe_item(i: &Item) -> String {
     }
     bonus_lines(&i.bonus, &mut lines);
     if matches!(i.kind, Kind::Consumable(_)) {
-        lines.push("[dim]Drink on a mission: R / T, the HP / SP orb, or double-click. A stronger potion replaces a running one; a weaker one is kept.[/]".into());
+        lines.push("[dim]Drink on a mission: R / T, auto-use, or double-click. A stronger potion replaces a running one; a weaker one is kept.[/]".into());
     }
     lines.push(format!("[dim]{}[/]", i.flavour));
     lines.join("\n")
@@ -492,7 +498,8 @@ fn enchant(id: &str, desc: String) -> (Rarity, String) {
     let mut lines: Vec<String> = desc.lines().map(String::from).collect();
     let flavour = if id_is_weapon(id) { None } else { lines.pop() };
     lines.extend(g.lines());
-    lines.push(format!("[dim]{} magic item · drops only[/]", g.rarity.label()));
+    let source = if super::quests::makes(id) { "drops, or the Hatter in Izlude" } else { "drops only" };
+    lines.push(format!("[dim]{} magic item · {source}[/]", g.rarity.label()));
     lines.extend(flavour);
     (g.rarity, lines.join("\n"))
 }
@@ -567,6 +574,8 @@ pub const fn victory_zeny(level: u32) -> u64 {
 
 /// Most stacks a bag holds and items per stack.
 pub const MAX_STACKS: usize = 100;
+/// Most stacks a merchant's cart adds on top (Pushcart, `Bag::cart`).
+pub const MAX_CART_STACKS: usize = 100;
 pub const MAX_STACK: u32 = 30_000;
 pub const MAX_ZENY: u64 = 1_000_000_000;
 
@@ -701,6 +710,31 @@ pub struct Bag {
     pub items: Vec<Stack>,
     pub equip: [String; EQUIP_SLOTS],
     pub zeny: u64,
+    /// Stacks over [`MAX_STACKS`] the owner's cart holds (Pushcart): a
+    /// skill, not a belonging, so it is never stored; whoever changes the
+    /// bag sets it from the loadout first (the socket task, `change_bag`).
+    pub cart: u16,
+}
+
+/// Shop prices moved by the buyer's haggling (`SkillBook::haggle`):
+/// percent off a purchase, percent more for a sale.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Haggle {
+    pub buy: u8,
+    pub sell: u8,
+}
+
+impl Haggle {
+    /// What `n` of an item of catalogue `price` cost (rounded up, so a
+    /// discount never makes anything free).
+    pub fn buy_cost(self, price: u32, n: u32) -> u64 {
+        (price as u64 * (100 - self.buy.min(100) as u64)).div_ceil(100) * n as u64
+    }
+
+    /// What `n` of an item of catalogue `price` sell for (rounded down).
+    pub fn sell_gain(self, price: u32, n: u32) -> u64 {
+        sell_price(price) as u64 * (100 + self.sell as u64) / 100 * n as u64
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -801,7 +835,7 @@ impl Class {
     pub const fn defence(self) -> i32 {
         match self {
             Class::Swordsman | Class::Archer | Class::Thief => 3,
-            Class::Acolyte => 2,
+            Class::Acolyte | Class::Merchant => 2,
             Class::Mage => 0,
         }
     }
@@ -861,7 +895,8 @@ impl Bag {
             }
             match bag.items.iter().position(|o| o.is(e.id, &attrs)) {
                 Some(i) => bag.items[i].count = (bag.items[i].count.saturating_add(s.count)).min(MAX_STACK),
-                None if bag.items.len() < MAX_STACKS => bag.items.push(Stack { id: e.id.into(), count: s.count.min(MAX_STACK), attrs }),
+                // A cart's stacks are kept even while the cart is unknown.
+                None if bag.items.len() < MAX_STACKS + MAX_CART_STACKS => bag.items.push(Stack { id: e.id.into(), count: s.count.min(MAX_STACK), attrs }),
                 None => {}
             }
         }
@@ -908,7 +943,7 @@ impl Bag {
                 self.items[i].count += n;
                 Ok(())
             }
-            None if self.items.len() >= MAX_STACKS => Err(ItemError::BagFull),
+            None if self.items.len() >= self.capacity() => Err(ItemError::BagFull),
             None => {
                 self.items.push(Stack { id: e.id.into(), count: n, attrs });
                 Ok(())
@@ -931,14 +966,24 @@ impl Bag {
         Ok(())
     }
 
+    /// Stacks the bag holds: [`MAX_STACKS`] and the cart's.
+    pub fn capacity(&self) -> usize {
+        MAX_STACKS + (self.cart as usize).min(MAX_CART_STACKS)
+    }
+
     /// Buys `n` of `id` from a merchant selling `stock`.
     pub fn buy(&mut self, id: &str, n: u32, stock: &[&str]) -> Result<u64, ItemError> {
+        self.buy_at(id, n, stock, Haggle::default())
+    }
+
+    /// [`Self::buy`] with the buyer's haggling.
+    pub fn buy_at(&mut self, id: &str, n: u32, stock: &[&str], haggle: Haggle) -> Result<u64, ItemError> {
         let e = find(id).ok_or(ItemError::Unknown)?;
         if !stock.contains(&id) {
             return Err(ItemError::NotSoldHere);
         }
         let n = n.clamp(1, 999);
-        let cost = e.price as u64 * n as u64;
+        let cost = haggle.buy_cost(e.price, n);
         if cost > self.zeny {
             return Err(ItemError::NoZeny);
         }
@@ -950,13 +995,18 @@ impl Bag {
     /// Sells `n` of the instance `id` from the bag (not what is worn) at
     /// half the catalogue price.
     pub fn sell(&mut self, id: &str, n: u32) -> Result<u64, ItemError> {
+        self.sell_at(id, n, Haggle::default())
+    }
+
+    /// [`Self::sell`] with the seller's haggling.
+    pub fn sell_at(&mut self, id: &str, n: u32, haggle: Haggle) -> Result<u64, ItemError> {
         let (e, attrs) = parse_key(id).ok_or(ItemError::Unknown)?;
         if !attrs.cards.is_empty() {
             return Err(ItemError::HasCards);
         }
         let n = n.max(1);
         self.take(id, n)?;
-        let gain = sell_price(e.price) as u64 * n as u64;
+        let gain = haggle.sell_gain(e.price, n);
         self.zeny = (self.zeny + gain).min(MAX_ZENY);
         Ok(gain)
     }
@@ -1218,7 +1268,7 @@ mod tests {
     /// (COMBAT.md §2.2): 16 / 14 / 13 / 11, +1 per tier.
     #[test]
     fn starting_kit_keeps_the_class_armour() {
-        for (c, want) in [(Class::Swordsman, 16), (Class::Archer, 14), (Class::Acolyte, 13), (Class::Mage, 11)] {
+        for (c, want) in [(Class::Swordsman, 16), (Class::Archer, 14), (Class::Acolyte, 13), (Class::Mage, 11), (Class::Merchant, 13)] {
             let bag = Bag::starting(c, "");
             assert_eq!(bag.gear(c).ac_at(1), want, "{c:?}");
             assert_eq!(bag.gear(c).ac_at(99), want + 2, "{c:?}");

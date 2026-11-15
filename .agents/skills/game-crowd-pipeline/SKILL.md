@@ -24,7 +24,7 @@ Located at `example/assets/recipe.toml`. Defines:
 
 ### Running the Baker
 ```bash
-cd example/assets/pipeline && python3 bake.py
+cd example/assets/pipeline && uv run bake.py   # Pillow and numpy from pipeline/uv.lock
 # or from example/assets/
 npm run bake
 ```

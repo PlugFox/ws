@@ -39,7 +39,7 @@ fn config(light: f32) -> HordeConfig {
 fn double_box_filter_matches_the_circle() {
     let mut rng = StdRng::seed_from_u64(3);
     for _ in 0..100_000 {
-        let (dx, dy, r) = (rng.gen_range(-20.0..20.0f32), rng.gen_range(-20.0..20.0f32), rng.gen_range(0.1..15.0f32));
+        let (dx, dy, r) = (rng.random_range(-20.0..20.0f32), rng.random_range(-20.0..20.0f32), rng.random_range(0.1..15.0f32));
         assert_eq!(in_radius(dx, dy, r), dx * dx + dy * dy <= r * r, "{dx},{dy} r={r}");
     }
 }
@@ -485,8 +485,8 @@ fn the_query_index_agrees_with_a_full_scan() {
     let mut h = Horde::new(Arc::clone(&w), catalog(), config(30.0));
     let mut rng = StdRng::seed_from_u64(11);
     for _ in 0..1500 {
-        let (x, y) = (rng.gen_range(1.5..118.5f32), rng.gen_range(1.5..118.5f32));
-        h.spawn(rng.gen_range(0..2), x, y);
+        let (x, y) = (rng.random_range(1.5..118.5f32), rng.random_range(1.5..118.5f32));
+        h.spawn(rng.random_range(0..2), x, y);
     }
     // Some die (HP 0 before the despawn), some move: the index follows.
     let alive: Vec<u16> = h.store().alive().to_vec();
@@ -495,7 +495,7 @@ fn the_query_index_agrees_with_a_full_scan() {
     }
     h.tick(1, 20, &[(60.0, 60.0)]);
     for _ in 0..200 {
-        let (x, y, r) = (rng.gen_range(0.0..120.0f32), rng.gen_range(0.0..120.0f32), rng.gen_range(0.5..12.0f32));
+        let (x, y, r) = (rng.random_range(0.0..120.0f32), rng.random_range(0.0..120.0f32), rng.random_range(0.5..12.0f32));
         let s = h.store();
         let body = |i: usize| h.catalog().get(s.kind[i]).radius;
         // Box candidates cover every body that reaches the box.
@@ -535,7 +535,7 @@ fn churn_inside_a_tick_needs_no_rebuild_and_stays_exact() {
     let mut h = Horde::new(Arc::clone(&w), catalog(), HordeConfig { pool: 2048, ..config(30.0) });
     let mut rng = StdRng::seed_from_u64(21);
     for _ in 0..1500 {
-        h.spawn(0, rng.gen_range(1.5..118.5f32), rng.gen_range(1.5..118.5f32));
+        h.spawn(0, rng.random_range(1.5..118.5f32), rng.random_range(1.5..118.5f32));
     }
     h.tick(1, 20, &[(60.0, 60.0)]);
     let mut buf = Vec::new();
@@ -544,22 +544,22 @@ fn churn_inside_a_tick_needs_no_rebuild_and_stays_exact() {
     // spawns that reuse the freed slots, with queries in between.
     for round in 0..300 {
         let alive = h.store().alive().to_vec();
-        let s = alive[rng.gen_range(0..alive.len())];
+        let s = alive[rng.random_range(0..alive.len())];
         match round % 4 {
             0 => {
                 let (x, y) = (h.store().x[s as usize], h.store().y[s as usize]);
-                let a = rng.gen_range(0.0..std::f32::consts::TAU);
-                let d = rng.gen_range(0.0..1.5f32);
+                let a = rng.random_range(0.0..std::f32::consts::TAU);
+                let d = rng.random_range(0.0..1.5f32);
                 h.place(s, (x + a.cos() * d).clamp(1.5, 118.5), (y + a.sin() * d).clamp(1.5, 118.5));
             }
             1 => h.store_mut().hp[s as usize] = 0,
             2 => {
                 h.despawn(s);
-                h.spawn(0, rng.gen_range(1.5..118.5f32), rng.gen_range(1.5..118.5f32));
+                h.spawn(0, rng.random_range(1.5..118.5f32), rng.random_range(1.5..118.5f32));
             }
             _ => {}
         }
-        let (x, y, r) = (rng.gen_range(0.0..120.0f32), rng.gen_range(0.0..120.0f32), rng.gen_range(0.5..10.0f32));
+        let (x, y, r) = (rng.random_range(0.0..120.0f32), rng.random_range(0.0..120.0f32), rng.random_range(0.5..10.0f32));
         buf.clear();
         h.near_box(x - r, y - r, x + r, y + r, &mut buf);
         let mut sorted = buf.clone();
@@ -596,14 +596,14 @@ fn query_cost() {
     // A dense crowd around a player plus a sparse field: the survivors case.
     for i in 0..3000 {
         let (x, y) = if i % 2 == 0 {
-            (200.0 + rng.gen_range(-25.0..25.0f32), 200.0 + rng.gen_range(-25.0..25.0f32))
+            (200.0 + rng.random_range(-25.0..25.0f32), 200.0 + rng.random_range(-25.0..25.0f32))
         } else {
-            (rng.gen_range(2.0..398.0f32), rng.gen_range(2.0..398.0f32))
+            (rng.random_range(2.0..398.0f32), rng.random_range(2.0..398.0f32))
         };
         h.spawn(0, x, y);
     }
     let n = 20_000;
-    let pts: Vec<(f32, f32)> = (0..n).map(|_| (200.0 + rng.gen_range(-20.0..20.0f32), 200.0 + rng.gen_range(-20.0..20.0f32))).collect();
+    let pts: Vec<(f32, f32)> = (0..n).map(|_| (200.0 + rng.random_range(-20.0..20.0f32), 200.0 + rng.random_range(-20.0..20.0f32))).collect();
     let mut buf = Vec::new();
     let t = std::time::Instant::now();
     let mut found = 0;

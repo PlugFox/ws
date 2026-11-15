@@ -42,7 +42,7 @@ where
     svc.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
 }
 
-fn h<'a>(res: &'a Response<Body>, name: header::HeaderName) -> &'a str {
+fn h(res: &Response<Body>, name: header::HeaderName) -> &str {
     res.headers().get(name).map(|v| v.to_str().unwrap()).unwrap_or("")
 }
 

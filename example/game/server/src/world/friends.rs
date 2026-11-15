@@ -358,6 +358,7 @@ impl Friends {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use super::*;
     async fn setup() -> (Friends, Vec<u32>) {
         let pool = crate::db::testing::pool().await;
@@ -405,7 +406,7 @@ mod tests {
         // Bob asks by entity id (Ann's character id = her account id here).
         let ann_char = FriendRepo::characters(&f.pool, ann).await.unwrap()[0].0;
         let out = f.act(bob, "BOB", FriendOp::Add { entity_id: ann_char }).await.unwrap();
-        assert!(matches!(&out[1], ServerMsg::FriendNote { op: note::SENT, name, .. } if name == "ANN"));
+        assert_matches!(&out[1], ServerMsg::FriendNote { op: note::SENT, name, .. } if name == "ANN");
         assert_eq!(ann_rx.try_recv().unwrap(), FriendEvent::Note { op: note::REQUEST, account: bob, name: "BOB".into() });
 
         // Requests show no presence.
@@ -413,7 +414,7 @@ mod tests {
         assert_eq!((friends[0].link, friends[0].online, friends[0].map.as_str()), (2, false, ""));
 
         let out = f.act(ann, "ANN", FriendOp::Accept { account: bob }).await.unwrap();
-        assert!(matches!(&out[1], ServerMsg::FriendNote { op: note::ACCEPTED, account, .. } if *account == bob));
+        assert_matches!(&out[1], ServerMsg::FriendNote { op: note::ACCEPTED, account, .. } if *account == bob);
 
         // Bob comes online on a stage (another instance): Ann hears it, and
         // her list says where he is.
@@ -446,7 +447,7 @@ mod tests {
 
         // Removing: both lists empty, the other side refreshes.
         let out = f.act(ann, "ANN", FriendOp::Remove { account: bob }).await.unwrap();
-        assert!(matches!(&out[0], ServerMsg::Friends { friends } if friends.is_empty()));
+        assert_matches!(&out[0], ServerMsg::Friends { friends } if friends.is_empty());
         assert!(f.list(bob).await.unwrap().is_empty());
         let _ = bob_rx.try_recv();
     }

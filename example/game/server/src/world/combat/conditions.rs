@@ -35,10 +35,13 @@ pub enum Condition {
     /// Terrified (a ghost's wail): it flees from what scared it and can
     /// neither attack nor cast (players; COMBAT.md, Payon Caves).
     Feared,
+    /// No skills (monster skills, players' skills and casts, auto-cast
+    /// too), basic attacks only; a wind-up under way is called off.
+    Silenced,
 }
 
 /// Conditions a monster can carry (timers per slot).
-pub const CONDITIONS: usize = 11;
+pub const CONDITIONS: usize = 12;
 
 impl Condition {
     pub const ALL: [Condition; CONDITIONS] = [
@@ -53,7 +56,26 @@ impl Condition {
         Condition::Mired,
         Condition::Taunted,
         Condition::Feared,
+        Condition::Silenced,
     ];
+
+    /// The skill table's name (`from_id`'s inverse; the HUD's `cond:<id>`).
+    pub const fn id(self) -> &'static str {
+        match self {
+            Condition::Slowed => "slowed",
+            Condition::Frozen => "frozen",
+            Condition::Stunned => "stunned",
+            Condition::Blinded => "blinded",
+            Condition::Rooted => "rooted",
+            Condition::Petrified => "petrified",
+            Condition::Burning => "burning",
+            Condition::Poisoned => "poisoned",
+            Condition::Mired => "mired",
+            Condition::Taunted => "taunted",
+            Condition::Feared => "feared",
+            Condition::Silenced => "silenced",
+        }
+    }
 
     /// The skill table's names.
     pub fn from_id(id: &str) -> Option<Self> {
@@ -69,6 +91,7 @@ impl Condition {
             "mired" => Condition::Mired,
             "taunted" => Condition::Taunted,
             "feared" => Condition::Feared,
+            "silenced" => Condition::Silenced,
             _ => return None,
         })
     }
@@ -83,7 +106,7 @@ impl Condition {
         match self {
             Condition::Slowed | Condition::Frozen | Condition::Rooted | Condition::Mired => Save::Reflex,
             Condition::Stunned | Condition::Petrified | Condition::Burning | Condition::Poisoned => Save::Body,
-            Condition::Blinded | Condition::Taunted | Condition::Feared => Save::Mind,
+            Condition::Blinded | Condition::Taunted | Condition::Feared | Condition::Silenced => Save::Mind,
         }
     }
 }
@@ -111,6 +134,16 @@ impl Status {
     /// Held, or too terrified to fight: no attacks, no casts.
     pub const fn helpless(self) -> bool {
         self.any(Self::HELD | Condition::Feared.bit())
+    }
+
+    /// Silenced: no skills, basic attacks only.
+    pub const fn silenced(self) -> bool {
+        self.has(Condition::Silenced)
+    }
+
+    /// No skill may start or land: helpless or silenced.
+    pub const fn mute(self) -> bool {
+        self.any(Self::HELD | Condition::Feared.bit() | Condition::Silenced.bit())
     }
 
     pub const fn can_move(self) -> bool {
@@ -183,6 +216,13 @@ impl Status {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ids_round_trip() {
+        for c in Condition::ALL {
+            assert_eq!(Condition::from_id(c.id()), Some(c));
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -209,5 +249,9 @@ mod tests {
         assert!(feared.helpless() && !feared.held() && feared.can_move());
         assert!(s(&[Condition::Stunned]).helpless() && !s(&[Condition::Slowed]).helpless());
         assert_eq!((Condition::from_id("feared"), Condition::Feared.save()), (Some(Condition::Feared), Save::Mind));
+        let silenced = s(&[Condition::Silenced]);
+        assert!(silenced.silenced() && silenced.mute() && !silenced.helpless() && silenced.can_move() && silenced.advantage() == 0);
+        assert_eq!((Condition::from_id("silenced"), Condition::Silenced.save(), Condition::Silenced.bit()), (Some(Condition::Silenced), Save::Mind, 1 << 11));
+        assert!(s(&[Condition::Stunned]).mute() && !s(&[Condition::Blinded]).mute());
     }
 }

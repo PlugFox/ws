@@ -4,7 +4,7 @@ import { createCharacter, enterWorld, signUp, watchErrors } from './helpers';
 // Monster cards (server combat/cards.rs, engine cards.ts): `/give` drops two
 // weapon cards into the bag; the Card Sockets window (Equipment → Cards)
 // puts them into the worn sword, which takes their words ("Stinging Sword
-// of Kindling"); a click takes one out again. The Card tab of the
+// of Kindling [3]", [n] = its sockets); a click takes one out again. The Card tab of the
 // inventory opens a card large, and it tilts under the pointer.
 test('cards go into the sword, rename it and come out again', async ({ page }, info) => {
   const errors = watchErrors(page);
@@ -29,14 +29,14 @@ test('cards go into the sword, rename it and come out again', async ({ page }, i
   await expect(win).toBeVisible();
   // The worn sword (3 sockets, Cotton Shirt and Guard are hosts too).
   await win.locator('.hosts .u-slot', { has: page.locator('img[data-icon="item:sword"]') }).click();
-  await expect(win.locator('.title')).toHaveText('Sword');
+  await expect(win.locator('.title')).toHaveText('Sword [3]');
   await expect(win.locator('.sock')).toHaveCount(3);
 
   await win.locator('.pool button', { hasText: 'Drops Card' }).click();
-  await expect(win.locator('.title')).toHaveText('Sword of Kindling');
+  await expect(win.locator('.title')).toHaveText('Sword of Kindling [3]');
   await win.locator('.pool button', { hasText: 'Hornet Card' }).click();
-  await expect(win.locator('.title')).toHaveText('Stinging Sword of Kindling');
-  await expect(eq).toContainText('Stinging Sword of Kindling');
+  await expect(win.locator('.title')).toHaveText('Stinging Sword of Kindling [3]');
+  await expect(eq).toContainText('Stinging Sword of Kindling [3]');
   await page.screenshot({ path: info.outputPath('socketed.png') });
 
   // The tooltip lists the cards and what they do, and the free socket.
@@ -48,7 +48,7 @@ test('cards go into the sword, rename it and come out again', async ({ page }, i
 
   // A click on a socketed card takes it out.
   await win.locator('.sock.full').first().click();
-  await expect(win.locator('.title')).toHaveText('Stinging Sword');
+  await expect(win.locator('.title')).toHaveText('Stinging Sword [3]');
 
   // While the sockets are open the inventory feeds them (a double-click
   // sockets a card): close them to look at one.

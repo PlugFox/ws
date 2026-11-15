@@ -97,7 +97,7 @@ test('the smith refines the worn sword with Phracon', async ({ page }, info) => 
   await expect(stage).toHaveClass(/\bok\b/);
   await expect(win.locator('.pop')).toHaveText('+1');
   await shoot(page, info.outputPath('refine-success.png'));
-  await expect(win.locator('.u-foot .u-note')).toHaveText('Success! Sword is now +1.');
+  await expect(win.locator('.u-foot .u-note')).toHaveText('Success! Sword [3] is now +1.');
   await expect(win.locator('.row.on')).toContainText('+1 Sword');
   await expect(win.locator('.lv')).toHaveText('+1→+2');
   await expect(strike).toBeDisabled();
@@ -146,7 +146,7 @@ test('a failed strike rolls the slip die and a big one shines', async ({ page },
   await expect(die).toHaveText('3');
   await expect(win.locator('.pop')).toHaveText('−3');
   await shoot(page, info.outputPath('refine-failure.png'));
-  await expect(win.locator('.u-foot .u-note')).toHaveText('Failed: the die showed 3, Sword fell to +4.');
+  await expect(win.locator('.u-foot .u-note')).toHaveText('Failed: the die showed 3, Sword [3] fell to +4.');
   await expect(win.locator('.row.on')).toContainText('+4 Sword');
   await expect(stage).toHaveClass(/\blost\b/);
 
@@ -160,7 +160,7 @@ test('a failed strike rolls the slip die and a big one shines', async ({ page },
   await shoot(page, info.outputPath('refine-great.png'));
   // Space again skips to the outcome.
   await page.keyboard.press('Space');
-  await expect(win.locator('.u-foot .u-note')).toHaveText('Success! Sword is now +7.');
+  await expect(win.locator('.u-foot .u-note')).toHaveText('Success! Sword [3] is now +7.');
   await expect(win.locator('.row.on')).toContainText('+7 Sword');
   expect(errors).toEqual([]);
 });

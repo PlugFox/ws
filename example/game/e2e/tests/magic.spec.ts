@@ -29,7 +29,7 @@ test('magic items: rarity colours, enchantment lines, worn in hand', async ({ pa
 
   const tip = page.locator('.u-tip');
   await slot('ember_blade').hover();
-  await expect(tip.locator('.t.r-uncommon')).toHaveText('Ember Blade');
+  await expect(tip.locator('.t.r-uncommon')).toHaveText('Ember Blade [2]');
   await expect(tip).toContainText('+1d4 damage on every weapon hit');
   await expect(tip).toContainText('Uncommon magic item');
   await page.screenshot({ path: info.outputPath('tooltip.png') });

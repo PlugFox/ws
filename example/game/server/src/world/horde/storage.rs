@@ -42,6 +42,36 @@ pub const AFFIX_SHIELD_BROKEN: u8 = 2;
 /// A Mirror that split already (it splits once).
 pub const AFFIX_SPLIT: u8 = 8;
 
+/// A monster skill's spur on a monster (the `rally` payload: War Cry,
+/// Wolf Howl, Shelter): one per slot, a newer spur keeps the stronger of
+/// each number and the longer time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rally {
+    /// Added to its melee attack rolls.
+    pub to_hit: i8,
+    /// Walks this many percent faster.
+    pub speed: u8,
+    /// Takes this many percent less damage (negative: more).
+    pub taken: i8,
+    /// Ticks left (0: none).
+    pub ticks: u16,
+}
+
+impl Rally {
+    /// The spur's walking pace multiplier (1 without one).
+    pub fn pace(self) -> f32 {
+        if self.ticks > 0 { 1.0 + self.speed as f32 / 100.0 } else { 1.0 }
+    }
+
+    /// Damage after the spur's resistance.
+    pub fn soak(self, amount: i32) -> i32 {
+        if self.ticks == 0 || self.taken == 0 || amount <= 0 {
+            return amount;
+        }
+        (amount as i64 * (100 - self.taken as i64) / 100).max(0) as i32
+    }
+}
+
 pub struct HordeStorage {
     pub x: Vec<f32>,
     pub y: Vec<f32>,
@@ -85,6 +115,8 @@ pub struct HordeStorage {
     pub affix_state: Vec<u8>,
     /// Damage taken since the last affix beat (Thorns reflects it).
     pub affix_taken: Vec<i32>,
+    /// A monster skill's spur ([`Rally`]; zero for nearly all).
+    pub rally: Vec<Rally>,
     /// Dense list of live slots (iteration order).
     alive: Vec<u16>,
     /// Position of a slot in `alive` (`u16::MAX` when free).
@@ -121,6 +153,7 @@ impl HordeStorage {
             affix_quiet: vec![0; capacity],
             affix_state: vec![0; capacity],
             affix_taken: vec![0; capacity],
+            rally: vec![Rally::default(); capacity],
             alive: Vec::with_capacity(capacity),
             alive_pos: vec![u16::MAX; capacity],
             free: (0..capacity as u16).collect(),
@@ -174,6 +207,7 @@ impl HordeStorage {
         self.affix_quiet[s] = 0;
         self.affix_state[s] = 0;
         self.affix_taken[s] = 0;
+        self.rally[s] = Rally::default();
         self.alive_pos[s] = self.alive.len() as u16;
         self.alive.push(slot);
         Some(slot)
@@ -195,6 +229,27 @@ impl HordeStorage {
         if *t > 0 {
             self.status[s] |= c.bit();
         }
+    }
+
+    /// Spurs a monster (a rally): the stronger of each number and the
+    /// longer time of the running spur and `r`. Plants take none.
+    pub fn rally(&mut self, slot: u16, r: Rally) {
+        let s = slot as usize;
+        if self.flags[s] & FLAG_PLANT != 0 || r.ticks == 0 {
+            return;
+        }
+        let old = self.rally[s];
+        self.rally[s] = if old.ticks == 0 {
+            r
+        } else {
+            Rally { to_hit: old.to_hit.max(r.to_hit), speed: old.speed.max(r.speed), taken: old.taken.max(r.taken), ticks: old.ticks.max(r.ticks) }
+        };
+    }
+
+    /// Its running spur (all zero without one).
+    pub fn rally_of(&self, slot: u16) -> Rally {
+        let r = self.rally[slot as usize];
+        if r.ticks > 0 { r } else { Rally::default() }
     }
 
     /// A hit makes a non-boss monster flinch for `ticks` (RO's damage
@@ -251,6 +306,9 @@ impl HordeStorage {
             } else if self.stagger_guard[s] > 0 {
                 self.stagger_guard[s] -= 1;
             }
+            if self.rally[s].ticks > 0 {
+                self.rally[s].ticks -= 1;
+            }
             if self.status[s] == 0 {
                 continue;
             }
@@ -288,6 +346,29 @@ impl HordeStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rally_keeps_the_stronger_spur_runs_out_and_skips_plants() {
+        let mut s = HordeStorage::new(2);
+        let m = s.spawn(0, 1.0, 1.0, 10, 0).unwrap();
+        let p = s.spawn(0, 2.0, 2.0, 1, FLAG_PLANT).unwrap();
+        assert_eq!((s.rally_of(m).pace(), s.rally_of(m).soak(10)), (1.0, 10));
+        s.rally(m, Rally { to_hit: 2, speed: 25, taken: 0, ticks: 3 });
+        s.rally(m, Rally { to_hit: 1, speed: 0, taken: 30, ticks: 2 });
+        s.rally(p, Rally { to_hit: 2, speed: 25, taken: 0, ticks: 3 });
+        assert_eq!(s.rally_of(m), Rally { to_hit: 2, speed: 25, taken: 30, ticks: 3 });
+        assert_eq!((s.rally_of(m).pace(), s.rally_of(m).soak(10)), (1.25, 7));
+        assert_eq!(s.rally_of(p), Rally::default(), "plants take no spur");
+        for _ in 0..3 {
+            s.tick_conditions();
+        }
+        assert_eq!(s.rally_of(m), Rally::default(), "it runs out");
+        // A reused slot starts without one.
+        s.rally(m, Rally { to_hit: 2, speed: 25, taken: 0, ticks: 30 });
+        s.despawn(m);
+        let n = s.spawn(0, 1.0, 1.0, 10, 0).unwrap();
+        assert_eq!((n, s.rally_of(n)), (m, Rally::default()));
+    }
 
     #[test]
     fn flinch_holds_then_guards_and_skips_bosses() {

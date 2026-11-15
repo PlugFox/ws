@@ -33,6 +33,57 @@ final class MoveRules {
   }
 }
 
+/// Ground that carries the player along (conveyor belts: server
+/// `Hazard::drift`, sent as zones with the drift flag). Mirrors the
+/// server's step (`hub/env.rs` `drift_step`): each zone the player's centre
+/// is in moves it `speed / tickHz` cells along its direction, x first then
+/// y, each only onto walkable ground.
+final class DriftField {
+  final Map<int, _Drift> _zones = {};
+
+  bool get isEmpty => _zones.isEmpty;
+
+  /// A zone of [id] (replacing one of the same id): a box of [along] ×
+  /// [across] cells centred on ([x], [y]) along [dir] (1/256 turns), or a
+  /// circle of radius [along] ([circle]); [speed] cells per second.
+  void put(int id, {required bool circle, required double x, required double y, required int dir, required double along, required double across, required double speed}) {
+    final t = dir / 256 * 2 * math.pi;
+    var ux = math.cos(t), uy = math.sin(t);
+    if (ux.abs() < 1e-6) ux = 0;
+    if (uy.abs() < 1e-6) uy = 0;
+    _zones[id] = _Drift(circle, x, y, ux, uy, along / 2, across / 2, along, speed);
+  }
+
+  void remove(int id) => _zones.remove(id);
+
+  void clear() => _zones.clear();
+
+  /// One tick of drift from ([x], [y]).
+  (double, double) step(WalkGrid grid, double x, double y, int tickHz) {
+    if (_zones.isEmpty) return (x, y);
+    for (final z in _zones.values) {
+      if (z.speed == 0 || !z.contains(x, y)) continue;
+      final dx = z.ux * z.speed / tickHz, dy = z.uy * z.speed / tickHz;
+      if (dx != 0 && grid.isWalkable(x + dx, y)) x += dx;
+      if (dy != 0 && grid.isWalkable(x, y + dy)) y += dy;
+    }
+    return (x, y);
+  }
+}
+
+final class _Drift {
+  _Drift(this.circle, this.x, this.y, this.ux, this.uy, this.halfA, this.halfB, this.r, this.speed);
+  final bool circle;
+  final double x, y, ux, uy, halfA, halfB, r, speed;
+
+  bool contains(double px, double py) {
+    final dx = px - x, dy = py - y;
+    if (circle) return dx * dx + dy * dy <= r * r;
+    final along = dx * ux + dy * uy, across = -dx * uy + dy * ux;
+    return along.abs() <= halfA && across.abs() <= halfB;
+  }
+}
+
 final class _Pending {
   _Pending(this.seq, this.dx, this.dy, this.pace);
   final int seq;
@@ -64,6 +115,11 @@ final class LocalPredictor {
   /// Step scale the server applies now (conditions): 0 = cannot move.
   double pace = 1;
 
+  /// Ground that carries the player (belts); applied after each step, as
+  /// the server does, while [drifts] (the player is up).
+  final DriftField drift = DriftField();
+  bool drifts = true;
+
   /// Visual correction still to be blended out.
   double errX = 0;
   double errY = 0;
@@ -83,6 +139,7 @@ final class LocalPredictor {
     errX = errY = 0;
     _pending.clear();
     moving = false;
+    drift.clear();
   }
 
   /// Advances one fixed tick with direction ([dx], [dy]) already quantised
@@ -96,7 +153,8 @@ final class LocalPredictor {
     while (_pending.length > 64) {
       _pending.removeFirst();
     }
-    final (nx, ny) = rules.apply(grid, x, y, dx, dy, pace);
+    var (nx, ny) = rules.apply(grid, x, y, dx, dy, pace);
+    if (drifts) (nx, ny) = drift.step(grid, nx, ny, rules.tickHz);
     x = nx;
     y = ny;
     moving = dx != 0 || dy != 0;
@@ -109,6 +167,12 @@ final class LocalPredictor {
     prevX = x;
     prevY = y;
     moving = false;
+    // The ground still carries a player standing on a belt.
+    if (drifts) {
+      final (nx, ny) = drift.step(grid, x, y, rules.tickHz);
+      x = nx;
+      y = ny;
+    }
   }
 
   /// Reconciles with the authoritative state from a snapshot.
@@ -119,6 +183,7 @@ final class LocalPredictor {
     var rx = serverX, ry = serverY;
     for (final p in _pending) {
       (rx, ry) = rules.apply(grid, rx, ry, p.dx, p.dy, p.pace);
+      if (drifts) (rx, ry) = drift.step(grid, rx, ry, rules.tickHz);
     }
     final ex = x - rx, ey = y - ry;
     if (ex * ex + ey * ey > snapDistance * snapDistance) {

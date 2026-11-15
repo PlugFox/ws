@@ -79,14 +79,22 @@ test('click to move: walk to a cell, walk to an NPC and talk, off in the setting
 
   // An NPC out of reach: the hero walks over and the talk opens.
   const here = await debug(page);
-  const npc = here.npcs
-    .filter((n) => n.id === 'cuskoal' || n.id === 'guard' || n.id === 'charfri')
-    .sort((a, b) => dist(here, a.x, a.y) - dist(here, b.x, b.y))[0];
+  // The nearest townsperson out of reach whose feet are on screen.
+  const near = here.npcs
+    .filter((n) => ['kafra', 'cuskoal', 'guard', 'charfri', 'sailor', 'bonne', 'red'].includes(n.id) && dist(here, n.x, n.y) > 3)
+    .sort((a, b) => dist(here, a.x, a.y) - dist(here, b.x, b.y));
+  let npc: (typeof near)[number] | undefined;
+  let feet = { x: 0, y: 0, d: Infinity };
+  for (const n of near) {
+    const f = await screenOf(page, n.x, n.y);
+    if (f.d < 1) {
+      npc = n;
+      feet = f;
+      break;
+    }
+  }
   expect(npc, 'a townsperson to talk to').toBeTruthy();
-  expect(dist(here, npc.x, npc.y), 'out of reach first').toBeGreaterThan(3);
-  // Its feet: the sprite stands on them.
-  const feet = await screenOf(page, npc.x, npc.y);
-  expect(feet.d).toBeLessThan(1);
+  if (!npc) return;
   await page.mouse.move(feet.x, feet.y - 20);
   if (shots) await page.screenshot({ path: `${shots}/talk-cursor.png` });
   await page.mouse.click(feet.x, feet.y - 20);

@@ -16,11 +16,13 @@
 
 use super::aim::{aim_press, norm, Aimed, Field, Press, BODY, REFRESH_SECS};
 use super::area::Area;
+use super::companion::{Companions, Owner, Summon, Summoned};
 use super::fight::{Fighter, Vital};
 use super::{facing_of, HubEvent, HubInstance, HubPlayer, MapIdx, Outgoing};
 use crate::world::combat::rules::{attack_roll, saving_throw, AttackOutcome};
+use crate::world::combat::items::{self, Kind as ItemKind};
 use crate::world::combat::skills::{
-    Act, DamageFx, Effect, EffectDice, Follow as FollowFx, HealFx, MoveMode, Payload, Shape, SkillBook, SkillDef, Target,
+    Act, DamageFx, Effect, EffectDice, Follow as FollowFx, HealFx, MoveMode, Payload, Shape, SkillBook, SkillDef, Target, TOUGH_CAP,
 };
 use crate::world::combat::{cantrip_k, save_dc, Condition, Damage, DamageType, Dice, Mods, Rng};
 use crate::world::horde::storage::{FLAG_BOSS, FLAG_REFLECT};
@@ -38,6 +40,25 @@ const MOVE_STEP: f32 = 0.25;
 const TRAP_CHECK: u32 = 2;
 /// A condition without a save and outside lasting ground holds this long.
 const BRIEF_SECS: f32 = 1.0;
+/// Field plants one caster may have grown at once (Plant Cultivation); a
+/// new one replaces the oldest.
+pub(super) const MAX_GROWN: usize = 3;
+/// Without its reagents a skill lands with this share of its dice.
+pub(super) const WEAK: f32 = 0.5;
+
+/// What casts took from the bags and asked of the instance, reported once
+/// the step is done: the hub's copy of each bag already changed, the
+/// socket task's follows (`HubEvent::ItemUsed`, `HubEvent::ZenySpent`).
+#[derive(Debug, Default)]
+pub(super) struct Spent {
+    /// (user id, zeny) a skill paid (Mammonite).
+    pub zeny: Vec<(u32, u64)>,
+    /// (user id, item) used up: reagents, a thrown potion.
+    pub items: Vec<(u32, &'static str)>,
+    /// (user id, x, y, skill level) field plants to grow (Plant
+    /// Cultivation: the horde is borrowed while casts land).
+    pub plants: Vec<(u32, f32, f32, u8)>,
+}
 
 /// A wind-up in progress.
 #[derive(Clone, Copy, Debug)]
@@ -119,6 +140,9 @@ pub(super) enum Load {
     Revive(f32),
     Cure,
     Dispel,
+    /// One of the caster's potions, restoring `mult` × its roll over
+    /// `ticks` to whom the area reaches.
+    Pitch { mult: f32, ticks: u32 },
 }
 
 impl Live {
@@ -191,7 +215,8 @@ pub(super) fn look_of(act: &Act) -> u8 {
         Payload::Buff(_) => look::BUFF,
         Payload::Ward { .. } => look::WARD,
         Payload::Barrier | Payload::Dispel => look::BARRIER,
-        Payload::Cure => look::HEAL,
+        Payload::Cure | Payload::Pitch { .. } => look::HEAL,
+        Payload::Summon { .. } | Payload::Rally(_) => look::BUFF,
     }
 }
 
@@ -314,19 +339,44 @@ pub(super) struct Landing<'a> {
     pub power: Option<u32>,
 }
 
-/// Turns one cast into live areas and moves the caster.
-pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, horde: &Horde, walk: &WalkGrid, rng: &mut Rng, lives: &mut Vec<Live>) {
+/// Turns one cast into live areas and moves the caster; summons call out
+/// their companions at once. What it costs from the bag (zeny, reagents)
+/// is paid from the hub's copy and listed in `spent`.
+pub(super) fn land(
+    cx: &Landing<'_>,
+    caster: &mut HubPlayer,
+    mut aimed: Aimed,
+    horde: &Horde,
+    walk: &WalkGrid,
+    rng: &mut Rng,
+    lives: &mut Vec<Live>,
+    companions: &mut Companions,
+    spent: &mut Spent,
+) {
     let Some(f) = caster.fighter.as_ref() else { return };
     let (cl, class, weapon, mods) = (cx.power.unwrap_or(f.level), f.class, f.weapon, f.mods);
+    let (own_level, max_hp) = (f.level, f.max_hp);
     // A pickup bonus casts for the player without their gear.
     let own = cx.power.is_none();
+    // The arrow nocked (Arrow Change) for arrow damage.
+    let nocked = if own { f.nocked() } else { None };
     let dc = save_dc(cl) + if own { mods.spell_dc } else { 0 };
     let (slv, hz, now, def) = (cx.slv, cx.hz, cx.now, cx.def);
     let uid = caster.profile.user_id;
     let mut zone = cx.zone;
-    // A cast out of hiding ends it; weapon blows of that cast roll with
-    // advantage (an ambush). A pickup bonus casting for the player does not.
-    let ambush = mods.lurking() && cx.power.is_none();
+    // Paid for from the bag (a pickup bonus casts for free, but plainly):
+    // Mammonite's zeny, else a plain swing; Acid Demonstration's bottles,
+    // else half the dice.
+    let cost = def.zeny_cost(slv);
+    let paid = cost == 0 || (own && pay(caster, cost, spent));
+    let stocked = def.reagents.is_empty() || (own && use_reagents(caster, &def.reagents, spent));
+    let strength = if stocked { 1.0 } else { WEAK };
+    // The cart's weight: what the bag holds (stacks).
+    let loaded = caster.profile.bag.items.len() as f32;
+    // An offensive cast out of hiding ends it; weapon blows of that cast
+    // roll with advantage (an ambush). A buff or a slide keeps the thief
+    // hidden; a pickup bonus casting for the player does neither.
+    let ambush = mods.lurking() && cx.power.is_none() && def.offensive();
     if ambush && let Some(f) = caster.fighter.as_mut() {
         f.unhide();
     }
@@ -345,14 +395,20 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
                 continue;
             }
             Effect::Act(act) => act,
+            Effect::Quiver(arrows) => {
+                if let Some(f) = caster.fighter.as_mut() {
+                    f.nock_next(arrows, slv);
+                }
+                continue;
+            }
             Effect::Passive(_) | Effect::Mount | Effect::Pending(_) => continue,
         };
         let t = &act.timing;
         let load = match &act.payload {
-            Payload::Damage(DamageFx { dice, extra, scale_k, mult, bonus, kind, save, knockback }) => {
+            Payload::Damage(DamageFx { dice, extra, scale_k, mult, bonus, kind, save, knockback, arrow, flank, sure, tough, cart }) => {
                 let (base, kind, to_hit) = match dice {
                     EffectDice::Fixed(d) => {
-                        let mut d = scaled(*d, *scale_k, mult.at(slv), bonus.at(slv), cl);
+                        let mut d = scaled(*d, *scale_k, mult.at(slv) * strength, bonus.at(slv), cl);
                         if own {
                             d.bonus += mods.spell_power;
                         }
@@ -368,15 +424,23 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
                     }
                     EffectDice::Weapon => {
                         let (d, k) = weapon.damage(class, cl);
+                        let d = if own { mods.weapon_dice(d) } else { d };
                         let to_hit = weapon.to_hit(cl) + mods.to_hit;
                         (Dice { bonus: d.bonus + bonus.at(slv).round() as i32 + mods.damage_flat, ..d }, k, Some(to_hit))
                     }
                 };
-                let extra = extra.and_then(|e| {
-                    let n = (e.count as f32 * mult.at(slv)).round() as u32;
+                // Unpaid: a plain swing, no extra dice (Mammonite).
+                let extra = extra.filter(|_| paid).and_then(|e| {
+                    let n = (e.count as f32 * mult.at(slv) * strength).round() as u32;
                     (n > 0).then_some(Dice { count: n, ..e })
                 });
+                // A loaded cart hits harder: the dice count more.
+                let heavy = if paid { (cart.at(slv) * loaded).clamp(0.0, 1.0) } else { 0.0 };
+                let load_up = |d: Dice| Dice { count: ((d.count as f32) * (1.0 + heavy)).round().max(1.0) as u32, ..d };
+                let (base, extra) = if heavy > 0.0 { (load_up(base), extra.map(load_up)) } else { (base, extra) };
                 let save = save.as_ref().map(|sv| (sv.condition, ticks16(sv.secs.at(slv), hz)));
+                // An arrow takes the element of the one nocked.
+                let kind = if *arrow { nocked.unwrap_or(kind) } else { kind };
                 let blow = Blow {
                     damage: Damage::new(base, kind),
                     extra,
@@ -390,6 +454,9 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
                     // Riders of the weapon: Enchant Poison, the ambush.
                     venom: (to_hit.is_some() && mods.venom > 0).then(|| (mods.venom, ticks16(VENOM_SECS, hz))),
                     advantage: ambush && to_hit.is_some(),
+                    flank: Flank { more: flank.at(slv).max(0.0), from: (caster.x, caster.y), ambush },
+                    sure: *sure,
+                    tough: tough.at(slv).max(0.0) * strength,
                 };
                 Load::Damage { blow, knock: knockback.at(slv) }
             }
@@ -425,7 +492,24 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
             Payload::Barrier => Load::Barrier,
             Payload::Revive { hp } => Load::Revive(hp.at(slv).clamp(0.01, 1.0)),
             Payload::Cure => Load::Cure,
+            // Monster skills only (the skill table refuses it on players').
+            Payload::Rally(_) => continue,
             Payload::Dispel => Load::Dispel,
+            // Out at once, wherever it was aimed (a pickup bonus never
+            // summons).
+            Payload::Summon { what } => {
+                if own && let Some(what) = Summon::from_id(what) {
+                    let owner =
+                        Owner { uid, entity: caster.profile.character_id, level: own_level, max_hp, to_hit: weapon.to_hit(own_level) + mods.to_hit, tick: now };
+                    if companions.summon(owner, what, slv, aimed.x, aimed.y) == Summoned::FieldPlant {
+                        spent.plants.push((uid, aimed.x, aimed.y, slv));
+                    }
+                }
+                continue;
+            }
+            // Learning Potion makes the throws stronger too.
+            Payload::Pitch { .. } if !own => continue,
+            Payload::Pitch { mult, secs } => Load::Pitch { mult: mult.at(slv).max(0.0) * (1.0 + mods.potion.max(0.0)), ticks: ticks_of(*secs, hz).max(1) },
         };
         let (area, point) = area_of(act, slv, def.range, &aimed, caster.x, caster.y);
         let lasting = t.lasting(slv);
@@ -486,10 +570,22 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
         }
         let n = count_of(act, slv);
         let spread = if act.area.spread { spread_targets(horde, &aimed, def.range, n) } else { Vec::new() };
+        let knots = if act.area.seek {
+            let (x, y) = area.centre();
+            let r = match area {
+                Area::Circle { r, .. } => r,
+                _ => 1.0,
+            };
+            seek_knots(horde, x, y, act.area.scatter, r, n)
+        } else {
+            Vec::new()
+        };
         for i in 0..n {
             let mut area = area;
             let mut follow = follow;
-            if act.area.scatter > 0.0 {
+            if let Some(&Some((kx, ky))) = knots.get(i as usize) {
+                area = area.moved_to(kx, ky);
+            } else if act.area.scatter > 0.0 {
                 let a = rng.die(360) as f32 * std::f32::consts::TAU / 360.0;
                 let r = act.area.scatter * (rng.die(1000) as f32 / 1000.0).sqrt();
                 let (x, y) = area.centre();
@@ -501,7 +597,14 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
                 follow = Follow::Monster(s, g);
             }
             let (x, y) = area.centre();
-            let at = now + ticks_of(i as f32 * t.every + flight(act, &aimed, x, y), hz);
+            let at = now + ticks_of(i as f32 * t.every + flight(act, &aimed, x, y) + t.fall, hz);
+            // A seeking hit's spot is shown before it lands.
+            if act.area.seek
+                && let Some(f) = caster.fighter.as_mut()
+            {
+                let r = if let Area::Circle { r, .. } = area { r } else { 0.0 };
+                f.strikes.push((cx.skill, r, x, y, ((at - now) as f32 * 1000.0 / hz).round() as u32));
+            }
             let pulse = if lasting { ticks_of(t.pulse, hz).max(1) } else { 0 };
             let until = if lasting { at + ticks_of(t.secs.at(slv), hz) } else { at };
             let trap = (t.trigger > 0.0).then(|| Trap { radius: t.trigger, fuse_at: (t.fuse > 0.0).then(|| at + ticks_of(t.fuse, hz)) });
@@ -524,6 +627,61 @@ pub(super) fn land(cx: &Landing<'_>, caster: &mut HubPlayer, mut aimed: Aimed, h
             });
         }
     }
+}
+
+/// Pays `cost` zeny from the caster's bag (the hub's copy): false when it
+/// holds less.
+fn pay(caster: &mut HubPlayer, cost: u64, spent: &mut Spent) -> bool {
+    let bag = &mut caster.profile.bag;
+    if bag.zeny < cost {
+        return false;
+    }
+    bag.zeny -= cost;
+    spent.zeny.push((caster.profile.user_id, cost));
+    true
+}
+
+/// Uses up one cast's reagents from the caster's bag (the hub's copy): all
+/// of them or none.
+fn use_reagents(caster: &mut HubPlayer, reagents: &[(String, u32)], spent: &mut Spent) -> bool {
+    let bag = &mut caster.profile.bag;
+    if reagents.iter().any(|(id, n)| bag.count(id) < *n) {
+        return false;
+    }
+    for (id, n) in reagents {
+        let Some(e) = items::find(id) else { return false };
+        if bag.take(id, *n).is_err() {
+            return false;
+        }
+        for _ in 0..*n {
+            spent.items.push((caster.profile.user_id, e.id));
+        }
+    }
+    true
+}
+
+/// The potion Potion Pitcher throws from `potions` (id, count) for a
+/// wound of `want` HP, each worth `mult` × its average: the weakest that
+/// covers it, else the strongest (`best_potion`'s rule). Healing ones only.
+pub(super) fn pitch_pick(potions: &[(String, u32)], want: i32, mult: f32) -> Option<(usize, &'static str, Dice)> {
+    let mut best: Option<(usize, &'static str, Dice, i32)> = None;
+    for (i, (id, n)) in potions.iter().enumerate() {
+        let Some(e) = items::find(id).filter(|_| *n > 0) else { continue };
+        let ItemKind::Consumable(items::Effect::Heal(d)) = e.kind else { continue };
+        let value = ((d.average_x2() as f32 / 2.0) * mult).round() as i32;
+        let better = match best {
+            None => true,
+            Some((.., bv)) => match (value >= want, bv >= want) {
+                (true, false) => true,
+                (false, true) => false,
+                (covers, _) => value != bv && (value < bv) == covers,
+            },
+        };
+        if better {
+            best = Some((i, e.id, d, value));
+        }
+    }
+    best.map(|(i, id, d, _)| (i, id, d))
 }
 
 /// Where a slide (stops at the first wall) or a blink (the farthest open
@@ -555,6 +713,60 @@ pub(super) fn moved(walk: &WalkGrid, x: f32, y: f32, dir: (f32, f32), total: f32
     }
 }
 
+/// Where each of `n` seeking hits lands (`seek`): the densest knot of
+/// monsters (most of them within `r` of one of them) inside `reach` of
+/// `(x, y)`, at the knot's centre (kept inside the reach); a knot taken by
+/// one hit is left to the next while another one is left, then they start
+/// over from the densest. `None`: no monster in reach (the hit scatters).
+pub(super) fn seek_knots(horde: &Horde, x: f32, y: f32, reach: f32, r: f32, n: u32) -> Vec<Option<(f32, f32)>> {
+    /// Candidates looked at (the nearest), bounding the O(m²) count.
+    const MAX: usize = 64;
+    let mut slots = Vec::new();
+    Area::Circle { x, y, r: reach }.monsters(horde, &mut slots);
+    let store = horde.store();
+    slots.retain(|&s| !horde.is_plant(s) && store.hp[s as usize] > 0);
+    let pos = |s: u16| (store.x[s as usize], store.y[s as usize]);
+    let d2 = |s: u16| (pos(s).0 - x).powi(2) + (pos(s).1 - y).powi(2);
+    slots.sort_by(|&a, &b| d2(a).total_cmp(&d2(b)).then(a.cmp(&b)));
+    slots.truncate(MAX);
+    let pts: Vec<(f32, f32)> = slots.iter().map(|&s| pos(s)).collect();
+    let r2 = r * r;
+    let mut taken = vec![false; pts.len()];
+    let mut out = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        if pts.is_empty() {
+            out.push(None);
+            continue;
+        }
+        if taken.iter().all(|&t| t) {
+            taken.iter_mut().for_each(|t| *t = false);
+        }
+        let near = |c: usize, taken: &[bool]| {
+            pts.iter().enumerate().filter(|&(j, p)| !taken[j] && (p.0 - pts[c].0).powi(2) + (p.1 - pts[c].1).powi(2) <= r2).count()
+        };
+        // The densest free knot (ties: nearest the point, as sorted).
+        let best = (0..pts.len()).filter(|&c| !taken[c]).max_by(|&a, &b| near(a, &taken).cmp(&near(b, &taken)).then(b.cmp(&a)));
+        let Some(c) = best else {
+            out.push(None);
+            continue;
+        };
+        let (mut sx, mut sy, mut k) = (0.0, 0.0, 0.0);
+        for (j, p) in pts.iter().enumerate() {
+            if !taken[j] && (p.0 - pts[c].0).powi(2) + (p.1 - pts[c].1).powi(2) <= r2 {
+                (sx, sy, k) = (sx + p.0, sy + p.1, k + 1.0);
+                taken[j] = true;
+            }
+        }
+        let (mut kx, mut ky) = (sx / k, sy / k);
+        let off = ((kx - x).powi(2) + (ky - y).powi(2)).sqrt();
+        if off > reach && off > 0.0 {
+            (kx, ky) = (x + (kx - x) * reach / off, y + (ky - y) * reach / off);
+        }
+        out.push(Some((kx, ky)));
+    }
+    out
+}
+
 /// Distinct monsters for a `spread` effect: nearest to the aimed point
 /// first, within the skill's range of it.
 fn spread_targets(horde: &Horde, aimed: &Aimed, range: f32, n: u32) -> Vec<(u16, u8, f32, f32)> {
@@ -579,6 +791,8 @@ impl HubInstance {
         let book = std::sync::Arc::clone(&self.skills);
         let mut casts: Vec<ServerMsg> = Vec::new();
         let mut broken: Vec<(u32, u16)> = Vec::new();
+        let mut spent = Spent::default();
+        let second = (hz.round() as u32).max(1);
 
         for idx in 0..self.players.len() {
             if self.players[idx].map != map {
@@ -590,6 +804,19 @@ impl HubInstance {
             let uid = self.players[idx].profile.user_id;
             let Some(f) = self.players[idx].fighter.as_mut() else { continue };
             f.refresh(now);
+            // A draining toggle (Maximize Power) takes its SP once a
+            // second and goes off when the SP runs out.
+            if f.mods.sp_drain > 0.0 && (now + uid).is_multiple_of(second) {
+                let cost = f.mods.sp_drain.round().max(1.0) as i32;
+                if f.sp >= cost {
+                    f.sp -= cost;
+                } else {
+                    let draining: Vec<u16> = f.buff_list(now).map(|(s, _)| s).filter(|&s| drains(book.get(s))).collect();
+                    for s in draining {
+                        f.toggle(s, Mods::NONE);
+                    }
+                }
+            }
             for cd in f.cooldowns.iter_mut().filter(|c| **c > 0) {
                 *cd -= 1;
             }
@@ -598,7 +825,7 @@ impl HubInstance {
             if let Some(mut ch) = f.channel {
                 ch.idle = if pressed & (1 << ch.slot) != 0 { 0 } else { ch.idle.saturating_add(1) };
                 let lasting = self.lives.iter().any(|l| l.caster == uid && l.skill == ch.skill);
-                if moving || ch.idle > CHANNEL_GRACE || !f.is_up() || f.status.held() || !lasting {
+                if moving || ch.idle > CHANNEL_GRACE || !f.is_up() || f.status.held() || f.status.silenced() || !lasting {
                     f.channel = None;
                     broken.push((uid, ch.skill));
                 } else {
@@ -606,8 +833,9 @@ impl HubInstance {
                     continue;
                 }
             }
-            // Down, stunned, frozen, turned to stone or terrified: no casting.
-            if !f.is_up() || f.status.helpless() {
+            // Down, stunned, frozen, turned to stone, terrified or
+            // silenced: no casting (basic attacks go on while silenced).
+            if !f.is_up() || f.status.mute() {
                 if f.casting.take().is_some() {
                     casts.push(cancel(entity));
                 }
@@ -637,7 +865,7 @@ impl HubInstance {
                         f.quiet = 0;
                         let walk = &self.world.map(map).walk;
                         let cx = Landing { def, skill: c.skill, slv: c.level, now, hz, zone: c.zone, power: None };
-                        land(&cx, &mut self.players[idx], c.aimed, horde, walk, &mut self.dice, &mut self.lives);
+                        land(&cx, &mut self.players[idx], c.aimed, horde, walk, &mut self.dice, &mut self.lives, &mut self.companions, &mut spent);
                         if def.channel
                             && let Some(f) = self.players[idx].fighter.as_mut()
                         {
@@ -683,6 +911,11 @@ impl HubInstance {
                 // player aims manually.
                 let prefs = self.players[idx].prefs;
                 let auto = prefs.auto & (1 << slot) != 0;
+                // Hidden, nothing fires by itself (it would give the thief
+                // away); nor does Arrow Change, which only cycles.
+                if auto && (f.mods.hidden || def.never_auto()) {
+                    continue;
+                }
                 let press = Press {
                     skill: Some(skill),
                     now,
@@ -690,7 +923,33 @@ impl HubInstance {
                     auto,
                     manual: prefs.manual_aim && !auto,
                 };
-                let Some(aimed) = aim_press(&field, &self.players[idx], def, level, &press) else { continue };
+                let me = &self.players[idx];
+                // A summon pressed by hand with nothing to aim at comes out
+                // beside the caster (the homunculus at the stage's start).
+                let beside = |x: f32, y: f32| Aimed { x, y, ox: me.x, oy: me.y, dir: (0.0, 1.0), ally: None, monster: None };
+                // A potion throw with no wounded player in reach goes to the
+                // caster's most wounded companion (auto-cast: below the
+                // potion threshold too).
+                let pet = || {
+                    let share = |c: &&super::companion::Companion| c.hp as f32 / c.max_hp.max(1) as f32;
+                    self.companions
+                        .of(uid)
+                        .filter(|c| c.alive() && c.hp < c.max_hp && (c.x - me.x).powi(2) + (c.y - me.y).powi(2) <= def.range * def.range)
+                        .filter(|c| !auto || share(c) * 100.0 < me.uses.hp as f32)
+                        .min_by(|a, b| share(a).total_cmp(&share(b)))
+                        .map(|c| beside(c.x, c.y))
+                };
+                let fallback = || match () {
+                    _ if def.pitches() => pet(),
+                    _ if !auto && def.summons().is_some() => Some(beside(me.x, me.y)),
+                    _ => None,
+                };
+                let Some(aimed) = aim_press(&field, me, def, level, &press).or_else(fallback) else { continue };
+                // Auto-cast throws potions only below the caster's own
+                // potion threshold (`USE_PREFS`), as it drinks them.
+                if auto && def.pitches() && aimed.ally.is_some() && !pitch_wanted(&self.players, me, &aimed) {
+                    continue;
+                }
                 let cast_ticks = (def.cast_secs(level) * hz).round() as u32;
                 let cooldown_ms = (def.cooldown_secs(level) * 1000.0).round() as u32;
                 let zone = self.next_zone;
@@ -732,7 +991,7 @@ impl HubInstance {
                     f.quiet = 0;
                     let walk = &self.world.map(map).walk;
                     let cx = Landing { def, skill, slv: level, now, hz, zone, power: None };
-                    land(&cx, &mut self.players[idx], aimed, horde, walk, &mut self.dice, &mut self.lives);
+                    land(&cx, &mut self.players[idx], aimed, horde, walk, &mut self.dice, &mut self.lives, &mut self.companions, &mut spent);
                     if def.channel
                         && let Some(f) = self.players[idx].fighter.as_mut()
                     {
@@ -748,18 +1007,12 @@ impl HubInstance {
         // Live areas: due hits, ground pulses, traps, wards.
         let mut ended: Vec<u32> = Vec::new();
         if !broken.is_empty() {
-            self.lives.retain(|l| {
-                let gone = broken.contains(&(l.caster, l.skill));
-                if gone && l.id != 0 {
-                    ended.push(l.id);
-                }
-                !gone
-            });
+            ended.extend(self.lives.extract_if(.., |l| broken.contains(&(l.caster, l.skill))).filter(|l| l.id != 0).map(|l| l.id));
         }
         let mut lives = std::mem::take(&mut self.lives);
         let mut dispels: Vec<Area> = Vec::new();
-        // Spells meeting the map's sewage (`culvert.rs`): fire fizzles out,
-        // cold freezes it over.
+        // Spells meeting the map's hazard ground (`env.rs` GROUND_MEETS):
+        // fire fizzles out on sewage, cold freezes it over or quenches lava.
         let mut sewage: Vec<(DamageType, Area)> = Vec::new();
         let env = &self.env;
         let walk = &self.world.map(map).walk;
@@ -779,14 +1032,14 @@ impl HubInstance {
                 return true;
             }
             if let Load::Damage { blow, .. } = &l.load
-                && matches!(blow.damage.kind, DamageType::Fire | DamageType::Cold)
+                && super::env::GROUND_MEETS.iter().any(|m| m.kind == blow.damage.kind)
                 && l.caster != 0
             {
                 let (x, y) = l.area.centre();
-                if env.ground_is(x, y, super::culvert::SEWAGE) {
+                if let Some(meet) = env.ground_meet(x, y, blow.damage.kind) {
                     sewage.push((blow.damage.kind, l.area));
                     // Burning ground cannot burn on sewage: it goes out.
-                    if blow.damage.kind == DamageType::Fire && l.pulse > 0 {
+                    if meet.douse && l.pulse > 0 {
                         ended.push(l.id);
                         return false;
                     }
@@ -829,13 +1082,13 @@ impl HubInstance {
                     return now + TRAP_CHECK <= l.until;
                 }
                 let h0 = hits.len();
-                act(l, horde, &mut self.players, &mut self.dice, walk, now, hits, kills);
+                act(l, horde, &mut self.players, &mut self.companions, &mut spent, &mut self.dice, walk, now, hits, kills);
                 credit(&mut self.run, l, &hits[h0..], now, secs, horde);
                 ended.push(l.id);
                 return false;
             }
             let h0 = hits.len();
-            act(l, horde, &mut self.players, &mut self.dice, walk, now, hits, kills);
+            act(l, horde, &mut self.players, &mut self.companions, &mut spent, &mut self.dice, walk, now, hits, kills);
             credit(&mut self.run, l, &hits[h0..], now, secs, horde);
             if l.pulse > 0 && now + l.pulse <= l.until {
                 l.next = now + l.pulse;
@@ -848,9 +1101,23 @@ impl HubInstance {
         lives.append(&mut self.lives);
         self.lives = lives;
         ailments(horde, &mut self.dice, now, hz, hits, kills);
-        self.sewage_meets(map, &sewage, &mut casts);
+        self.ground_meets(&sewage, &mut casts);
         for area in dispels {
             ended.extend(self.dispel_hazards(map, &area));
+        }
+
+        self.report_spent(spent, out);
+
+        // Seeking hits: where each one falls, told as the cast lands.
+        for p in self.players.iter_mut().filter(|p| p.map == map) {
+            let entity = p.profile.character_id;
+            let Some(f) = p.fighter.as_mut().filter(|f| !f.strikes.is_empty()) else { continue };
+            let mut list = std::mem::take(&mut f.strikes);
+            while let Some(&(skill, radius, ..)) = list.first() {
+                let strikes = list.iter().filter(|s| s.0 == skill).map(|s| (s.2, s.3, s.4)).collect();
+                list.retain(|s| s.0 != skill);
+                casts.push(ServerMsg::SkillStrikes { caster: entity, skill: book.get(skill).id.clone(), radius, strikes });
+            }
         }
 
         let recipients: Vec<u32> = self.players.iter().filter(|p| p.map == map).map(|p| p.profile.user_id).collect();
@@ -860,6 +1127,67 @@ impl HubInstance {
             }
         }
     }
+}
+
+/// A toggle that drains SP (Maximize Power).
+fn drains(def: &SkillDef) -> bool {
+    def.effects.iter().filter_map(Effect::act).any(|a| matches!(&a.payload, Payload::Buff(b) if b.toggle && b.sp_drain.at(def.max_level) > 0.0))
+}
+
+/// An auto-cast potion throw is wanted: the picked ally is below the
+/// caster's HP potion threshold (none set: never by itself).
+fn pitch_wanted(players: &[HubPlayer], me: &HubPlayer, aimed: &Aimed) -> bool {
+    let pct = me.uses.hp;
+    let Some(f) = aimed.ally.and_then(|a| players.iter().find(|p| p.profile.user_id == a)).and_then(|p| p.fighter.as_ref()) else { return false };
+    pct > 0 && i64::from(f.hp) * 100 < i64::from(f.max_hp) * i64::from(pct)
+}
+
+impl HubInstance {
+    /// Tells the socket tasks what casts took from the bags (the hub's
+    /// copies already paid), and grows the field plants Plant Cultivation
+    /// asked for (at most [`MAX_GROWN`] per caster: the oldest goes).
+    pub(super) fn report_spent(&mut self, spent: Spent, out: &mut Outgoing) {
+        for (uid, amount) in spent.zeny {
+            out.push((uid, HubEvent::ZenySpent { amount }));
+        }
+        for (uid, item) in spent.items {
+            out.push((uid, HubEvent::ItemUsed { item: item.into() }));
+        }
+        let Some(horde) = self.horde.as_mut() else { return };
+        for (uid, x, y, slv) in spent.plants {
+            let Some(f) = self.players.iter_mut().find(|p| p.profile.user_id == uid).and_then(|p| p.fighter.as_mut()) else { continue };
+            let Some(kind) = cultivated(horde, slv, self.dice.die(100)) else { continue };
+            let st = horde.store();
+            f.grown.retain(|&(s, g)| st.is_alive(s) && st.generation[s as usize] == g && st.is_plant(s));
+            if f.grown.len() >= MAX_GROWN {
+                let (s, _) = f.grown.remove(0);
+                horde.despawn(s);
+            }
+            if let Some(s) = horde.place_object(kind, x, y) {
+                f.grown.push((s, horde.store().generation[s as usize]));
+            }
+        }
+    }
+}
+
+/// What Plant Cultivation grows at skill level `slv` (`roll`: a d100): a
+/// mushroom first (spores for the alchemist's bottles), then herb plants,
+/// the common ones likelier. `None` when the stage knows no such plant.
+pub(super) fn cultivated(horde: &Horde, slv: u8, roll: u32) -> Option<u8> {
+    const HERBS: [(&str, u32); 5] = [("green_plant", 35), ("red_plant", 30), ("yellow_plant", 20), ("white_plant", 10), ("blue_plant", 5)];
+    let id = if slv <= 1 {
+        "black_mushroom"
+    } else {
+        let mut left = roll.clamp(1, 100);
+        HERBS.iter().find(|(_, w)| {
+            if left <= *w {
+                return true;
+            }
+            left -= w;
+            false
+        })?.0
+    };
+    horde.catalog().kind_of(id).filter(|&k| horde.catalog().get(k).is_plant())
 }
 
 /// The result screen's share of one action of a live area: its damage and
@@ -939,11 +1267,12 @@ fn friends(l: &Live, players: &[HubPlayer]) -> Vec<usize> {
 }
 
 /// One action of a live area.
-#[allow(clippy::too_many_arguments)]
 fn act(
     l: &mut Live,
     horde: &mut Horde,
     players: &mut [HubPlayer],
+    companions: &mut Companions,
+    spent: &mut Spent,
     rng: &mut Rng,
     walk: &WalkGrid,
     now: u32,
@@ -1019,7 +1348,12 @@ fn act(
                 f.hp += amount;
                 hits.push(HitEvent { target: id, amount: amount as u32, flags: hit::HEAL | (DamageType::Radiant as u8) << 4 });
             }
+            // A heal over an area mends the companions in it too.
+            if !l.point && !companions.is_empty() {
+                companions.heal_in(&l.area, dice.roll(rng, false).max(0));
+            }
         }
+        Load::Pitch { mult, ticks } => pitch(l, players, companions, spent, rng, now, mult, ticks),
         Load::Buff { mods, ticks, temp, shield } => {
             for i in friends(l, players) {
                 let Some(f) = players[i].fighter.as_mut() else { continue };
@@ -1043,6 +1377,41 @@ fn act(
         }
         // Handled by the instance (it owns the monsters' ground).
         Load::Ward { .. } | Load::Dispel => {}
+    }
+}
+
+/// Potion Pitcher: one potion out of the caster's carried ones, picked for
+/// the worst wound among those it reaches, restores `mult` × its roll over
+/// `ticks` to each of them (a stronger potion already working is kept, the
+/// throw then wasted on that one) and mends the companions inside.
+fn pitch(l: &Live, players: &mut [HubPlayer], companions: &mut Companions, spent: &mut Spent, rng: &mut Rng, now: u32, mult: f32, ticks: u32) {
+    let targets = friends(l, players);
+    // A single throw at a companion lands on it: at least a body around.
+    let reach = match l.area {
+        Area::Circle { x, y, r } => Area::Circle { x, y, r: r.max(1.0) },
+        a => a,
+    };
+    let pet_want = companions.units().iter().filter(|c| c.alive() && reach.contains(c.x, c.y, BODY)).map(|c| c.max_hp - c.hp).max().unwrap_or(0);
+    let hurt_pet = pet_want > 0;
+    let want = targets.iter().filter_map(|&i| players[i].fighter.as_ref()).map(|f| f.max_hp - f.hp).max().unwrap_or(0).max(pet_want);
+    if want <= 0 {
+        return;
+    }
+    let Some(ci) = players.iter().position(|p| p.profile.user_id == l.caster) else { return };
+    let Some(f) = players[ci].fighter.as_mut() else { return };
+    let Some((slot, item, dice)) = pitch_pick(&f.potions, want.max(1), mult) else { return };
+    f.potions[slot].1 -= 1;
+    spent.items.push((l.caster, item));
+    let total = ((dice.roll(rng, false).max(1) as f32) * mult).round() as i32;
+    for i in targets {
+        let Some(f) = players[i].fighter.as_mut() else { continue };
+        if f.regen[0].as_ref().is_some_and(|r| !r.beaten_by(total, ticks)) {
+            continue;
+        }
+        f.regen[0] = Some(super::shop::Regen { item, left: total, total, ticks, span: ticks, shown: 0, started: now });
+    }
+    if hurt_pet {
+        companions.heal_in(&reach, total);
     }
 }
 
@@ -1140,7 +1509,6 @@ fn resist(horde: &mut Horde, rng: &mut Rng, s: u16, dc: i32, condition: bool) ->
 /// halves everything. A plant takes exactly one HP from any hit, whatever
 /// the dice, element or crit (COMBAT.md §4.8). Returns the amount taken
 /// off its HP.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn wound(
     horde: &mut Horde,
     rng: &mut Rng,
@@ -1169,6 +1537,8 @@ pub(super) fn wound(
         amount /= 2;
     }
     // Affixes: the shield soaks, Armoured cuts, Thorns tallies (affix.rs).
+    // A rally's spur (Shelter): less damage while it lasts.
+    let amount = horde.store().rally_of(s).soak(amount);
     let amount = super::affix::absorb(horde, s, amount, damage.kind);
     horde.store_mut().hp[s as usize] -= amount;
     if amount > 0 {
@@ -1202,6 +1572,47 @@ pub(super) struct Blow {
     venom: Option<(u32, u16)>,
     /// The weapon roll has advantage (struck out of hiding).
     advantage: bool,
+    /// More dice from behind or out of hiding (Back Stab).
+    flank: Flank,
+    /// No attack roll and never halved; the save only decides the rider.
+    sure: bool,
+    /// Also this fraction of the target's maximum HP (capped, `TOUGH_CAP`).
+    tough: f32,
+}
+
+/// Back Stab's bonus: `more` × the dice count when struck out of hiding
+/// (`ambush`) or from behind a monster that moves away from `from` (where
+/// the caster stood when it landed).
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Flank {
+    pub more: f32,
+    pub from: (f32, f32),
+    pub ambush: bool,
+}
+
+/// A monster moving at least this fast (cells per tick, its damped
+/// velocity) has a back to strike.
+const BACK_SPEED: f32 = 0.002;
+
+impl Flank {
+    /// The blow on monster `s` lands from behind or out of hiding.
+    pub(super) fn holds(&self, horde: &Horde, s: u16) -> bool {
+        if self.more <= 0.0 {
+            return false;
+        }
+        if self.ambush {
+            return true;
+        }
+        let st = horde.store();
+        let (vx, vy) = (st.vel_x[s as usize], st.vel_y[s as usize]);
+        let (ax, ay) = (self.from.0 - st.x[s as usize], self.from.1 - st.y[s as usize]);
+        vx * vx + vy * vy >= BACK_SPEED * BACK_SPEED && vx * ax + vy * ay < 0.0
+    }
+
+    /// `d` with its count raised by the bonus.
+    fn raise(&self, d: Dice) -> Dice {
+        Dice { count: ((d.count as f32) * (1.0 + self.more)).round().max(1.0) as u32, ..d }
+    }
 }
 
 /// One hit on each of `targets`. Returns the damage turned back on the
@@ -1216,6 +1627,8 @@ fn strike(horde: &mut Horde, rng: &mut Rng, targets: &[u16], blow: Blow, hits: &
         }
         let id = MONSTER_ENTITY_BASE + s as u32;
         let (crit, saved) = match blow.to_hit {
+            // Acid: it lands whatever the armour; the save is for the rider.
+            _ if blow.sure => (false, resist(horde, rng, s, blow.dc, blow.save.is_some())),
             Some(bonus) => {
                 let ac = horde.block(s).ac + horde.store().status_of(s).ac();
                 let advantage = (horde.store().status_of(s).advantage_against() + blow.advantage as i8).clamp(-1, 1);
@@ -1239,7 +1652,22 @@ fn strike(horde: &mut Horde, rng: &mut Rng, targets: &[u16], blow: Blow, hits: &
             hits.push(HitEvent { target: id, amount: 0, flags: hit::GUARD });
             continue;
         }
-        let mut amount = wound(horde, rng, s, blow.damage, blow.extra, crit, saved, blow.k);
+        // From behind or out of hiding: more dice (Back Stab).
+        let (damage, extra) = if blow.flank.holds(horde, s) {
+            (Damage { dice: blow.flank.raise(blow.damage.dice), ..blow.damage }, blow.extra.map(|e| blow.flank.raise(e)))
+        } else {
+            (blow.damage, blow.extra)
+        };
+        let mut amount = wound(horde, rng, s, damage, extra, crit, saved && !blow.sure, blow.k);
+        // What is tough melts faster: a share of its maximum HP, at most a
+        // few times what the dice did (once on a boss); a plant takes its
+        // one HP and no more.
+        if blow.tough > 0.0 && amount > 0 && !horde.is_plant(s) && horde.store().hp[s as usize] > 0 {
+            let cap = if horde.store().flags[s as usize] & FLAG_BOSS != 0 { 1.0 } else { TOUGH_CAP };
+            let more = ((horde.block(s).hp as f32 * blow.tough).round() as i32).min((amount as f32 * cap) as i32).max(0);
+            horde.store_mut().hp[s as usize] -= more;
+            amount += more;
+        }
         if blow.bane > 0 && horde.catalog().get(horde.store().kind[s as usize]).evil {
             amount += blow.bane;
             horde.store_mut().hp[s as usize] -= blow.bane;
@@ -1254,7 +1682,7 @@ fn strike(horde: &mut Horde, rng: &mut Rng, targets: &[u16], blow: Blow, hits: &
         } else {
             if let Some((condition, ticks)) = blow.save {
                 // A weapon swing that hit still allows a save against its rider.
-                let failed = if blow.to_hit.is_some() { !resist(horde, rng, s, blow.dc, true) } else { !saved };
+                let failed = if blow.to_hit.is_some() && !blow.sure { !resist(horde, rng, s, blow.dc, true) } else { !saved };
                 if failed {
                     inflict(horde, s, condition, ticks, blow.k);
                     if condition == Condition::Taunted {

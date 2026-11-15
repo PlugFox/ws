@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::ffi::{CString, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -99,16 +99,12 @@ const MAX_BATCH: usize = 64;
 const PROBE_INTERVAL: Duration = Duration::from_secs(30);
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-static CONNECTIONS: OnceLock<Mutex<HashMap<u64, Arc<Shared>>>> = OnceLock::new();
+static CONNECTIONS: LazyLock<Mutex<HashMap<u64, Arc<Shared>>>> = LazyLock::new(Default::default);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-fn connections() -> &'static Mutex<HashMap<u64, Arc<Shared>>> {
-    CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
-}
 
 fn table() -> std::sync::MutexGuard<'static, HashMap<u64, Arc<Shared>>> {
     // A panic while holding the lock must not disable every connection.
-    connections()
+    CONNECTIONS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

@@ -3,12 +3,15 @@
 # checks). Tasks run from the repository root.
 
 [tools]
-dart = { version = "3.13.7", checksum_url = "https://storage.googleapis.com/dart-archive/channels/stable/release/{{ version }}/sdk/dartsdk-{{ os() }}-{{ arch() }}-release.zip.sha256sum", url = "https://storage.googleapis.com/dart-archive/channels/stable/release/{{ version }}/sdk/dartsdk-{{ os() }}-{{ arch() }}-release.zip", version_date_expr = 'map(flatten(map(bodies, { fromJSON(#).items })), { [split(#.name, "/")[3], #.timeCreated] })', version_date_next_expr = 'fromJSON(body).nextPageToken != nil ? split(url, "&pageToken=")[0] + "&pageToken=" + fromJSON(body).nextPageToken : nil', version_date_url = "https://storage.googleapis.com/storage/v1/b/dart-archive/o?prefix=channels/stable/release/&matchGlob=**/VERSION&fields=items(name,timeCreated),nextPageToken", version_expr = 'fromJSON(body).prefixes | filter({ # matches "^channels/stable/release/(\\d+\\.\\d+\\.\\d+)/$" }) | map({split(#, "/")[3]}) | sortVersions()', version_list_url = "https://storage.googleapis.com/storage/v1/b/dart-archive/o?prefix=channels/stable/release/&delimiter=/" }
-rust = { version = "1.99.0", components = "rustfmt,clippy" }
+dart = { version = "3.14.0", checksum_url = "https://storage.googleapis.com/dart-archive/channels/stable/release/{{ version }}/sdk/dartsdk-{{ os() }}-{{ arch() }}-release.zip.sha256sum", url = "https://storage.googleapis.com/dart-archive/channels/stable/release/{{ version }}/sdk/dartsdk-{{ os() }}-{{ arch() }}-release.zip", version_date_expr = 'map(flatten(map(bodies, { fromJSON(#).items })), { [split(#.name, "/")[3], #.timeCreated] })', version_date_next_expr = 'fromJSON(body).nextPageToken != nil ? split(url, "&pageToken=")[0] + "&pageToken=" + fromJSON(body).nextPageToken : nil', version_date_url = "https://storage.googleapis.com/storage/v1/b/dart-archive/o?prefix=channels/stable/release/&matchGlob=**/VERSION&fields=items(name,timeCreated),nextPageToken", version_expr = 'fromJSON(body).prefixes | filter({ # matches "^channels/stable/release/(\\d+\\.\\d+\\.\\d+)/$" }) | map({split(#, "/")[3]}) | sortVersions()', version_list_url = "https://storage.googleapis.com/storage/v1/b/dart-archive/o?prefix=channels/stable/release/&delimiter=/" }
+rust = { version = "1.100.0", components = "rustfmt,clippy" }
+node = "26"
+python = "3.14"
+uv = "0.13"
 gh = "2"
 actionlint = "1"
 shellcheck = "0.11"
-"cargo:cargo-deny" = "0.19.4"
+"cargo:cargo-deny" = "0.20.2"
 "cargo:cargo-about" = { version = "0.9.3", features = "cli" }
 
 [settings]
@@ -43,6 +46,8 @@ run = [
   "dart pub upgrade --directory=benchmark",
   "cd native/rust && cargo update",
   "cd server && cargo update",
+  "cd benchmark/native && cargo update",
+  "cd example/game/server && cargo update",
 ]
 
 # --- code quality ------------------------------------------------------------
@@ -81,13 +86,17 @@ run = [
 description = ".pubignore must cover .gitignore"
 run = "dart run tool/check_pubignore.dart"
 
+[tasks."check:toolchains"]
+description = "Pinned Dart, Flutter, Rust, Node and Python agree across mise.toml, the workflows and the game image"
+run = "tool/toolchain_versions.sh"
+
 [tasks."check:publish"]
 description = "pub publish dry runs of ws and of the staged ws_native"
 run = "tool/check_publish.sh"
 
 [tasks.check]
 description = "Everything CI checks: format, analyzers, .pubignore, all tests"
-depends = ["fmt:check", "analyze", "check:pubignore", "check:deny", "test"]
+depends = ["fmt:check", "analyze", "check:pubignore", "check:toolchains", "check:deny", "test"]
 
 # --- tests -------------------------------------------------------------------
 
@@ -176,10 +185,11 @@ description = "Third-party licence notices of the Rust crates (arg: out file)"
 run = "tool/third_party_licenses.sh"
 
 [tasks."check:deny"]
-description = "cargo deny: advisories, licences, sources (native/rust and server)"
+description = "cargo deny: advisories, licences, sources (native/rust, server and the game server)"
 run = [
   "cd native/rust && cargo deny check",
   "cd server && cargo deny check",
+  "cd example/game/server && cargo deny check",
 ]
 
 # --- remote (GitHub Actions; needs `gh auth login` and a pushed branch) ------

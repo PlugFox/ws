@@ -174,6 +174,7 @@ fn arena(seed: u64) -> HubInstance {
         weapon: String::new(),
         loadout: Default::default(),
         bag: Default::default(),
+        homunculus: None,
     };
     let mut out = Vec::new();
     stage.join(profile, Uuid::nil(), None, 0, &mut out);
@@ -605,4 +606,139 @@ fn an_elite_left_behind_drops_out_and_takes_its_bar() {
     let msgs = run(&mut stage, 20);
     assert!(fight(&stage).engaged());
     assert!(msgs.iter().any(|m| matches!(m, ServerMsg::BossBar(b) if b.rank == 1)));
+}
+
+// --- The ladder's DSL: rain, push and pull, shared blows ---------------------
+
+#[test]
+fn rain_falls_on_open_ground_round_the_anchor_one_drop_at_a_time() {
+    let walk = open(60, 40);
+    let mut dice = Rng::new(11);
+    let mut out = Vec::new();
+    rain(&walk, &mut dice, (30.0, 20.0), 8, 2.2, 9.0, 0.3, 0.8, &mut out);
+    assert_eq!(out.len(), 8);
+    for (i, s) in out.iter().enumerate() {
+        let Zone::Area(Area::Circle { x, y, r }) = s.zone else { panic!("raindrops are circles") };
+        assert!(((x - 30.0).powi(2) + (y - 30.0 + 10.0).powi(2)).sqrt() <= 9.0 + 1e-3, "within the spread: ({x}, {y})");
+        assert!(walk.is_walkable(x, y) && r == 2.2 && !s.safe && s.place.is_none());
+        assert!((s.delay - i as f32 * 0.3 * 0.8).abs() < 1e-4, "one every 0.3 s × the pace");
+    }
+    // The same dice, the same storm; another seed, another.
+    let mut again = Vec::new();
+    rain(&walk, &mut Rng::new(11), (30.0, 20.0), 8, 2.2, 9.0, 0.3, 0.8, &mut again);
+    assert_eq!(out, again);
+    // Against the wall no drop lands in it; with no open ground none lands.
+    let mut edge = Vec::new();
+    rain(&walk, &mut Rng::new(3), (1.5, 20.0), 12, 2.0, 6.0, 0.25, 1.0, &mut edge);
+    assert!(!edge.is_empty() && edge.iter().all(|s| matches!(s.zone, Zone::Area(Area::Circle { x, y, .. }) if walk.is_walkable(x, y))));
+    let mut none = Vec::new();
+    rain(&walk, &mut Rng::new(3), (-20.0, -20.0), 5, 2.0, 3.0, 0.25, 1.0, &mut none);
+    assert!(none.is_empty());
+    // The pattern itself is expanded at cast time, not by `expand`.
+    assert!(shapes(Pattern::Rain { count: 4, per_player: 2, r: 2.0, spread: 6.0, every: 0.3 }, Action::None, &walk, (30.0, 20.0), (30.0, 20.0)).is_empty());
+}
+
+/// A blow of `hurt` on the arena's player standing at `(x, y)`.
+fn blow_on(stage: &mut HubInstance, zone: Zone, hurt: Hurt, x: f32, y: f32) -> (f32, f32, Vec<HitEvent>) {
+    stand(stage, x, y);
+    let walk = open(60, 40);
+    let map = stage.players[0].map;
+    let b = Blow { zone, hurt, map, safe: &[], level: 0, dc: 10, boost: 1.0, evil: false, from: (0.0, 0.0) };
+    let mut hits = Vec::new();
+    land(&b, &mut stage.players, &stage.lives, &walk, &mut stage.dice, 20.0, &mut hits);
+    (stage.players[0].x, stage.players[0].y, hits)
+}
+
+#[test]
+fn a_push_throws_the_victim_away_and_walls_stop_it() {
+    let mut stage = arena(5);
+    let push = |p: f32| Hurt { push: p, save: false, ..scripts::hurt(1, 4, DamageType::Force) };
+    let near = |a: f32, b: f32| (a - b).abs() < 0.3;
+    // Away from a circle's centre.
+    let (x, y, hits) = blow_on(&mut stage, circle(28.0, 20.0, 4.0), push(3.0), 30.0, 20.0);
+    assert!(near(x, 33.0) && near(y, 20.0), "thrown 3 cells east: ({x}, {y})");
+    assert!(hits.iter().any(|h| h.target == 101 && h.amount > 0), "and hurt");
+    // A wall stops it.
+    let (x, _, _) = blow_on(&mut stage, circle(55.0, 20.0, 4.0), push(8.0), 57.0, 20.0);
+    assert!(x < 59.0 && x > 57.5, "stopped at the wall: {x}");
+    // Negative pulls in, never past the centre.
+    let (x, _, _) = blow_on(&mut stage, circle(30.0, 20.0, 6.0), push(-3.0), 31.0, 20.0);
+    assert!(near(x, 30.0), "pulled onto the centre, not through it: {x}");
+    let (x, _, _) = blow_on(&mut stage, circle(30.0, 20.0, 6.0), push(-2.0), 35.0, 20.0);
+    assert!(near(x, 33.0), "pulled 2 cells in: {x}");
+    // A charge's bar throws sideways out of its line.
+    let line = Zone::Area(Area::line(20.0, 20.0, (1.0, 0.0), 16.0, 3.0));
+    let (x, y, _) = blow_on(&mut stage, line, push(2.0), 25.0, 20.5);
+    assert!(near(x, 25.0) && near(y, 22.5), "aside: ({x}, {y})");
+    let (_, y, _) = blow_on(&mut stage, line, push(2.0), 25.0, 19.5);
+    assert!(near(y, 17.5), "the other side: {y}");
+    // A ring throws outward from its centre; a cone from its apex.
+    let ring = Zone::Ring { x: 30.0, y: 20.0, inner: 3.0, outer: 6.0 };
+    let (_, y, _) = blow_on(&mut stage, ring, push(2.0), 30.0, 24.0);
+    assert!(near(y, 26.0), "outward: {y}");
+    // No push: nobody moves.
+    let (x, y, _) = blow_on(&mut stage, circle(28.0, 20.0, 4.0), push(0.0), 30.0, 20.0);
+    assert!((x, y) == (30.0, 20.0));
+}
+
+#[test]
+fn lasting_ground_drags_toward_its_centre_one_step_a_tick() {
+    let mut stage = arena(5);
+    stand(&mut stage, 34.0, 20.0);
+    let walk = open(60, 40);
+    let map = stage.players[0].map;
+    let pool = circle(30.0, 20.0, 6.0);
+    pull_in(&pool, map, 0.5, &mut stage.players, &walk);
+    assert!((stage.players[0].x - 33.5).abs() < 1e-3);
+    for _ in 0..20 {
+        pull_in(&pool, map, 0.5, &mut stage.players, &walk);
+    }
+    assert!((stage.players[0].x - 30.0).abs() < 1e-3, "it holds them at the centre: {}", stage.players[0].x);
+    // Negative pushes out, until they leave it.
+    for _ in 0..40 {
+        pull_in(&pool, map, -0.5, &mut stage.players, &walk);
+    }
+    let x = stage.players[0].x;
+    assert!(x > 36.0 && x < 37.0, "pushed out to the rim: {x}");
+    // Out of it: untouched.
+    stand(&mut stage, 45.0, 20.0);
+    pull_in(&pool, map, 0.5, &mut stage.players, &walk);
+    assert_eq!(stage.players[0].x, 45.0);
+}
+
+#[test]
+fn a_split_blow_shares_one_roll_and_caps_a_lone_victim() {
+    let mut stage = arena(9);
+    let big = Hurt { save: false, ..scripts::hurt(28, 6, DamageType::Force) };
+    let shared = Hurt { split: 8, ..big };
+    let zone = circle(30.0, 20.0, 4.5);
+    let taken = |stage: &mut HubInstance, h: Hurt| -> u32 { blow_on(stage, zone, h, 30.0, 20.0).2.iter().filter(|e| e.target == 101).map(|e| e.amount).sum() };
+    let (mut full, mut alone) = (0, 0);
+    for _ in 0..20 {
+        full += taken(&mut stage, big);
+        alone += taken(&mut stage, shared);
+    }
+    // A lone victim takes 8 of the 28 dice's worth.
+    let ratio = alone as f32 / full as f32;
+    assert!(ratio > 0.2 && ratio < 0.37, "8/28 of the roll alone: {ratio} ({alone} of {full})");
+    for _ in 0..20 {
+        assert!(taken(&mut stage, shared) <= 48, "never more than 8d6 alone");
+    }
+
+    // Two inside: one roll, each the same share.
+    let mut p2 = stage.players[0].profile.clone();
+    (p2.user_id, p2.character_id) = (2, 102);
+    let mut out = Vec::new();
+    stage.join(p2, Uuid::nil(), None, 0, &mut out);
+    let i = stage.players.iter().position(|p| p.profile.user_id == 2).unwrap();
+    (stage.players[i].x, stage.players[i].y) = (31.0, 20.0);
+    {
+        let f = stage.players[i].fighter.as_mut().unwrap();
+        (f.max_hp, f.hp) = (1_000_000, 1_000_000);
+    }
+    for _ in 0..5 {
+        let (_, _, hits) = blow_on(&mut stage, zone, shared, 30.0, 20.0);
+        let a: Vec<u32> = [101, 102].iter().map(|id| hits.iter().filter(|h| h.target == *id).map(|h| h.amount).sum()).collect();
+        assert!(a[0] > 0 && a[0] == a[1], "one roll shared: {a:?}");
+    }
 }

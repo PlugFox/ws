@@ -22,6 +22,12 @@ use crate::world::protocol::{hit, HitEvent, ServerMsg, Swing, MONSTER_ENTITY_BAS
 use crate::world::record::Record;
 use crate::world::modifiers::ModFlags;
 
+/// Vitals status bits past the conditions: a thief hidden under the ground
+/// (the burrowed monsters' bit: clients draw the same mound) ...
+pub const STATUS_HIDDEN: u32 = 1 << 15;
+/// ... or cloaked (walking unseen: drawn as a shimmer).
+pub const STATUS_CLOAKED: u32 = 1 << 14;
+
 /// Standing still this many ticks (0.15 s at 20 Hz) starts the basic attack:
 /// releasing the stick between steps must not trigger a swing.
 const STILL_TICKS: u32 = 3;
@@ -193,6 +199,21 @@ pub struct Fighter {
     pub(super) run_zeny: u64,
     /// Counters and cooldowns of the worn cards.
     pub(super) cards: CardState,
+    /// A parry readied the riposte: the next basic swing comes at once,
+    /// with advantage and one more weapon die on its first blow (Parry).
+    pub(super) riposte: bool,
+    /// Where seeking hits of this fighter's casts will land (skill, hit
+    /// radius, x, y, ms from now), not yet told to the stage
+    /// (`SKILL_STRIKES`).
+    pub(super) strikes: Vec<(u16, f32, f32, f32, u32)>,
+    /// The arrow nocked (Arrow Change): a bow's basic attack and arrow
+    /// skills take its element; physical = the plain steel arrow.
+    pub(super) arrow: DamageType,
+    /// The nocked arrow changed: the stage is told (`QUIVER`).
+    pub(super) quiver_dirty: bool,
+    /// Field plants this fighter grew (Plant Cultivation, `cast.rs`):
+    /// slot and generation, oldest first.
+    pub(super) grown: Vec<(u16, u8)>,
 }
 
 impl Fighter {
@@ -256,6 +277,11 @@ impl Fighter {
             curses: ModFlags::NONE,
             run_zeny: 0,
             cards: CardState::default(),
+            riposte: false,
+            strikes: Vec::new(),
+            arrow: DamageType::Physical,
+            quiver_dirty: false,
+            grown: Vec::new(),
         }
     }
 
@@ -497,6 +523,39 @@ impl Fighter {
         self.sum_mods();
     }
 
+    /// The element a bow's arrows carry now (Arrow Change), `None` for the
+    /// plain arrow or without a bow in hand.
+    pub(super) fn nocked(&self) -> Option<DamageType> {
+        (self.weapon.kind == combat::WeaponKind::Bow && self.arrow != DamageType::Physical).then_some(self.arrow)
+    }
+
+    /// Hiding under the ground (Hiding: a thief's, not playing dead) or
+    /// cloaked: what clients draw ([`STATUS_HIDDEN`], [`STATUS_CLOAKED`]).
+    pub(super) fn veil(&self) -> u32 {
+        match (self.mods.hidden && self.mods.ambush, self.mods.cloak) {
+            (true, true) => STATUS_CLOAKED,
+            (true, false) => STATUS_HIDDEN,
+            _ => 0,
+        }
+    }
+
+    /// Arrow Change at level `slv`: the next of the first `slv + 1`
+    /// `arrows` (after the last, the first again).
+    pub(super) fn nock_next(&mut self, arrows: &[DamageType], slv: u8) {
+        let open = &arrows[..(slv as usize + 1).min(arrows.len())];
+        let at = open.iter().position(|&a| a == self.arrow);
+        let next = at.map_or(0, |i| (i + 1) % open.len());
+        self.nock(open[next]);
+    }
+
+    /// Nocks `arrow` (told to the stage when it changed).
+    pub(super) fn nock(&mut self, arrow: DamageType) {
+        if self.arrow != arrow {
+            self.arrow = arrow;
+            self.quiver_dirty = true;
+        }
+    }
+
     /// Moving ends playing dead.
     pub(super) fn unhide(&mut self) {
         if self.mods.hidden {
@@ -509,6 +568,14 @@ impl Fighter {
     pub(super) fn spend_amplify(&mut self) {
         if self.mods.amplify > 0.0 {
             self.buffs.retain(|b| b.mods.amplify <= 0.0);
+            self.sum_mods();
+        }
+    }
+
+    /// A melee blow was caught: Blade Stop is spent.
+    pub(super) fn spend_catch(&mut self) {
+        if self.mods.catch > 0.0 {
+            self.buffs.retain(|b| b.mods.catch <= 0.0);
             self.sum_mods();
         }
     }
@@ -528,7 +595,8 @@ impl Fighter {
 
     fn afflict_inner(&mut self, c: Condition, ticks: u16) {
         let o = &self.gear.procs;
-        if o.immune & c.bit() != 0 {
+        // Cards, and a ward against them (Full Chemical Protection).
+        if (o.immune | self.mods.immune) & c.bit() != 0 {
             return;
         }
         let planted = o.still_ac != 0 && self.cards.planted;
@@ -646,6 +714,19 @@ impl Fighter {
         self.buffs.iter().map(move |b| (b.skill, b.until.saturating_sub(now)))
     }
 
+    /// Running conditions as (condition, ticks left), for the HUD.
+    pub(super) fn cond_list(&self) -> impl Iterator<Item = (Condition, u32)> + '_ {
+        Condition::ALL.into_iter().zip(self.cond).filter(|&(_, t)| t > 0).map(|(c, t)| (c, u32::from(t)))
+    }
+
+    /// Changes when a condition starts, ends or is lengthened by a second
+    /// or more (a pool re-poisoning each tick does not resend the HUD).
+    pub(super) fn cond_signature(&self, now: u32, hz: u32) -> u64 {
+        self.cond_list().fold(0, |h, (c, t)| {
+            h.rotate_left(11) ^ (u64::from(c as u8) << 40 | u64::from(now.saturating_add(t) / hz.max(1))).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        })
+    }
+
     /// Downed at 0 HP (conditions end).
     pub(super) fn fall_if_spent(&mut self, hz: f32) {
         if self.hp <= 0 && self.is_up() {
@@ -685,11 +766,17 @@ impl Fighter {
             sp: self.sp.max(0) as u32,
             max_sp: self.max_sp as u32,
             state: self.state.code(),
-            status: self.status.0 as u32,
+            status: self.status.0 as u32 | self.veil(),
             temp_hp: self.temp_hp.max(0) as u32,
             light: (self.mods.light.max(0.0).round() as u32).min(255),
             level: self.level,
         }
+    }
+
+    /// `QUIVER` of a fighter with a non-plain arrow nocked (to a player
+    /// arriving: the plain one is the default).
+    fn quiver_msg(&self, entity_id: u32) -> Option<ServerMsg> {
+        (self.arrow != DamageType::Physical).then_some(ServerMsg::Quiver { entity_id, element: self.arrow as u8 })
     }
 
     /// Revive progress in percent (5 % steps) and the bleed-out left.
@@ -766,6 +853,8 @@ impl Fighter {
         self.cards.stood = old.cards.stood;
         self.cards.kills = old.cards.kills;
         self.cards.growth = old.cards.growth;
+        // The arrow nocked stays nocked.
+        self.arrow = old.arrow;
     }
 
     /// The clear bonus of mission modifiers: experience (levelling as kills
@@ -861,7 +950,8 @@ impl HubInstance {
         }
         let mut swings: Vec<Swing> = Vec::new();
         let mut hits: Vec<HitEvent> = Vec::new();
-        let mut kills: Vec<Kill> = Vec::new();
+        // Last tick's self-destructs (a `sacrifice` monster skill) first.
+        let mut kills: Vec<Kill> = std::mem::take(&mut self.doomed);
         // 0. Skills: presses, wind-ups and due hits.
         self.cast_step(out, &mut hits, &mut kills);
         // Pickup bonuses: spawns, pickups and their effects (bonus.rs).
@@ -883,6 +973,8 @@ impl HubInstance {
         //    cone in front for melee, a splash at the impact for ranged; the
         //    target is the nearest monster in reach (index queries only).
         let mut targets: Vec<u16> = Vec::new();
+        // What each player's swing struck (their homunculus helps there).
+        let mut owner_swings: Vec<(u32, u16, u8)> = Vec::new();
         // The Baby Desert Wolf's card: who stands where (only when worn).
         let pack: Vec<(u32, f32, f32)> = if self.players.iter().any(|p| p.fighter.as_ref().is_some_and(|f| f.procs().pack != 0)) {
             self.players.iter().filter(|p| p.map == map && p.fighter.as_ref().is_some_and(Fighter::is_up)).map(|p| (p.profile.user_id, p.x, p.y)).collect()
@@ -893,8 +985,9 @@ impl HubInstance {
             let Some(f) = p.fighter.as_mut() else { continue };
             f.attack_cd = f.attack_cd.saturating_sub(1);
             // Link-dead players do not fight back (they only take hits).
-            // Hiding stops the attack, but for a thief's: it strikes out of it.
-            if !f.is_up() || p.dir != (0.0, 0.0) || (f.mods.hidden && !f.mods.ambush) || f.status.helpless() || p.link_dead {
+            // Hiding stops the attack (a thief strikes out of it with a
+            // skill, never by an automatic swing that gives them away).
+            if !f.is_up() || p.dir != (0.0, 0.0) || f.mods.hidden || f.status.helpless() || p.link_dead {
                 f.still = 0;
                 continue;
             }
@@ -911,8 +1004,11 @@ impl HubInstance {
             // Katars crit a step earlier.
             m.crit += weapon.kind.crit();
             let (dice, kind) = weapon.damage(f.class, f.level);
-            // A card's element replaces the weapon's.
-            let kind = o.endow.unwrap_or(kind);
+            // Maximize Power: the weapon's dice at their maximum.
+            let dice = m.weapon_dice(dice);
+            // A card's element replaces the weapon's; the arrow nocked
+            // (Arrow Change) replaces both.
+            let kind = f.nocked().unwrap_or(o.endow.unwrap_or(kind));
             let uid0 = p.profile.user_id;
             let near = o.pack != 0
                 && pack.iter().any(|&(u, x, y)| u != uid0 && (x - p.x).powi(2) + (y - p.y).powi(2) <= 25.0);
@@ -950,6 +1046,9 @@ impl HubInstance {
             if ambush {
                 f.unhide();
             }
+            // A riposte after a parry: advantage, one more weapon die.
+            let riposte = std::mem::take(&mut f.riposte);
+            let mut riposte_die = riposte;
             let venom = ticks16(VENOM_SECS * if o.venom_long { 2.0 } else { 1.0 }, hz);
             // The Bongun's counter: the first blow of this swing.
             let mut counter = if f.cards.counter && o.counter > 0 { o.counter as u32 } else { 0 };
@@ -963,7 +1062,7 @@ impl HubInstance {
                 for _ in 0..attacks {
                     let id = MONSTER_ENTITY_BASE + s as u32;
                     let status = horde.store().status_of(s);
-                    let advantage = (status.advantage_against() + (m.advantage || ambush) as i8 + f.status.advantage()).clamp(-1, 1);
+                    let advantage = (status.advantage_against() + (m.advantage || ambush || riposte) as i8 + f.status.advantage()).clamp(-1, 1);
                     let ac = block.ac + status.ac();
                     let bless = if m.to_hit_die > 0 { rng.die(m.to_hit_die) as i32 } else { 0 };
                     match attack_roll(rng, weapon.to_hit(f.level) + m.to_hit + bless, ac, advantage, m.crit_from()) {
@@ -977,6 +1076,10 @@ impl HubInstance {
                             // A plant takes one HP whatever lands (wound).
                             let crit = (outcome == AttackOutcome::Critical || cull) && !horde.is_plant(s);
                             let mut bane = if evil { m.evil_damage } else { 0 };
+                            if riposte_die && !horde.is_plant(s) {
+                                bane += Dice { bonus: 0, ..dice }.roll(rng, crit);
+                                riposte_die = false;
+                            }
                             if !o.is_none() && !horde.is_plant(s) {
                                 bane += o.size_bonus(size);
                                 if status.0 != 0 {
@@ -1029,13 +1132,34 @@ impl HubInstance {
             f.quiet = 0;
             p.facing = facing_of(ax, ay);
             swings.push(Swing { entity_id: entity, facing: p.facing, target: MONSTER_ENTITY_BASE + target as u32 });
+            owner_swings.push((uid, target, horde.store().generation[target as usize]));
         }
+
+        // 1b. Companions (companion.rs): homunculi think and fight, plants
+        //     and spheres act; their kills join the list, paid to the owner.
+        for (uid, slot, generation) in owner_swings {
+            self.companions.owner_swung(uid, slot, generation);
+        }
+        self.companions_step(map, &mut hits, &mut kills, &mut swings);
+        // A companion's kill pays its owner (experience, zeny, loot, the
+        // record) but builds no combo and counts for no card.
+        let pet_kills: Vec<(u16, u32)> = self.companions.killed().collect();
+        let Some(horde) = self.horde.as_mut() else { return };
+        let rng = &mut self.dice;
 
         // 2. Kills: experience for everyone in the party on this map, then
         //    the slot goes back to the pool (the client sees a REMOVE).
         let mut boss_down = false;
         let mut bursts: Vec<(f32, f32)> = Vec::new();
+        // Corpse skills (`on_death`, brain.rs): telegraphs to send.
+        let mut corpse: Vec<ServerMsg> = Vec::new();
         if !kills.is_empty() {
+            let book = std::sync::Arc::clone(&self.skills);
+            if self.kind_skills.len() != horde.catalog().defs().len() {
+                self.kind_skills = super::brain::kind_skills(horde, &book);
+            }
+            let standing: Vec<(f32, f32)> =
+                self.players.iter().filter(|p| p.map == map && p.fighter.as_ref().is_some_and(|f| f.hunted())).map(|p| (p.x, p.y)).collect();
             let levels: Vec<u32> =
                 self.players.iter().filter(|p| p.map == map).filter_map(|p| p.fighter.as_ref().map(|f| f.level)).collect();
             for &(s, killer) in &kills {
@@ -1049,6 +1173,7 @@ impl HubInstance {
                 self.kills += u32::from(!plant);
                 // The combo is the killer's own (a standing one's).
                 if !plant
+                    && !pet_kills.contains(&(s, killer))
                     && let Some(f) = self.players.iter_mut().find(|p| p.profile.user_id == killer && p.map == map).and_then(|p| p.fighter.as_mut())
                     && f.is_up()
                 {
@@ -1092,7 +1217,13 @@ impl HubInstance {
                 for p in self.players.iter_mut().filter(|p| p.map == map) {
                     if let Some(f) = p.fighter.as_mut() {
                         let before = f.level;
-                        f.gain(it.next().unwrap_or(0));
+                        let share = it.next().unwrap_or(0);
+                        f.gain(share);
+                        // Its homunculus earns a bonus copy (nothing is
+                        // taken from the owner).
+                        if !plant {
+                            self.companions.grant_exp(p.profile.user_id, share);
+                        }
                         // Cards that pay more (rolled only when worn).
                         let o = f.procs();
                         let pct = o.zeny_pct as u32 + if starred { o.elite_zeny as u32 } else { 0 };
@@ -1138,8 +1269,21 @@ impl HubInstance {
                 }
                 // Novas and the Volatile blast: marked now, landing later.
                 super::affix::on_death(horde, s, tick, hz, rng, &mut self.affix, &mut self.hazards);
+                let kind = horde.store().kind[s as usize] as usize;
+                if let Some(skills) = self.kind_skills.get(kind).filter(|k| !k.is_empty()) {
+                    super::brain::on_death(horde, s, skills, &book, &standing, tick, hz, rng, &mut self.next_zone, &mut self.hazards, &mut hits, &mut corpse);
+                }
                 horde.despawn(s);
             }
+        }
+        for p in self.players.iter().filter(|p| p.map == map) {
+            for m in &corpse {
+                out.push((p.profile.user_id, HubEvent::Control(m.clone())));
+            }
+        }
+        if boss_down {
+            let owners: Vec<u32> = self.players.iter().filter(|p| p.map == map).map(|p| p.profile.user_id).collect();
+            self.companions.bond_out(&owners, super::companion::BOND_BOSS);
         }
         // A level-up bursts out (the heal is in `gain`): monsters around
         // are thrown back and flinch.
@@ -1186,20 +1330,52 @@ impl HubInstance {
             }
             let status = store.status_of(s);
             // Burrowed: it cannot bite from under the ground.
-            if store.flags[i] & FLAG_FULL == 0 || ups.is_empty() || status.held() || store.staggered(s) || store.is_plant(s) || store.burrowed(s) {
+            if store.flags[i] & FLAG_FULL == 0
+                || (ups.is_empty() && self.companions.is_empty())
+                || status.held()
+                || store.staggered(s)
+                || store.is_plant(s)
+                || store.burrowed(s)
+                // Sacrificed: dead already, paid next tick.
+                || store.hp[i] <= 0
+            {
                 continue;
             }
             let (mx, my) = (store.x[i], store.y[i]);
-            let reach = horde.catalog().get(horde.store().kind[i]).radius + PLAYER_RADIUS + MONSTER_REACH;
+            let body = horde.catalog().get(horde.store().kind[i]).radius;
+            let reach = body + PLAYER_RADIUS + MONSTER_REACH;
             let taunter = if status.has(Condition::Taunted) { horde.store().taunter[i] } else { 0 };
+            // Companions (companion.rs): a lure that taunted it is its
+            // victim when in reach; with no player in reach it bites the
+            // nearest companion in reach (a plant hedge gets eaten).
+            let pet = self.companions.lure_in_reach(taunter, mx, my, body + MONSTER_REACH);
             let mut victim: Option<(usize, f32, f32, f32)> = None;
-            for &(pi, px, py, uid) in &ups {
+            for &(pi, px, py, uid) in ups.iter().filter(|_| pet.is_none()) {
                 let (dx, dy) = (px - mx, py - my);
                 // The taunter sorts first.
                 let d2 = dx * dx + dy * dy - if uid == taunter && taunter != 0 { 1e6 } else { 0.0 };
                 if dx * dx + dy * dy <= reach * reach && victim.is_none_or(|(_, _, _, b)| d2 < b) {
                     victim = Some((pi, dx, dy, d2));
                 }
+            }
+            let pet = pet.or_else(|| if victim.is_none() { self.companions.nearest_in_reach(mx, my, body + MONSTER_REACH) } else { None });
+            if let Some(ci) = pet {
+                let block = horde.block(s);
+                let (cx_, cy_, id, ac) = self.companions.target_of(ci, self.tick);
+                let advantage = status.advantage().clamp(-1, 1);
+                match attack_roll(rng, block.attack, ac, advantage, 20) {
+                    AttackOutcome::Miss => hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS }),
+                    outcome => {
+                        let crit = outcome == AttackOutcome::Critical;
+                        let amount = self.companions.take(ci, block.damage.roll(rng, crit), self.tick);
+                        let flags = damage_type_bits(DamageType::Physical) | if crit { hit::CRITICAL } else { 0 };
+                        hits.push(HitEvent { target: id, amount: amount as u32, flags });
+                    }
+                }
+                let pace = super::affix::attack_interval(horde.store(), s);
+                horde.store_mut().cooldown[i] = (block.attack_interval_ms as f32 * pace * hz / 1000.0).round() as u16;
+                swings.push(Swing { entity_id: MONSTER_ENTITY_BASE + s as u32, facing: facing_of(cx_ - mx, cy_ - my), target: id });
+                continue;
             }
             let Some((pi, dx, dy, _)) = victim else { continue };
             // Provoked: it fights badly against anyone but its taunter.
@@ -1219,6 +1395,26 @@ impl HubInstance {
                 // The Sandman's card: the sand takes it.
                 f.cards.veil_cd = (f.procs().veil as f32 * hz) as u32;
                 hits.push(HitEvent { target: id, amount: 0, flags: hit::GUARD });
+            } else if f.mods.catch > 0.0 {
+                // Blade Stop: the blow is caught between the palms; its
+                // attacker and every monster close by are Stunned (bosses
+                // shrug it off), and the buff is spent.
+                hits.push(HitEvent { target: id, amount: 0, flags: hit::GUARD });
+                let (r, ticks) = (f.mods.catch, ticks16(f.mods.catch_secs, hz));
+                f.spend_catch();
+                let mut near = vec![s];
+                Area::Circle { x: p.x, y: p.y, r }.monsters(horde, &mut near);
+                for &m in &near {
+                    if horde.store().flags[m as usize] & FLAG_BOSS == 0 && !horde.is_plant(m) {
+                        inflict(horde, m, Condition::Stunned, ticks, 0);
+                    }
+                }
+            } else if f.mods.parry > 0 && rng.chance(f.mods.parry) {
+                // Parry: the blade turns it aside and answers at once.
+                hits.push(HitEvent { target: id, amount: 0, flags: hit::GUARD });
+                f.riposte = true;
+                f.attack_cd = 0;
+                card_guarded(f, horde, rng, s, true, hz, &mut hits);
             } else if f.mods.block > 0 && rng.chance(f.mods.block) {
                 // Auto Guard: the shield takes it.
                 hits.push(HitEvent { target: id, amount: 0, flags: hit::GUARD });
@@ -1256,6 +1452,10 @@ impl HubInstance {
         let wave = horde.waves();
         let new_wave = wave != self.last_wave;
         self.last_wave = wave;
+        if new_wave {
+            // Dead homunculi come back with the wave, as players do.
+            self.companions.new_wave();
+        }
         let positions: Vec<(u32, f32, f32, bool)> = self
             .players
             .iter()
@@ -1352,6 +1552,8 @@ impl HubInstance {
         // 6. Messages: combat to the map, vitals on change, progress to self.
         let recipients: Vec<u32> = self.players.iter().filter(|p| p.map == map).map(|p| p.profile.user_id).collect();
         let mut skill_updates: Vec<u32> = Vec::new();
+        // Companion records first: their hits below name their entities.
+        self.companion_messages(map, out);
         if !swings.is_empty() || !hits.is_empty() {
             let msg = ServerMsg::Combat { swings, hits };
             for &uid in &recipients {
@@ -1368,7 +1570,7 @@ impl HubInstance {
                 f.sp,
                 f.max_sp,
                 f.state.code() as i32,
-                f.status.0 as i32,
+                (f.status.0 as u32 | f.veil()) as i32,
                 f.temp_hp,
                 f.mods.light.round() as i32,
             ];
@@ -1384,6 +1586,12 @@ impl HubInstance {
                     out.push((r, HubEvent::Control(msg.clone())));
                 }
             }
+            if std::mem::take(&mut f.quiver_dirty) {
+                let msg = ServerMsg::Quiver { entity_id: id, element: f.arrow as u8 };
+                for &r in &recipients {
+                    out.push((r, HubEvent::Control(msg.clone())));
+                }
+            }
             if std::mem::take(&mut f.skills_dirty) {
                 skill_updates.push(uid);
             }
@@ -1395,7 +1603,11 @@ impl HubInstance {
                 out.push((uid, HubEvent::Control(f.progress())));
                 out.push((uid, HubEvent::Progress { level: f.level, exp: f.exp }));
                 if f.zeny > 0 {
-                    out.push((uid, HubEvent::Zeny { amount: std::mem::take(&mut f.zeny) }));
+                    let amount = std::mem::take(&mut f.zeny);
+                    // The hub's copy of the bag is the purse skills pay from
+                    // (Mammonite, `cast.rs`): what is earned is spendable.
+                    p.profile.bag.earn(amount);
+                    out.push((uid, HubEvent::Zeny { amount }));
                 }
                 if let Some(loot) = f.take_loot() {
                     self.run.looted(uid, &loot);
@@ -1450,12 +1662,19 @@ impl HubInstance {
         let p = &self.players[idx];
         let Some(f) = p.fighter.as_ref() else { return };
         let mine = f.vitals(p.profile.character_id);
+        let quiver = f.quiver_msg(p.profile.character_id);
         for o in self.players.iter().filter(|o| o.map == p.map) {
             out.push((o.profile.user_id, HubEvent::Control(mine.clone())));
+            if let Some(q) = &quiver {
+                out.push((o.profile.user_id, HubEvent::Control(q.clone())));
+            }
             if o.profile.user_id != p.profile.user_id
                 && let Some(of) = o.fighter.as_ref()
             {
                 out.push((p.profile.user_id, HubEvent::Control(of.vitals(o.profile.character_id))));
+                if let Some(q) = of.quiver_msg(o.profile.character_id) {
+                    out.push((p.profile.user_id, HubEvent::Control(q)));
+                }
                 if matches!(of.state, Vital::Downed { .. }) {
                     let hz = self.config.tick_hz as f32;
                     out.push((p.profile.user_id, HubEvent::Control(of.revive_state(o.profile.character_id, hz))));
@@ -1474,7 +1693,6 @@ const CARD_STING_SECS: f32 = 4.0;
 /// What the worn cards do when a basic attack lands on monster `s` (each
 /// rolls only when its card is worn, so a fighter without cards keeps the
 /// dice stream it had).
-#[allow(clippy::too_many_arguments)]
 fn card_hit(o: &Procs, f: &mut Fighter, horde: &mut Horde, rng: &mut combat::Rng, s: u16, crit: bool, hz: f32, hits: &mut Vec<HitEvent>, me: u32) {
     let t = ticks16(CARD_COND_SECS, hz);
     if o.ignite > 0 && rng.chance(o.ignite as u32) {

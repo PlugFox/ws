@@ -59,8 +59,18 @@ fn buff_numbers(b: &BuffFx, slv: u8, cl: u32, out: &mut Vec<(String, f32)>, p: &
     put("venom", m.venom as f32);
     put("loot", m.loot);
     put("amplify", m.amplify);
+    put("parry", m.parry as f32);
+    put("catch", m.catch);
+    put("catch_secs", m.catch_secs);
     put("temp_hp", b.temp_hp.map_or(0.0, |d| avg(scaled(d, b.scale_k, b.mult.at(slv), 0.0, cl))));
     put("shield", b.shield.at(slv));
+    put("potion", m.potion);
+    put("immune", m.immune.count_ones() as f32);
+    put("sp_drain", -m.sp_drain);
+    put("stacks", b.stacks.at(slv));
+    put("buy", b.buy.at(slv));
+    put("sell", b.sell.at(slv));
+    put("pharmacy", if b.pharmacy { slv as f32 } else { 0.0 });
 }
 
 /// Every number of a skill at `slv` for a character of level `cl`, as the
@@ -99,8 +109,16 @@ fn numbers(d: &SkillDef, slv: u8, cl: u32) -> Vec<(String, f32)> {
                         };
                         put("damage", base + extra, &mut out);
                         put("knockback", fx.knockback.at(slv).abs(), &mut out);
+                        put("flank", fx.flank.at(slv), &mut out);
                         put("save", fx.save.map_or(0.0, |s| s.secs.at(slv)), &mut out);
+                        put("tough", fx.tough.at(slv), &mut out);
+                        put("cart", fx.cart.at(slv), &mut out);
                     }
+                    // A summon is as strong as its level (hub/companion.rs).
+                    Payload::Summon { .. } => put("summon", slv as f32, &mut out),
+                    Payload::Pitch { mult, .. } => put("pitch", mult.at(slv), &mut out),
+                    // Monster skills only: never on a player's.
+                    Payload::Rally(_) => {}
                     Payload::Heal(h) => put("heal", avg(scaled(h.dice, h.scale_k, h.mult.at(slv), 0.0, cl)), &mut out),
                     Payload::Condition { secs, .. } => put("condition", secs.at(slv), &mut out),
                     Payload::Push(dist) => put("push", dist.at(slv).abs(), &mut out),
@@ -110,6 +128,8 @@ fn numbers(d: &SkillDef, slv: u8, cl: u32) -> Vec<(String, f32)> {
                     Payload::Barrier | Payload::Cure | Payload::Dispel => {}
                 }
             }
+            // Each level opens one more arrow (Arrow Change).
+            Effect::Quiver(arrows) => put("arrows", (slv as usize + 1).min(arrows.len()) as f32, &mut out),
             Effect::Mount | Effect::Pending(_) => {}
         }
     }
@@ -167,6 +187,7 @@ fn caster() -> HubInstance {
         weapon: String::new(),
         loadout: Default::default(),
         bag: Default::default(),
+        homunculus: None,
     };
     stage.join(profile, Uuid::nil(), None, 0, &mut Vec::new());
     (stage.players[0].x, stage.players[0].y) = (30.0, 20.0);

@@ -5,7 +5,7 @@ use crate::feedback::{Draft, Place, CLOSED, OPEN};
 use serde::Serialize;
 use crate::db::Db;
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, Postgres, QueryBuilder};
+use sqlx::{AssertSqlSafe, FromRow, Postgres, QueryBuilder};
 
 /// One report as stored.
 #[derive(Clone, Debug, Serialize, FromRow, PartialEq)]
@@ -96,7 +96,7 @@ impl FeedbackRepo {
     }
 
     pub async fn get(pool: &Db, id: i64) -> Result<Option<FeedbackRecord>, sqlx::Error> {
-        sqlx::query_as::<_, FeedbackRecord>(&format!("SELECT {COLUMNS} FROM feedback WHERE id = $1"))
+        sqlx::query_as::<_, FeedbackRecord>(AssertSqlSafe(format!("SELECT {COLUMNS} FROM feedback WHERE id = $1")))
             .bind(id)
             .fetch_optional(pool)
             .await

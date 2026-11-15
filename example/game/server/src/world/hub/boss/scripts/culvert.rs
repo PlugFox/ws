@@ -146,7 +146,7 @@ pub(super) const RAT_KING: Script = Script {
             action: Action::Shield { pct: 6 },
             shake: 80,
             hurt: Hurt { rider: Some((Condition::Slowed, 1.5)), save: false, ..hurt(1, 6, DamageType::Poison) },
-            ..ability("boss_gnaw_pipes", "Gnaw the Pipes", 2.6, Anchor::Boss, Pattern::Pool { r: 6.0, secs: 8.0, pulse: 1.0 }, NO_HURT, look::SLUDGE)
+            ..ability("boss_gnaw_pipes", "Gnaw the Pipes", 2.6, Anchor::Boss, Pattern::Pool { r: 6.0, secs: 8.0, pulse: 1.0, pull: 0.0 }, NO_HURT, look::SLUDGE)
         },
         // 5: Dark Squeal: a shriek that blinds; hug him.
         Ability {

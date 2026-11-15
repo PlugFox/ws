@@ -25,6 +25,7 @@ fn profile(user_id: u32) -> PlayerProfile {
         weapon: String::new(),
         loadout: Default::default(),
         bag: Default::default(),
+        homunculus: None,
     }
 }
 

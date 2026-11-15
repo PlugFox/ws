@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use std::assert_matches;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -83,8 +84,8 @@ async fn player(addr: SocketAddr, name: &str) -> (String, u32) {
 }
 
 async fn connect(addr: SocketAddr, token: &str) -> Ws {
-    let (mut ws, _) = connect_async(format!("ws://{addr}/api/ws?token={token}")).await.unwrap();
-    assert!(matches!(next_msg(&mut ws).await, ServerMsg::Connected { .. }));
+    let (mut ws, _) = connect_async(format!("ws://{addr}/api/ws?token={token}&build={}", game_server::version::client_build())).await.unwrap();
+    assert_matches!(next_msg(&mut ws).await, ServerMsg::Connected { .. });
     ws
 }
 
@@ -166,7 +167,7 @@ async fn local_chat_is_cleaned_delivered_and_rate_limited() {
 
     // Not in an instance yet: nobody to talk to.
     send(&mut a, ClientMsg::Chat { text: "hello?".into() }).await;
-    assert!(matches!(next_chat(&mut a).await, ServerMsg::HubError { code, .. } if code == "not_in_hub"));
+    assert_matches!(next_chat(&mut a).await, ServerMsg::HubError { code, .. } if code == "not_in_hub");
 
     join_hub(&mut a).await;
     join_hub(&mut b).await;

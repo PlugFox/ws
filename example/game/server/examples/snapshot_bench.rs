@@ -18,7 +18,7 @@ use game_server::world::horde::{Horde, HordeConfig, PlayerView};
 use game_server::world::hub::HubWorld;
 use game_server::world::wire::Reader;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -75,8 +75,8 @@ fn main() {
             let kinds: Vec<u8> = ["poring", "fabre", "lunatic"].iter().filter_map(|k| catalog.kind_of(k)).collect();
             let mut placed = 0;
             while placed < n {
-                let a = rng.gen_range(0.0..std::f32::consts::TAU);
-                let r = rng.gen_range(3.0..light * 1.3);
+                let a = rng.random_range(0.0..std::f32::consts::TAU);
+                let r = rng.random_range(3.0..light * 1.3);
                 let (x, y) = (sx + a.cos() * r, sy + a.sin() * r);
                 if walk.is_walkable(x, y) && horde.spawn(kinds[placed % kinds.len()], x, y).is_some() {
                     placed += 1;

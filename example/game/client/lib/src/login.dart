@@ -8,6 +8,7 @@ import 'package:game_client/src/contacts.dart';
 import 'package:game_client/src/engine.dart';
 import 'package:game_client/src/online.dart';
 import 'package:game_client/src/protocol.dart' show Look, weaponFamilyOf;
+import 'package:game_client/src/update.dart';
 import 'package:game_client/src/version.dart';
 import 'package:web/web.dart' as web;
 
@@ -43,7 +44,11 @@ Future<Map<String, Object?>> runLogin(
       .then((h) => view.setVersion(versionLine('${h['version'] ?? ''}')))
       .catchError((Object e) => web.console.warn('health: $e'.toJS));
   // The server's pulse under the panels while on these screens only.
-  final pulse = OnlinePoller(() => api.json('/api/online'), (s) => view.setServerStatus(jsonEncode(s.toJson())))..start();
+  // A deploy since this page loaded: offer the reload (`update.dart`).
+  final pulse = OnlinePoller(() => api.json('/api/online'), (s) {
+    view.setServerStatus(jsonEncode(s.toJson()));
+    pageUpdates?.sawServer(s.build);
+  })..start();
   try {
     for (;;) {
       // Back from the world with a session: straight to the characters.

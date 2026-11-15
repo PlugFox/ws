@@ -130,3 +130,17 @@ fn the_drops_card_sets_monsters_alight_and_a_plain_sword_does_not() {
         assert_eq!(burns(&mut st, s, 1200), want, "{weapon}");
     }
 }
+
+#[test]
+fn the_opening_minibosses_cards_do_what_they_say() {
+    let toad = wearing(&[(combat::Slot::Weapon, "sword[toad_card]")]);
+    assert_eq!((toad.procs().reach, toad.procs().leech), (1, 6), "a longer reach and a gulp of HP");
+    let bat = wearing(&[(combat::Slot::Garment, "hood[vampire_bat_card]")]);
+    assert_eq!((bat.procs().dodge, bat.procs().blind_back), (8, 15));
+    let mut king = wearing(&[(combat::Slot::Armour, "cotton_shirt[scorpion_king_card]")]);
+    assert_eq!(king.procs().thorns, 6);
+    king.afflict(Condition::Poisoned, 100);
+    assert!(!king.status.has(Condition::Poisoned), "the king's venom guard");
+    let captain = wearing(&[(combat::Slot::Shield, "guard[skeleton_captain_card]")]);
+    assert_eq!((captain.procs().riposte, captain.procs().pack), (8, 1));
+}

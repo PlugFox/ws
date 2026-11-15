@@ -1,16 +1,20 @@
 /// How many players are online, polled from `GET /api/online` (`{"online":
-/// n, "server_time": unix ms}`): the title screens show it with the
-/// request's round trip, the town beside the minimap.
+/// n, "server_time": unix ms, "build": client build}`): the title screens
+/// show it with the request's round trip, the town beside the minimap; the
+/// build tells an open tab of a new deploy (`update.dart`).
 library;
 
 import 'dart:async';
 
 /// One poll's result.
 final class OnlineStatus {
-  const OnlineStatus({required this.online, this.pingMs, this.down = false});
+  const OnlineStatus({required this.online, this.pingMs, this.down = false, this.build});
 
   /// The server did not answer.
-  const OnlineStatus.down() : online = 0, pingMs = null, down = true;
+  const OnlineStatus.down() : online = 0, pingMs = null, down = true, build = null;
+
+  /// The client build the server takes (`build`), when it says.
+  final String? build;
 
   final int online;
 
@@ -60,7 +64,11 @@ final class OnlinePoller {
     OnlineStatus status;
     try {
       final r = await _fetch();
-      status = OnlineStatus(online: (r['online'] as num?)?.toInt() ?? 0, pingMs: watch.elapsedMilliseconds);
+      status = OnlineStatus(
+        online: (r['online'] as num?)?.toInt() ?? 0,
+        pingMs: watch.elapsedMilliseconds,
+        build: r['build'] as String?,
+      );
     } on Object {
       status = const OnlineStatus.down();
     } finally {

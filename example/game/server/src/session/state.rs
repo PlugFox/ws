@@ -26,6 +26,8 @@ pub struct CharacterState {
     pub loadout: Loadout,
     /// Lifetime counters (the leaderboard; `world::record`).
     pub record: Record,
+    /// The Merchant line's homunculus (`characters.homunculus`).
+    pub homunculus: Option<crate::world::hub::HomSave>,
 
     pub is_dirty: bool,
     pub last_modified: Instant,
@@ -60,6 +62,7 @@ impl CharacterState {
             look,
             loadout: Loadout::default(),
             record: Record::default(),
+            homunculus: None,
             is_dirty: false,
             last_modified: Instant::now(),
         }
@@ -102,6 +105,15 @@ impl CharacterState {
     }
 
     /// Learned skills or hotbar changed, marking state dirty.
+    /// The homunculus as the hub reported it, marking state dirty when changed.
+    pub fn set_homunculus(&mut self, save: crate::world::hub::HomSave) {
+        if self.homunculus.as_ref() != Some(&save) {
+            self.homunculus = Some(save);
+            self.is_dirty = true;
+            self.last_modified = Instant::now();
+        }
+    }
+
     pub fn set_loadout(&mut self, loadout: Loadout) {
         if self.loadout != loadout {
             self.loadout = loadout;

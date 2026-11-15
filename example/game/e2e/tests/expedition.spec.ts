@@ -4,9 +4,8 @@ import { createCharacter, enterWorld, signUp, watchErrors } from './helpers';
 // The expedition window (missions.ts): the Kafra's "Choose an expedition"
 // lists the ladder (`MISSION_LIST`) beside the selected mission's page.
 // `?shop=kafra` opens the Kafra from the spawn (a GAME_DEV server lets
-// mission givers answer from anywhere). Which of the later missions are
-// still "coming soon" depends on the baked pack, so only Poring Island is
-// assumed open.
+// mission givers answer from anywhere). The whole ladder is baked: none of
+// the nine is "coming soon".
 test('the Kafra opens the expedition window: list, page, keys, start', async ({ page }, info) => {
   const errors = watchErrors(page);
   await signUp(page, '/?shop=kafra');
@@ -18,7 +17,20 @@ test('the Kafra opens the expedition window: list, page, keys, start', async ({ 
   const win = page.locator('.u-missions');
   await expect(win).toBeVisible();
   const items = win.locator('.ex-item');
-  await expect(items).toHaveCount(4);
+  const ladder = [
+    'poring_island_survival',
+    'prontera_culvert',
+    'sograt_desert',
+    'payon_caves',
+    'orc_village',
+    'toy_factory',
+    'glast_heim',
+    'thor_volcano',
+    'thanatos_tower',
+  ];
+  await expect(items).toHaveCount(ladder.length);
+  expect(await items.evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.id))).toEqual(ladder);
+  await expect(win.locator('.ex-item.soon')).toHaveCount(0);
   // The window opens on the mission that suits the hero (e2e heroes start at
   // GAME_DEV_LEVEL, so which one depends on the server's setting).
   const chosen = win.locator('.ex-item.on');

@@ -23,11 +23,12 @@ use super::hub::{HubEvent, HubInstance, HubSimConfig, HubWorld, PlayerProfile};
 use super::missions::MissionInfo;
 use super::modifiers::Modifiers;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::mem::DropGuard;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{error, info};
 use uuid::Uuid;
 
 const COMMAND_CAPACITY: usize = 1024;
@@ -130,6 +131,11 @@ struct Stage {
     /// Party members handed a ticket who have not entered (or given up) yet;
     /// the stage stays up for them until the launch grace runs out.
     pending: HashSet<u32>,
+    /// Pending members joining the run late (`late_ticket`): they enter
+    /// beside a party member instead of on the spawn.
+    late: HashSet<u32>,
+    /// The mission's player limit (late joins stop there).
+    max_players: usize,
     launched_at: Instant,
     /// The party leader's mission modifiers.
     mods: Modifiers,
@@ -259,7 +265,11 @@ impl StageDirectory {
                 release(&state, stage_id, user_id);
             }
         });
-        tokio::spawn(run_stage(instance, rx, released));
+        let exit = on_crash(Arc::downgrade(&self.state), stage_id);
+        tokio::spawn(async move {
+            let _exit = exit;
+            run_stage(instance, rx, released).await
+        });
         st.stages.insert(
             stage_id,
             Stage {
@@ -267,6 +277,8 @@ impl StageDirectory {
                 mission: mission.id,
                 members: HashMap::new(),
                 pending: members.iter().copied().collect(),
+                late: HashSet::new(),
+                max_players: mission.max_players as usize,
                 launched_at: Instant::now(),
                 mods,
             },
@@ -287,15 +299,45 @@ impl StageDirectory {
         let mut st = self.state.lock().unwrap();
         let stage = st.stages.get_mut(&stage_id).ok_or(StageError::Gone(stage_id))?;
         let (user_id, character_id) = (profile.user_id, profile.character_id);
-        stage.commands.try_send(HubCommand::Join { profile, session_id, outbox, arrival: None, epoch }).map_err(
-            |e| match e {
-                mpsc::error::TrySendError::Full(_) => StageError::Busy(stage_id),
-                mpsc::error::TrySendError::Closed(_) => StageError::Gone(stage_id),
-            },
-        )?;
+        let cmd = match stage.late.contains(&user_id) {
+            true => HubCommand::JoinLate { profile, session_id, outbox, epoch },
+            false => HubCommand::Join { profile, session_id, outbox, arrival: None, epoch },
+        };
+        stage.commands.try_send(cmd).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => StageError::Busy(stage_id),
+            mpsc::error::TrySendError::Closed(_) => StageError::Gone(stage_id),
+        })?;
         stage.pending.remove(&user_id);
+        stage.late.remove(&user_id);
         stage.members.insert(user_id, Member { conn: session_id, character_id, dropped: None });
         Ok(stage.commands.clone())
+    }
+
+    /// A ticket into a stage already under way (a late join from the party
+    /// list): `user_id` is expected like a launched member and enters
+    /// beside the party ([`HubCommand::JoinLate`]). Refused when the stage
+    /// is over or its mission's player limit is reached (inside and
+    /// coming).
+    pub fn late_ticket(&self, stage_id: u32, user_id: u32) -> Result<StageTicket, StageError> {
+        let mut st = self.state.lock().unwrap();
+        let stage = st.stages.get_mut(&stage_id).ok_or(StageError::Gone(stage_id))?;
+        if stage.commands.is_closed() {
+            return Err(StageError::Gone(stage_id));
+        }
+        let max = stage.max_players;
+        let coming = stage.members.len() + stage.pending.iter().filter(|&&u| !stage.members.contains_key(&u)).count();
+        if !stage.members.contains_key(&user_id) && !stage.pending.contains(&user_id) && coming >= max {
+            return Err(StageError::Full);
+        }
+        stage.pending.insert(user_id);
+        stage.late.insert(user_id);
+        info!("Stage-{stage_id}: user {user_id} joins late");
+        Ok(StageTicket { stage_id, mission: stage.mission, commands: stage.commands.clone() })
+    }
+
+    /// How long stage `stage_id` has been running (`None`: it is over).
+    pub fn age(&self, stage_id: u32) -> Option<Duration> {
+        self.state.lock().unwrap().stages.get(&stage_id).map(|s| s.launched_at.elapsed())
     }
 
     /// A party member will not enter after all (their ticket could not be
@@ -303,6 +345,7 @@ impl StageDirectory {
     pub fn abandon(&self, stage_id: u32, user_id: u32) {
         let mut st = self.state.lock().unwrap();
         let Some(stage) = st.stages.get_mut(&stage_id) else { return };
+        stage.late.remove(&user_id);
         if stage.pending.remove(&user_id) && stage.members.is_empty() && stage.pending.is_empty() {
             st.stages.remove(&stage_id);
             info!("Stage-{stage_id} ended: nobody entered");
@@ -489,6 +532,24 @@ fn release(state: &Mutex<StageState>, stage_id: u32, user_id: u32) {
     }
 }
 
+/// Armed for the life of stage `stage_id`'s actor: when the actor panics,
+/// the stage leaves the directory at once (its party can launch again)
+/// instead of waiting for every link-dead member to time out. A normal
+/// exit or a cancelled task leaves the state alone.
+fn on_crash(state: Weak<Mutex<StageState>>, stage_id: u32) -> DropGuard<(), impl FnOnce(())> {
+    DropGuard::new((), move |()| {
+        if !std::thread::panicking() {
+            return;
+        }
+        let Some(state) = state.upgrade() else { return };
+        // Never panic here: a panic while unwinding aborts the process.
+        let mut st = state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(s) = st.stages.remove(&stage_id) {
+            error!("Stage-{stage_id} ({}) crashed: closed with {} players inside", s.mission, s.members.len());
+        }
+    })
+}
+
 fn reap(state: &Mutex<StageState>, grace: Duration, link_grace: Duration, now: Instant) -> Vec<u32> {
     let mut st = state.lock().unwrap();
     for (id, s) in st.stages.iter_mut() {
@@ -496,20 +557,15 @@ fn reap(state: &Mutex<StageState>, grace: Duration, link_grace: Duration, now: I
             s.pending.clear();
         }
         // The link grace ran out: removed as a leave would.
-        let commands = &s.commands;
-        s.members.retain(|&user_id, m| {
-            let expired = m.dropped.is_some_and(|t| now.saturating_duration_since(t) >= link_grace);
-            if expired {
-                let _ = commands.try_send(HubCommand::Leave { user_id, session_id: m.conn });
-                info!("Stage-{id}: link-dead user {user_id} timed out");
-            }
-            !expired
-        });
+        let expired = |m: &mut Member| m.dropped.is_some_and(|t| now.saturating_duration_since(t) >= link_grace);
+        for (user_id, m) in s.members.extract_if(|_, m| expired(m)) {
+            let _ = s.commands.try_send(HubCommand::Leave { user_id, session_id: m.conn });
+            info!("Stage-{id}: link-dead user {user_id} timed out");
+        }
     }
     let doomed: Vec<u32> =
-        st.stages.iter().filter(|(_, s)| s.members.is_empty() && s.pending.is_empty()).map(|(id, _)| *id).collect();
+        st.stages.extract_if(.., |_, s| s.members.is_empty() && s.pending.is_empty()).map(|(id, _)| id).collect();
     for id in &doomed {
-        st.stages.remove(id);
         info!("Stage-{id} shut down: nobody left inside");
     }
     doomed
@@ -543,7 +599,7 @@ mod tests {
     }
 
     fn profile(user_id: u32) -> PlayerProfile {
-        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: crate::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default() }
+        PlayerProfile { user_id, character_id: 100 + user_id, name: format!("p{user_id}"), archetype: "novice".into(), look: crate::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default(), homunculus: None }
     }
 
     #[tokio::test]
@@ -610,13 +666,11 @@ mod tests {
         assert_eq!(dir.active(), 0, "2 no longer pending after the grace");
     }
 
-    fn next_joined(rx: &mut mpsc::Receiver<HubEvent>) -> impl std::future::Future<Output = u32> + '_ {
-        async move {
-            loop {
-                match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap().unwrap() {
-                    HubEvent::Control(ServerMsg::StageJoined { stage_id, .. }) => return stage_id,
-                    _ => continue,
-                }
+    async fn next_joined(rx: &mut mpsc::Receiver<HubEvent>) -> u32 {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap().unwrap() {
+                HubEvent::Control(ServerMsg::StageJoined { stage_id, .. }) => return stage_id,
+                _ => continue,
             }
         }
     }

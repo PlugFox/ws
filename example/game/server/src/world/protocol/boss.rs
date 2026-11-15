@@ -50,6 +50,21 @@ pub mod zone_flags {
     /// The caster leaps onto its centre and lands as it resolves (pounces,
     /// bounding hops): clients draw the jump instead of a teleport.
     pub const LANDS: u8 = 4;
+    /// Lasting ground that carries bodies along its `dir` (a conveyor belt,
+    /// `environment::Hazard::drift`): clients predict the local player's
+    /// ride. The speed is in the high nibble, half-cells per second
+    /// ([`drift_flags`], [`drift_speed`]); 0 = stopped.
+    pub const DRIFT: u8 = 8;
+
+    /// The flags of drifting ground at `speed` cells per second (0..=7.5).
+    pub fn drift_flags(speed: f32) -> u8 {
+        DRIFT | (((speed.abs() * 2.0).round().clamp(0.0, 15.0) as u8) << 4)
+    }
+
+    /// The drift speed (cells per second) of a zone's flags.
+    pub fn drift_speed(flags: u8) -> f32 {
+        if flags & DRIFT == 0 { 0.0 } else { (flags >> 4) as f32 / 2.0 }
+    }
 }
 
 /// [`ServerMsg::BossCast`] flags.

@@ -3,6 +3,7 @@ use crate::world::hub::test_support::map;
 use crate::world::hub::HubWorld;
 use crate::world::map::{CameraConstraint, LocationKind};
 use crate::world::stage::StageConfig;
+use std::assert_matches;
 
 const MISSION: &str = "poring_island_survival";
 
@@ -33,6 +34,7 @@ fn profile(user_id: u32) -> PlayerProfile {
         weapon: String::new(),
         loadout: Default::default(),
         bag: Default::default(),
+        homunculus: None,
     }
 }
 
@@ -61,7 +63,7 @@ impl Client {
         let mut other = Vec::new();
         while let Ok(e) = self.rx.try_recv() {
             match e {
-                LobbyEvent::Msg(ServerMsg::LobbyState { lobby }) => state = Some(lobby),
+                LobbyEvent::Msg(ServerMsg::LobbyState { lobby }) => state = Some(*lobby),
                 LobbyEvent::Msg(ServerMsg::ModifierDefs { .. } | ServerMsg::MissionInfo { .. }) => {}
                 LobbyEvent::Msg(m @ ServerMsg::Modifiers { .. }) => self.mods = Some(m),
                 e => other.push(e),
@@ -234,7 +236,7 @@ async fn leader_leaving_promotes_next_and_kick_works() {
     }
     assert!(dir.leave(1, sid(1), "left"));
     let (_, events) = a.drain();
-    assert!(matches!(&events[..], [LobbyEvent::Msg(ServerMsg::LobbyLeft { reason })] if reason == "left"));
+    assert_matches!(&events[..], [LobbyEvent::Msg(ServerMsg::LobbyLeft { reason })] if reason == "left");
     let state = b.drain().0.unwrap();
     assert_eq!(state.members.len(), 2);
     assert!(state.members[0].leader && state.members[0].entity_id == 102, "p2 leads now");
@@ -294,7 +296,7 @@ async fn the_leader_picks_another_mission_members_cannot() {
     // Same mission: nothing changes, the party stays theirs.
     assert_eq!(a.select(&dir, false).unwrap(), id);
     assert_eq!(b.select(&dir, true).unwrap(), id);
-    assert!(matches!(dir.select(profile(1), sid(1), "nope", true, a.tx.clone()), Err(LobbyError::UnknownMission(_))));
+    assert_matches!(dir.select(profile(1), sid(1), "nope", true, a.tx.clone()), Err(LobbyError::UnknownMission(_)));
     // Set for another mission (this server has one only): a member is told
     // who picks; the leader's pick switches the party.
     static OTHER: MissionInfo = MissionInfo {
@@ -458,7 +460,7 @@ async fn unknown_and_unavailable_missions() {
     let a = Client::new(1);
     assert_eq!(dir.select(profile(1), sid(1), "nope", true, a.tx.clone()).unwrap_err(), LobbyError::UnknownMission("nope".into()));
     let empty = LobbyDirectory::new(StageDirectory::new(vec![], StageConfig::default()));
-    assert!(matches!(empty.select(profile(1), sid(1), MISSION, true, a.tx.clone()), Err(LobbyError::MissionUnavailable(_))));
+    assert_matches!(empty.select(profile(1), sid(1), MISSION, true, a.tx.clone()), Err(LobbyError::MissionUnavailable(_)));
 }
 
 #[tokio::test]
@@ -471,10 +473,10 @@ async fn leader_sets_modifiers_members_see_them_and_the_launch_carries_them() {
     b.select(&dir, true).unwrap();
     let mask = ModFlags::SLOW.0 | ModFlags::DARKNESS.0;
     assert_eq!(dir.set_modifiers(2, sid(2), 3, mask).unwrap_err(), LobbyError::NotLeader);
-    assert!(matches!(dir.set_modifiers(1, sid(1), MAX_TIER + 1, 0), Err(LobbyError::BadModifier(_))));
-    assert!(matches!(dir.set_modifiers(1, sid(1), 0, ModFlags::VOLATILE.0), Err(LobbyError::BadModifier(_))), "locked");
-    assert!(matches!(dir.set_modifiers(1, sid(1), 0, 1 << 31), Err(LobbyError::BadModifier(_))), "unknown bit");
-    assert!(matches!(dir.set_modifiers(1, sid(1), 0, ModFlags::ONE_HIT.0), Err(LobbyError::BadModifier(_))), "level 1 leader");
+    assert_matches!(dir.set_modifiers(1, sid(1), MAX_TIER + 1, 0), Err(LobbyError::BadModifier(_)));
+    assert_matches!(dir.set_modifiers(1, sid(1), 0, ModFlags::VOLATILE.0), Err(LobbyError::BadModifier(_)), "locked");
+    assert_matches!(dir.set_modifiers(1, sid(1), 0, 1 << 31), Err(LobbyError::BadModifier(_)), "unknown bit");
+    assert_matches!(dir.set_modifiers(1, sid(1), 0, ModFlags::ONE_HIT.0), Err(LobbyError::BadModifier(_)), "level 1 leader");
     a.drain();
     b.drain();
     dir.set_modifiers(1, sid(1), 3, mask).unwrap();
@@ -512,11 +514,11 @@ async fn quick_start_alone_launches_at_once_with_the_modifiers() {
         matches!(dir.quick_start(profile(1), sid(1), MISSION, 0, ModFlags::ONE_HIT.0, a.tx.clone()), Err(LobbyError::BadModifier(_))),
         "the curses' levels hold for a party of one too"
     );
-    assert!(matches!(dir.quick_start(profile(1), sid(1), "nope", 0, 0, a.tx.clone()), Err(LobbyError::UnknownMission(_))));
+    assert_matches!(dir.quick_start(profile(1), sid(1), "nope", 0, 0, a.tx.clone()), Err(LobbyError::UnknownMission(_)));
     let stage = dir.quick_start(profile(1), sid(1), MISSION, 2, mask, a.tx.clone()).unwrap();
     let (state, events) = a.drain();
     assert!(state.is_none(), "no party is ever listed");
-    assert!(matches!(&events[..], [LobbyEvent::Launch(t)] if t.stage_id == stage && t.mission == MISSION), "{events:?}");
+    assert_matches!(&events[..], [LobbyEvent::Launch(t)] if t.stage_id == stage && t.mission == MISSION, "{events:?}");
     assert_eq!(dir.open_lobbies(), 0);
     assert_eq!(dir.lobby_of(1), None);
     assert_eq!(dir.stages().modifiers(stage), Some(Modifiers { tier: 2, flags: ModFlags(mask) }));
@@ -530,7 +532,7 @@ async fn quick_start_in_a_party_starts_it_with_the_window_s_modifiers() {
     a.select(&dir, true).unwrap();
     b.select(&dir, true).unwrap();
     assert_eq!(dir.quick_start(profile(2), sid(2), MISSION, 0, 0, b.tx.clone()).unwrap_err(), LobbyError::NotLeader);
-    assert!(matches!(dir.quick_start(profile(1), sid(1), "other", 0, 0, a.tx.clone()), Err(LobbyError::UnknownMission(_))));
+    assert_matches!(dir.quick_start(profile(1), sid(1), "other", 0, 0, a.tx.clone()), Err(LobbyError::UnknownMission(_)));
     let stage = dir.quick_start(profile(1), sid(1), MISSION, 1, 0, a.tx.clone()).unwrap();
     for c in [&mut a, &mut b] {
         assert_eq!(launched(&c.drain().1), Some(stage));
@@ -548,7 +550,7 @@ async fn a_curse_s_level_holds_the_start_for_everyone_going() {
     dir.select(strong(1), sid(1), MISSION, true, a.tx.clone()).unwrap();
     dir.select(profile(2), sid(2), MISSION, true, b.tx.clone()).unwrap();
     dir.set_modifiers(1, sid(1), 0, ModFlags::ONE_HIT.0).unwrap();
-    assert!(matches!(dir.start(1, sid(1)), Err(LobbyError::BadModifier(m)) if m.starts_with("p2")));
+    assert_matches!(dir.start(1, sid(1)), Err(LobbyError::BadModifier(m)) if m.starts_with("p2"));
     // p2 offline: they stay behind, the start goes.
     dir.detach(2, sid(2));
     assert!(dir.start(1, sid(1)).is_ok());

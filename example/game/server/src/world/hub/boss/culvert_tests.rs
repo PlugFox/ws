@@ -59,6 +59,7 @@ fn hall(seed: u64) -> HubInstance {
         weapon: String::new(),
         loadout: Default::default(),
         bag: Default::default(),
+        homunculus: None,
     };
     let mut out = Vec::new();
     stage.join(profile, Uuid::nil(), None, 0, &mut out);

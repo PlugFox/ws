@@ -67,8 +67,8 @@ impl GeolocationService {
         }
 
         let reader = self.reader.as_ref()?;
-        match reader.lookup::<CountryRecord>(ip) {
-            Ok(record) => record.country.and_then(|c| c.iso_code),
+        match reader.lookup(ip).and_then(|found| found.decode::<CountryRecord>()) {
+            Ok(record) => record?.country.and_then(|c| c.iso_code),
             Err(err) => {
                 debug!("GeoIP lookup error for {}: {}", ip, err);
                 None
@@ -100,5 +100,17 @@ mod tests {
 
         let localhost_v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
         assert_eq!(service.resolve_country(localhost_v6), Some("ZZ".to_string()));
+    }
+
+    /// A public address through a real MaxMind country database, when
+    /// `GEOIP_DB_PATH` names one (it is not in the repository).
+    #[test]
+    fn resolves_a_public_ip_with_a_database() {
+        let Ok(path) = std::env::var("GEOIP_DB_PATH") else { return };
+        let service = GeolocationService::new(Some(&path));
+        assert!(service.reader.is_some(), "{path} opens");
+        assert_eq!(service.resolve_country(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))), Some("US".to_string()));
+        // Reserved for documentation: in no country.
+        assert_eq!(service.resolve_country(IpAddr::V6("2001:db8::1".parse().unwrap())), None);
     }
 }

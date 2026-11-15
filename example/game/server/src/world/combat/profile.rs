@@ -7,7 +7,7 @@
 //! its skills (the [`SkillBook`]). Only the judgement calls live here, in
 //! [`PROFILES`]: the party role, the radar ratings, the difficulty, a one-
 //! line pitch and which skills to show first. Lines not playable yet
-//! (Merchant, Super Novice, Ninja, Gunslinger, Taekwon) are listed
+//! (Super Novice, Ninja, Gunslinger, Taekwon) are listed
 //! too, locked, with their ratings and planned titles only (ROADMAP
 //! "Classes").
 
@@ -132,8 +132,8 @@ pub const PROFILES: &[Profile] = &[
         // Longest reach and burst on one target; traps for control.
         ratings: r(4, 2, 4, 5, 1, 3),
         difficulty: 3,
-        pitch: "Extreme range, traps and quick feet: bursts the biggest target.",
-        signature: &["double_strafe", "arrow_shower", "ankle_snare", "claymore_trap", "sharp_shooting"],
+        pitch: "Extreme range, traps and the arrow for every foe: bursts the biggest target.",
+        signature: &["double_strafe", "arrow_change", "arrow_vulcan", "ankle_snare", "sharp_shooting"],
         planned: &[],
     },
     Profile {
@@ -164,24 +164,28 @@ pub const PROFILES: &[Profile] = &[
         name: "Thief",
         class: Some(Class::Thief),
         roles: &[Role::Melee],
-        // The quickest blades and Sonic Blow; Cloaking and Back Stab move
-        // it through the horde; poison ground for control; no heals.
-        ratings: r(4, 2, 5, 1, 1, 2),
+        // The quickest blades and Sonic Blow; Hiding, Back Stab, Tunnel
+        // Drive and Smoke Bomb move it through the horde; poison bombs
+        // for control, Venom Knife between dives; no heals.
+        ratings: r(4, 2, 5, 2, 1, 3),
         difficulty: 4,
-        pitch: "Poison, stealth and the fastest blades: in and out of the horde.",
-        signature: &["sonic_blow", "envenom", "cloaking", "venom_dust", "meteor_assault"],
+        pitch: "Poison bombs, stealth and the fastest blades: in and out of the horde.",
+        signature: &["back_stab", "sonic_blow", "poison_bomb", "smoke_bomb", "meteor_assault"],
         planned: &[],
     },
     Profile {
         id: "merchant",
         name: "Merchant",
-        class: None,
+        class: Some(Class::Merchant),
         roles: &[Role::Melee, Role::Support],
-        ratings: r(3, 4, 2, 2, 3, 2),
-        difficulty: 2,
-        pitch: "Cart crashes, forged weapons and potions thrown to the party.",
-        signature: &[],
-        planned: &["Merchant", "Blacksmith · Alchemist", "Whitesmith · Creator"],
+        // An axe in hand, war cries for the party and fire bottles; the
+        // homunculus, plants and sphere mines fight beside it (they carry
+        // the damage the second swing does not).
+        ratings: r(3, 4, 2, 2, 3, 3),
+        difficulty: 3,
+        pitch: "Axe, war cries and fire bottles; a homunculus and planted allies fight at your side.",
+        signature: &["mammonite", "cart_revolution", "call_homunculus", "acid_demonstration", "summon_flora"],
+        planned: &[],
     },
     Profile {
         id: "super_novice",

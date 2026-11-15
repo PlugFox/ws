@@ -2,37 +2,47 @@
 name = "game_server"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.100"
+# The game server ships in the image, never on crates.io (cargo deny treats it as private).
+publish = false
+
+[lints.clippy]
+# The per-tick systems take their SoA columns as arguments (AGENTS.md, DoD).
+too_many_arguments = "allow"
+# New suppressions are `#[expect(lint, reason = "..")]`: they say why and
+# warn once they are no longer needed.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
 
 [dependencies]
 tokio = { version = "1.43", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "fs", "set-header"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono", "uuid", "json"] }
-argon2 = "0.5"
-password-hash = "0.5"
+tower-http = { version = "0.7", features = ["cors", "trace", "fs", "set-header"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono", "uuid", "json"] }
+argon2 = "0.6"
+password-hash = "0.6.1"
 jsonwebtoken = "9.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-sha2 = "0.10"
-base64 = "0.22"
+sha2 = "0.11"
+base64 = "0.23"
 subtle = "2.6"
-rand = "0.8"
-maxminddb = "0.24"
+rand = "0.10"
+maxminddb = "0.33"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0"
-anyhow = "1.0"
 bytes = "1.10"
 futures-util = "0.3"
 dashmap = "6.1"
-png = "0.17"
+png = "0.18"
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full", "test-util"] }
-reqwest = { version = "0.12", features = ["json"] }
-tokio-tungstenite = "0.26"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+tokio-tungstenite = "0.30"
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

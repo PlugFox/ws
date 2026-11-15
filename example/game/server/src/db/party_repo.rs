@@ -61,7 +61,8 @@ impl PartyRepo {
     pub async fn load(pool: &Db) -> Result<Vec<PartyRow>, sqlx::Error> {
         let parties: Vec<(i64, String, String, bool, Json<StoredMods>)> =
             sqlx::query_as("SELECT id, code, mission, public, modifiers FROM parties ORDER BY id").fetch_all(pool).await?;
-        let members: Vec<(i64, i64, Json<StoredCharacter>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        type Seat = (i64, i64, Json<StoredCharacter>, Option<DateTime<Utc>>);
+        let members: Vec<Seat> = sqlx::query_as(
             "SELECT party_id, user_id, character, last_seen FROM party_members ORDER BY party_id, seat, joined_at",
         )
         .fetch_all(pool)

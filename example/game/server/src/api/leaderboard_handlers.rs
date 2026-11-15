@@ -46,10 +46,13 @@ pub struct LeaderboardQuery {
 /// A cached page: (entries, total) by (board, page, limit).
 type Page = Arc<(Vec<Entry>, i64)>;
 
+/// A served page by (board, offset, limit), with when it was read.
+type Pages = HashMap<(Board, u32, u32), (Instant, Page)>;
+
 /// Recently served pages.
 #[derive(Clone, Default)]
 pub struct LeaderboardCache {
-    pages: Arc<Mutex<HashMap<(Board, u32, u32), (Instant, Page)>>>,
+    pages: Arc<Mutex<Pages>>,
 }
 
 impl LeaderboardCache {

@@ -12,7 +12,7 @@ use crate::world::combat::Class;
 use crate::world::record::Record;
 use serde::Serialize;
 use crate::db::Db;
-use sqlx::FromRow;
+use sqlx::{AssertSqlSafe, FromRow};
 
 /// A leaderboard: what it ranks by.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -156,7 +156,7 @@ impl LeaderboardRepo {
     /// `limit` rows of `board` from `offset`, ranked.
     pub async fn page(pool: &Db, board: Board, offset: u32, limit: u32) -> Result<Vec<Entry>, sqlx::Error> {
         let sql = format!("SELECT {COLUMNS} FROM characters ORDER BY {} LIMIT $1 OFFSET $2", board.order_by());
-        let mut rows: Vec<Entry> = sqlx::query_as(&sql)
+        let mut rows: Vec<Entry> = sqlx::query_as(AssertSqlSafe(sql))
             .bind(i64::from(limit.min(MAX_LIMIT)))
             .bind(i64::from(offset))
             .fetch_all(pool)
@@ -180,7 +180,7 @@ impl LeaderboardRepo {
     /// One character's row on `board`, ranked (`None`: no such character).
     pub async fn entry(pool: &Db, board: Board, character_id: i64) -> Result<Option<Entry>, sqlx::Error> {
         let sql = format!("SELECT {COLUMNS} FROM characters WHERE id = $1");
-        let Some(mut e) = sqlx::query_as::<_, Entry>(&sql).bind(character_id).fetch_optional(pool).await? else {
+        let Some(mut e) = sqlx::query_as::<_, Entry>(AssertSqlSafe(sql)).bind(character_id).fetch_optional(pool).await? else {
             return Ok(None);
         };
         e.rank = Self::rank_of_key(pool, board, board.key_of(&e)).await?;
@@ -191,7 +191,7 @@ impl LeaderboardRepo {
     /// 1 + the rows strictly ahead of `key`.
     async fn rank_of_key(pool: &Db, board: Board, key: [i64; 2]) -> Result<i64, sqlx::Error> {
         let sql = format!("SELECT COUNT(*) FROM characters WHERE {}", board.ahead());
-        let mut q = sqlx::query_scalar::<_, i64>(&sql);
+        let mut q = sqlx::query_scalar::<_, i64>(AssertSqlSafe(sql));
         for v in &key[..board.key().len()] {
             q = q.bind(*v);
         }
@@ -305,7 +305,7 @@ mod tests {
             let page = format!("EXPLAIN SELECT {COLUMNS} FROM characters ORDER BY {} LIMIT 10 OFFSET 0", board.order_by());
             let rank = format!("EXPLAIN SELECT COUNT(*) FROM characters WHERE {}", board.ahead()).replace("$1", "5").replace("$2", "5");
             for sql in [page, rank] {
-                let plan: Vec<String> = sqlx::query_scalar(&sql).fetch_all(&mut *tx).await.unwrap();
+                let plan: Vec<String> = sqlx::query_scalar(AssertSqlSafe(sql.as_str())).fetch_all(&mut *tx).await.unwrap();
                 let plan = plan.join("\n");
                 let index = format!("characters_lb_{}_idx", board.id());
                 assert!(plan.contains(&index) && !plan.contains("Sort"), "{} board: {sql}\n{plan}", board.id());

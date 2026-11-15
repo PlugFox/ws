@@ -243,6 +243,11 @@ impl HubInstance {
             shrink_secs: rules.shrink_secs,
         };
         self.fog.circle = Some(c);
+        // The run closes in: no more waves, eggs or broods (the monsters on
+        // the field and a boss already fighting stay).
+        if let Some(h) = self.horde.as_mut() {
+            h.close_spawning();
+        }
         info!("{}: poison fog rises at {now:.0} s around ({x:.1}, {y:.1}), {:.0} → {:.0} cells", self.name, c.from_radius, c.to_radius);
         self.broadcast(map, &c.msg(true, now), out);
         Some(c)
@@ -270,6 +275,7 @@ impl HubInstance {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use super::super::test_support::map;
     use super::super::{HubSimConfig, HubWorld, PlayerProfile};
     use super::*;
@@ -295,6 +301,7 @@ mod tests {
             weapon: String::new(),
             loadout: Default::default(),
             bag: Default::default(),
+            homunculus: None,
         }
     }
 
@@ -380,6 +387,23 @@ mod tests {
     fn fog_up_west(stage: &mut HubInstance) {
         stage.fog.circle =
             Some(Circle { x: 4.5, y: 10.5, from_radius: 3.0, to_radius: 3.0, start_secs: 0.0, shrink_secs: 0.0 });
+    }
+
+    /// Once the zone starts closing, the game master stops: no more waves
+    /// (the monsters already out stay on the field).
+    #[test]
+    fn spawning_stops_when_the_fog_rises() {
+        let mut stage = fog_stage();
+        let mut out = Vec::new();
+        let slot = stage.horde_mut().unwrap().spawn(0, 30.5, 10.5).unwrap();
+        clock(&mut stage, 700.0);
+        stage.tick(&mut out);
+        assert!(!stage.horde.as_ref().unwrap().spawning_closed(), "waves until the fog");
+        clock(&mut stage, 720.0);
+        stage.tick(&mut out);
+        let h = stage.horde.as_ref().unwrap();
+        assert!(stage.fog.circle.is_some() && h.spawning_closed(), "the fog closes the waves");
+        assert!(h.store().is_alive(slot), "the monsters out there stay");
     }
 
     #[test]
@@ -520,7 +544,7 @@ mod tests {
         run(&mut stage, hz, &mut out);
         let f = fighter(&mut stage, 1);
         assert_eq!((f.state, f.fog, f.fog_dead, f.hp), (Vital::Dead, DEATH_SECS, true, 0));
-        assert!(matches!(stage.outcome, Outcome::Over { .. }), "solo: the run is lost");
+        assert_matches!(stage.outcome, Outcome::Over { .. }, "solo: the run is lost");
     }
 
     #[test]
@@ -541,7 +565,7 @@ mod tests {
         run(&mut stage, hz * 5, &mut out);
         assert!(poison_hits(&out).is_empty(), "no damage on the downed");
         assert_eq!(fighter(&mut stage, 1).fog, 25);
-        assert!(matches!(fighter(&mut stage, 1).state, Vital::Downed { .. }));
+        assert_matches!(fighter(&mut stage, 1).state, Vital::Downed { .. });
         run(&mut stage, hz * 5, &mut out);
         let f = fighter(&mut stage, 1);
         assert_eq!((f.state, f.fog_dead), (Vital::Dead, true), "dead before the bleed-out ran out");

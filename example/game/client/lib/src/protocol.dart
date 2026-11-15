@@ -63,13 +63,14 @@ abstract final class Kind {
   static const npcDialog = 0x26;
   static const hubLeft = 0x27;
   static const hubError = 0x28;
-  static const playerLook = 0x29;
   static const playerVitals = 0x2A;
   static const combat = 0x2B;
   static const progress = 0x2C;
   static const skills = 0x2D;
   static const cast = 0x2E;
   static const zoneEnd = 0x2F;
+  static const skillStrikes = 0x9E;
+  static const quiver = 0x9D;
   static const stageJoined = 0x30;
   static const lobbyState = 0x31;
   static const lobbyLeft = 0x32;
@@ -84,15 +85,15 @@ abstract final class Kind {
   static const itemDefs = 0x3B;
   static const shop = 0x3C;
   static const itemUsed = 0x3D;
-  static const playerGear = 0x3E;
-  static const playerHeadgear = 0x8B;
-  static const playerMount = 0x90;
+  // 0x29 PLAYER_LOOK, 0x3E PLAYER_GEAR, 0x8B PLAYER_HEADGEAR and 0x90
+  // PLAYER_MOUNT are retired: all of it is in [playerAppearance].
   static const loot = 0x3F;
   static const combo = 0x60;
   static const revive = 0x61;
   static const bonus = 0x68;
   static const missionInfo = 0x6C;
   static const missionList = 0x92;
+
   /// A run's live light and map events (server `protocol/mission.rs`).
   static const environment = 0x93;
   static const stageClock = 0x6D;
@@ -121,6 +122,13 @@ abstract final class Kind {
   static const affixEvent = 0xA1;
   static const affixDefs = 0xA2;
   static const monsterHp = 0xA5;
+  /// Merchant-line companions (server `protocol/companion.rs`).
+  static const companions = 0xA3;
+  static const companionState = 0xA4;
+  /// Town services (server `protocol/town.rs`): recipes, the party list.
+  static const quests = 0x99;
+  static const parties = 0x9B;
+  static const playerAppearance = 0xA6;
 
   static const ping = 0x40;
   static const hubJoin = 0x41;
@@ -142,6 +150,8 @@ abstract final class Kind {
   static const emoteReq = 0x51;
   static const poseReq = 0x52;
   static const mountReq = 0x91;
+  static const townSkill = 0xA9;
+  static const quiverReq = 0x9C;
   static const flagReq = 0x53;
   static const shopBuy = 0x54;
   static const shopSell = 0x55;
@@ -161,6 +171,10 @@ abstract final class Kind {
   static const lobbyModifiers = 0x77;
   static const missionStart = 0x63;
   static const castPrefs = 0x85;
+  static const usePrefs = 0xA7;
+  static const companionCmd = 0xA8;
+  static const questReq = 0x98;
+  static const partiesReq = 0x9A;
 
   static const extended = 0xFF;
 }
@@ -360,6 +374,21 @@ abstract final class ClientMsg {
             ..u8((auto >> 8) & 0xFF))
           .done();
 
+  /// Auto-use of consumables (server `UsePrefs`): on a mission the server
+  /// drinks the best HP / SP one once HP / SP falls below [hp] / [sp]
+  /// percent (0 = off, at most 95). The connection keeps it: send on
+  /// connect and on change.
+  static Uint8List usePrefs({required int hp, required int sp}) =>
+      (WireWriter(Kind.usePrefs)
+            ..u8(hp.clamp(0, 95))
+            ..u8(sp.clamp(0, 95)))
+          .done();
+
+  /// [itemUse] of the quick-use keys: the server picks the best HP / SP
+  /// consumable carried (`shop.rs` `best_potion`).
+  static const quickHp = '@hp';
+  static const quickSp = '@sp';
+
   /// Quick start (server `lobby.rs` `quick_start`): alone, launches
   /// [mission] with these modifiers at once; a party leader starts the
   /// party's run (everyone ready).
@@ -412,6 +441,14 @@ abstract final class ClientMsg {
 
   /// Get on (true) or off the Peco Peco (needs Peco Peco Ride; anywhere).
   static Uint8List mount({required bool on}) => (WireWriter(Kind.mountReq)..u8(on ? 1 : 0)).done();
+
+  /// Use learned [skill] in town (the town skill bar; `town = true` in
+  /// skills.toml): mount, the Pharmacy, the homunculus. Server `TOWN_SKILL`.
+  static Uint8List townSkill(String skill) => (WireWriter(Kind.townSkill)..str(skill)).done();
+
+  /// Nock the arrow of damage type [element] ([Quiver.next]: the next one
+  /// Arrow Change opens; on a stage).
+  static Uint8List quiver(int element) => (WireWriter(Kind.quiverReq)..u8(element)).done();
 
   /// A ping flag of kind [flag] (0..9) on cell ([x], [y]) for everyone on the map.
   static Uint8List flag(int flag, double x, double y) =>
@@ -600,6 +637,60 @@ abstract final class ClientMsg {
             ..str(clientVersion)
             ..str(userAgent))
           .done();
+
+  /// Make [recipe] at the recipe giver [npc] (in town); answered by
+  /// [Crafted] or a [HubError].
+  static Uint8List craft(String npc, String recipe) =>
+      (WireWriter(Kind.questReq)
+            ..u8(0)
+            ..str(npc)
+            ..str(recipe))
+          .done();
+
+  /// The Kafra's list of public parties ([Parties]).
+  static Uint8List partyList() => (WireWriter(Kind.partiesReq)..u8(0)).done();
+
+  /// Join the public party [lobbyId] (or go to the own party's running
+  /// mission); errors come as [LobbyError].
+  static Uint8List partyJoin(int lobbyId) =>
+      (WireWriter(Kind.partiesReq)
+            ..u8(1)
+            ..varint(lobbyId))
+          .done();
+
+  /// The leader lists the party on the Kafra's board, or hides it.
+  static Uint8List partyPublic({required bool public}) =>
+      (WireWriter(Kind.partiesReq)
+            ..u8(2)
+            ..boolean(public))
+          .done();
+
+  /// Pick the homunculus type ([HomType], not [HomType.none]): the first
+  /// Call Homunculus, or the paid change in town.
+  static Uint8List companionChoose(int homType) =>
+      (WireWriter(Kind.companionCmd)
+            ..u8(CompanionCmd.choose)
+            ..u8(homType))
+          .done();
+
+  /// The homunculus stance ([CompanionStance]).
+  static Uint8List companionStance(int stance) =>
+      (WireWriter(Kind.companionCmd)
+            ..u8(CompanionCmd.stance)
+            ..u8(stance))
+          .done();
+
+  static Uint8List companionRename(String name) =>
+      (WireWriter(Kind.companionCmd)
+            ..u8(CompanionCmd.rename)
+            ..str(name))
+          .done();
+
+  /// Evolve the homunculus (in town; the server checks the rules).
+  static Uint8List companionEvolve() => (WireWriter(Kind.companionCmd)..u8(CompanionCmd.evolve)).done();
+
+  /// Rest or wake the homunculus (a toggle).
+  static Uint8List companionRest() => (WireWriter(Kind.companionCmd)..u8(CompanionCmd.rest)).done();
 }
 
 /// Lengths the server accepts for feedback (server `crate::feedback`).
@@ -729,33 +820,99 @@ final class MapInfo {
 }
 
 final class PlayerInfo {
-  PlayerInfo._(
-    this.entityId,
-    this.name,
-    this.archetype,
-    this.x,
-    this.y,
-    this.facing,
-    this.look,
-    this.level,
-    this.weapon,
-  );
+  PlayerInfo._(this.entityId, this.name, this.archetype, this.x, this.y, this.facing, this.level, this.appearance);
   final int entityId;
   final String name;
   final String archetype;
   final double x;
   final double y;
   final int facing;
-  final Look look;
 
-  /// Character level (its tier picks the body).
+  /// Character level (the player menu; the body's tier is in [appearance]).
   final int level;
 
-  /// Held weapon id (`sword`, `bow`, ...; '' for townsfolk).
-  final String weapon;
+  /// How the character is drawn, whole.
+  final Appearance appearance;
+
+  Look get look => appearance.look;
 
   static PlayerInfo _read(WireReader r) =>
-      PlayerInfo._(r.varint(), r.str(), r.str(), r.pos(), r.pos(), r.u8(), Look._read(r), r.varint(), r.str());
+      PlayerInfo._(r.varint(), r.str(), r.str(), r.pos(), r.pos(), r.u8(), r.varint(), Appearance._read(r));
+}
+
+/// What a character looks like, whole (server `protocol/appearance.rs`):
+/// derived there from the profile, gear and skills and sent in full in
+/// [MapEnter] / [PlayerAppeared] players, for the own character right after
+/// [MapEnter], and on every change ([PlayerAppearance]). The client draws a
+/// character from its latest one alone; applying one again is harmless.
+final class Appearance {
+  const Appearance({
+    this.cls = '',
+    this.tier = 1,
+    this.look = const Look(),
+    this.weapon = '',
+    this.headgear = const [],
+    this.mount = none,
+    this.speed = 0,
+    this.cart = false,
+  });
+
+  /// [mount] values.
+  static const none = 0;
+  static const peco = 1;
+
+  /// Class line of the body (`swordsman`; townsfolk: their archetype).
+  final String cls;
+
+  /// Body tier (1..3).
+  final int tier;
+  final Look look;
+
+  /// The held weapon as the engine draws it: `family:item` (`spear:pike`);
+  /// '' none.
+  final String weapon;
+
+  /// Headgear item ids (upper, mid, lower; bare slots left out).
+  final List<String> headgear;
+  final int mount;
+
+  /// Percent the mount adds to the walk (the own prediction's pace).
+  final int speed;
+
+  /// Pushes a Pushcart (the Merchant line's passive): drawn trailing behind.
+  final bool cart;
+
+  bool get riding => mount != none;
+
+  /// The engine's `setAppearance` spec.
+  Map<String, Object> toUi() => {...look.toUi(), 'weapon': weapon, 'headgear': headgear};
+
+  static Appearance _read(WireReader r) => Appearance(
+    cls: r.str(),
+    tier: r.u8(),
+    look: Look._read(r),
+    weapon: r.str(),
+    headgear: r.list((r) => r.str()),
+    mount: r.u8(),
+    speed: r.u8(),
+    cart: r.u8() != 0,
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      other is Appearance &&
+      other.cls == cls &&
+      other.tier == tier &&
+      other.look == look &&
+      other.weapon == weapon &&
+      other.mount == mount &&
+      other.speed == speed &&
+      other.cart == cart &&
+      other.headgear.length == headgear.length &&
+      Iterable<int>.generate(headgear.length).every((i) => other.headgear[i] == headgear[i]);
+
+  @override
+  int get hashCode => Object.hash(cls, tier, look, weapon, mount, speed, cart, Object.hashAll(headgear));
 }
 
 /// Equipment slot indices (the server's `items::Slot`, wire order).
@@ -780,17 +937,17 @@ abstract final class EquipSlot {
 String? weaponFamilyOf(String weapon) {
   final id = weapon.split(RegExp('[+\\[]')).first;
   final family = switch (id) {
-    'knife' || 'cutter' || 'main_gauche' || 'stiletto' || 'viper_fang' => 'dagger',
-    'sword' || 'falchion' || 'blade' || 'ember_blade' => 'sword',
-    'katana' || 'claymore' => 'two_hand_sword',
-    'javelin' || 'pike' || 'wyvern_spear' => 'spear',
-    'axe' => 'axe',
+    'knife' || 'cutter' || 'main_gauche' || 'stiletto' || 'viper_fang' || 'soul_stiletto' => 'dagger',
+    'sword' || 'falchion' || 'blade' || 'ember_blade' || 'guardian_blade' => 'sword',
+    'katana' || 'claymore' || 'giantsbane' => 'two_hand_sword',
+    'javelin' || 'pike' || 'wyvern_spear' || 'crusader_pike' => 'spear',
+    'axe' || 'thunder_axe' => 'axe',
     'battle_axe' || 'berserker_axe' => 'two_hand_axe',
     'club' || 'mace' || 'dawn_mace' => 'mace',
-    'bow' || 'composite_bow' || 'great_bow' || 'wind_bow' || 'sunshot_bow' => 'bow',
-    'rod' || 'wand' || 'staff' || 'war_mage_wand' || 'ember_staff' => 'staff',
+    'bow' || 'composite_bow' || 'great_bow' || 'wind_bow' || 'sunshot_bow' || 'stalker_bow' => 'bow',
+    'rod' || 'wand' || 'staff' || 'war_mage_wand' || 'ember_staff' || 'moonlit_rod' => 'staff',
     'bible' || 'tome_of_mercy' => 'book',
-    'jur' || 'katar' || 'jamadhar' || 'shadowfang' => 'katar',
+    'jur' || 'katar' || 'jamadhar' || 'shadowfang' || 'scorpion_jur' => 'katar',
     _ => null,
   };
   return family == null || !_magicWeapons.contains(id) ? family : '$family:$id';
@@ -808,6 +965,14 @@ const _magicWeapons = {
   'ember_staff',
   'tome_of_mercy',
   'shadowfang',
+  'guardian_blade',
+  'giantsbane',
+  'stalker_bow',
+  'scorpion_jur',
+  'moonlit_rod',
+  'crusader_pike',
+  'soul_stiletto',
+  'thunder_axe',
 };
 
 /// One row of the item catalogue ([ItemDefs]).
@@ -840,7 +1005,7 @@ final class ItemDef {
   final int price;
 
   /// Classes that may use it: bit 0 swordsman, 1 archer, 2 mage, 3 acolyte,
-  /// 4 thief.
+  /// 4 thief, 5 merchant.
   final int classes;
 
   /// Tooltip text (the engine's `markup()`).
@@ -859,6 +1024,10 @@ final class ItemDef {
   /// Card sockets (0..4).
   final int sockets;
 
+  /// The name with its socket count, `Sword [3]` (the engine's
+  /// `ItemBook.name` for an instance without refine or cards).
+  String get label => sockets > 0 ? '$name [$sockets]' : name;
+
   /// A card: what it fits (1 headgear … 7 accessory, `cards.dart`);
   /// 0 = not a card.
   final int card;
@@ -873,7 +1042,22 @@ final class ItemDef {
     final id = r.str(), name = r.str(), kind = r.u8(), slot = r.u8();
     final price = r.varint(), classes = r.u8(), desc = r.str(), rarity = r.u8(), safe = r.u8();
     final sockets = r.u8(), card = r.u8(), prefix = r.str(), suffix = r.str(), monster = r.str();
-    return ItemDef._(id, name, kind, slot == 0xFF ? null : slot, price, classes, desc, rarity, safe, sockets, card, prefix, suffix, monster);
+    return ItemDef._(
+      id,
+      name,
+      kind,
+      slot == 0xFF ? null : slot,
+      price,
+      classes,
+      desc,
+      rarity,
+      safe,
+      sockets,
+      card,
+      prefix,
+      suffix,
+      monster,
+    );
   }
 }
 
@@ -891,7 +1075,16 @@ final class MissionInfo {
 /// A party member: the account's current character, or its last one
 /// while offline (parties belong to accounts, server `lobby.rs`).
 final class LobbyMember {
-  LobbyMember._(this.entityId, this.name, this.archetype, this.leader, this.online, this.away, this.level, this.offlineSecs);
+  LobbyMember._(
+    this.entityId,
+    this.name,
+    this.archetype,
+    this.leader,
+    this.online,
+    this.away,
+    this.level,
+    this.offlineSecs,
+  );
   final int entityId;
   final String name;
   final String archetype;
@@ -949,7 +1142,7 @@ sealed class ServerMsg {
       Kind.npcDialog => NpcDialog(r.str(), r.str(), r.str(), r.list(MissionInfo._read)),
       Kind.hubLeft => HubLeft(r.code()),
       Kind.hubError => HubError(r.code(), r.str()),
-      Kind.playerLook => PlayerLook(r.varint(), Look._read(r)),
+      Kind.playerAppearance => PlayerAppearance(r.varint(), Appearance._read(r)),
       Kind.playerVitals => PlayerVitals(
         r.varint(),
         r.varint(),
@@ -972,6 +1165,12 @@ sealed class ServerMsg {
       }, r.list((r) => r.str())),
       Kind.cast => Cast(r.varint(), r.str(), r.pos(), r.pos(), r.varint(), r.varint(), r.list(Telegraph._read), r.u8()),
       Kind.zoneEnd => ZoneEnd(r.varint()),
+      Kind.skillStrikes => SkillStrikes(
+        r.varint(),
+        r.str(),
+        r.pos(),
+        r.list((r) => (x: r.pos(), y: r.pos(), delayMs: r.varint())),
+      ),
       Kind.stageEnd => StageEnd(r.boolean(), r.varint(), r.varint(), r.varint(), r.varint()),
       Kind.boss => Boss(r.varint(), r.str(), r.varint(), r.varint()),
       Kind.buffs => Buffs([for (final (id, ms) in r.list((r) => (r.str(), r.varint()))) (skill: id, ms: ms)]),
@@ -985,7 +1184,16 @@ sealed class ServerMsg {
           r.list((r) {
             final id = r.varint(), name = r.str(), archetype = r.str(), flags = r.u8();
             // Flags: 2 leader, 4 online, 8 on a mission (1 was the ready flag).
-            return LobbyMember._(id, name, archetype, flags & 2 != 0, flags & 4 != 0, flags & 8 != 0, r.varint(), r.varint());
+            return LobbyMember._(
+              id,
+              name,
+              archetype,
+              flags & 2 != 0,
+              flags & 4 != 0,
+              flags & 8 != 0,
+              r.varint(),
+              r.varint(),
+            );
           }),
         ),
       ),
@@ -993,7 +1201,7 @@ sealed class ServerMsg {
       Kind.lobbyError => LobbyError(r.code(), r.str()),
       Kind.emote => Emote(r.varint(), r.u8()),
       Kind.pose => Pose(r.varint(), r.u8()),
-      Kind.playerMount => PlayerMount(r.varint(), r.u8(), r.u8()),
+      Kind.quiver => Quiver(r.varint(), r.u8()),
       Kind.flag => FlagPing(r.varint(), r.u8(), r.pos(), r.pos()),
       Kind.inventory => Inventory(
         r.varint(),
@@ -1002,13 +1210,18 @@ sealed class ServerMsg {
         r.str(),
       ),
       Kind.itemDefs => ItemDefs(r.list(ItemDef._read)),
-      Kind.shop => Shop(r.str(), r.str(), r.list((r) => r.str())),
+      Kind.shop => Shop(
+        r.str(),
+        r.str(),
+        r.list((r) => r.str()),
+        // Discount / Overcharge percents (trailing: an older server leaves them out).
+        buyPct: r.remaining >= 2 ? r.u8() : 0,
+        sellPct: r.remaining >= 1 ? r.u8() : 0,
+      ),
       Kind.shopDone => ShopDone(r.varint(), r.varint()),
       Kind.refined => Refined(r.str(), r.u8() != 0, r.u8(), r.u8()),
       Kind.carded => Carded(r.u8() == 0, r.str(), r.str()),
       Kind.itemUsed => ItemUsed(r.str(), r.varint()),
-      Kind.playerGear => PlayerGear(r.varint(), r.str()),
-      Kind.playerHeadgear => PlayerHeadgear(r.varint(), r.list((r) => r.str())),
       Kind.loot => Loot(r.varint(), r.pos(), r.pos(), r.str(), r.varint(), rare: r.u8() & 1 != 0),
       Kind.combo => Combo(r.varint(), r.u8(), r.varint(), r.varint()),
       Kind.revive => Revive(r.varint(), r.u8(), r.varint()),
@@ -1071,6 +1284,26 @@ sealed class ServerMsg {
       Kind.feedbackResult => FeedbackResult(r.varint(), r.str(), r.str()),
       Kind.playerLink => PlayerLink(r.varint(), online: r.boolean()),
       Kind.monsterHp => MonsterHp(r.list((r) => (r.varint(), r.u8()))),
+      Kind.companions => Companions(r.list(CompanionInfo._read)),
+      Kind.companionState => CompanionState(
+        r.u8(),
+        r.u8(),
+        r.varint(),
+        r.varint(),
+        r.u8(),
+        r.u8(),
+        r.u8(),
+        r.varint(),
+        r.varint(),
+        r.varint(),
+        [r.varint(), r.varint(), r.varint(), r.varint()],
+      ),
+      Kind.quests => switch (r.u8()) {
+        0 => Recipes(r.str(), r.str(), r.list(RecipeInfo._read)),
+        1 => Crafted(r.str(), r.str()),
+        _ => throw const WireFormatError('unknown quests op'),
+      },
+      Kind.parties => Parties(r.list(PartyListing._read)),
       Kind.resumable => Resumable(r.varint(), r.str(), r.varint()),
       Kind.monsterAffixes => MonsterAffixes(r.list(MonsterAffix._read)),
       Kind.affixEvent => AffixEvents(r.list(AffixEvent._read)),
@@ -1199,11 +1432,11 @@ final class HubError extends ServerMsg {
   final String message;
 }
 
-/// A player on the map (possibly this one) restyled.
-final class PlayerLook extends ServerMsg {
-  const PlayerLook(this.entityId, this.look);
+/// How a player on the map (possibly this one) looks now, whole.
+final class PlayerAppearance extends ServerMsg {
+  const PlayerAppearance(this.entityId, this.appearance);
   final int entityId;
-  final Look look;
+  final Appearance appearance;
 }
 
 /// Health and spell points of a player on the map (stages).
@@ -1381,6 +1614,17 @@ final class ZoneEnd extends ServerMsg {
   final int id;
 }
 
+/// Where each seeking hit of [caster]'s [skill] falls (cells) and when (ms
+/// from now), sent as the cast lands (Meteor Storm's meteors); [radius]
+/// is each hit's splash (cells).
+final class SkillStrikes extends ServerMsg {
+  const SkillStrikes(this.caster, this.skill, this.radius, this.strikes);
+  final int caster;
+  final String skill;
+  final double radius;
+  final List<({double x, double y, int delayMs})> strikes;
+}
+
 /// The mission is over: the result screen; everyone leaves after [leaveMs].
 final class StageEnd extends ServerMsg {
   const StageEnd(this.victory, this.secs, this.kills, this.exp, this.leaveMs);
@@ -1461,6 +1705,158 @@ final class MonsterHp extends ServerMsg {
   final List<(int, int)> bars;
 }
 
+/// Entity id of the first companion (homunculus, plant, sphere mine):
+/// above every character id, below the residents (server
+/// `COMPANION_ENTITY_BASE`).
+const companionEntityBase = 0x600000;
+
+/// [CompanionInfo.kind] values (server `companion_class`).
+abstract final class CompanionClass {
+  /// Walks with its owner (snapshot rows).
+  static const homunculus = 0;
+
+  /// Rooted, [CompanionInfo.expiresMs].
+  static const plant = 1;
+  static const sphere = 2;
+}
+
+/// Homunculus types (server `hom_type`).
+abstract final class HomType {
+  /// None chosen yet: the client opens the chooser.
+  static const none = 0;
+  static const lif = 1;
+  static const amistr = 2;
+  static const filir = 3;
+  static const vanilmirth = 4;
+}
+
+/// Homunculus stances (server `stance`).
+abstract final class CompanionStance {
+  static const aggressive = 0;
+  static const defensive = 1;
+  static const passive = 2;
+}
+
+/// `COMPANION_CMD` commands (server `companion_cmd`).
+abstract final class CompanionCmd {
+  static const choose = 1;
+  static const stance = 2;
+  static const rename = 3;
+  static const evolve = 4;
+  static const rest = 5;
+}
+
+/// One companion on the map (a [Companions] record).
+final class CompanionInfo {
+  const CompanionInfo(
+    this.entityId,
+    this.ownerEntityId,
+    this.kind,
+    this.sprite,
+    this.name,
+    this.level,
+    this.flags,
+    this.x,
+    this.y,
+    this.expiresMs,
+  );
+
+  /// [evolved] / [gone] bits of [flags].
+  static const evolvedFlag = 1;
+  static const goneFlag = 2;
+
+  final int entityId;
+
+  /// The owner's player entity id.
+  final int ownerEntityId;
+
+  /// [CompanionClass].
+  final int kind;
+
+  /// Sprite id in the companions pack (`lif`, `amistr_h`, `mandragora`).
+  final String sprite;
+  final String name;
+  final int level;
+  final int flags;
+
+  /// Where it stands (rooted ones stay there; a homunculus then moves in
+  /// the snapshot rows).
+  final double x;
+  final double y;
+
+  /// Until a plant or sphere goes; 0 = no limit.
+  final int expiresMs;
+
+  bool get evolved => flags & evolvedFlag != 0;
+
+  /// It left the map: drop the record and its row.
+  bool get gone => flags & goneFlag != 0;
+  bool get rooted => kind != CompanionClass.homunculus;
+
+  static CompanionInfo _read(WireReader r) => CompanionInfo(
+    r.varint(),
+    r.varint(),
+    r.u8(),
+    r.str(),
+    r.str(),
+    r.u8(),
+    r.u8(),
+    r.pos(),
+    r.pos(),
+    r.varint(),
+  );
+}
+
+/// Companions on the map: the whole list after [MapEnter], then only the
+/// records that changed (new, levelled, evolved, renamed, [CompanionInfo.gone]).
+final class Companions extends ServerMsg {
+  const Companions(this.list);
+  final List<CompanionInfo> list;
+}
+
+/// The own homunculus panel (to the owner only, on change, at most 2 Hz).
+final class CompanionState extends ServerMsg {
+  const CompanionState(
+    this.homType,
+    this.level,
+    this.exp,
+    this.expToNext,
+    this.bond,
+    this.stance,
+    this.state,
+    this.backMs,
+    this.sp,
+    this.maxSp,
+    this.cooldownsMs,
+  );
+
+  /// [state] values.
+  static const out = 0;
+  static const resting = 1;
+  static const dead = 2;
+
+  /// [HomType].
+  final int homType;
+  final int level;
+  final int exp;
+  final int expToNext;
+
+  /// 0..100.
+  final int bond;
+
+  /// [CompanionStance].
+  final int stance;
+  final int state;
+
+  /// Until it is back (dead or resting); 0 while out.
+  final int backMs;
+  final int sp;
+  final int maxSp;
+
+  /// Its four skills in unlock order (0 ready).
+  final List<int> cooldownsMs;
+}
+
 /// The selected character is link-dead in stage [stageId] ([mission] is
 /// its name) for [leftMs] more: answer [ClientMsg.stageResume].
 final class Resumable extends ServerMsg {
@@ -1507,7 +1903,9 @@ final class ModifierDef {
     'risk': risk,
     'minLevel': minLevel,
     'locked': locked,
-    'steps': [for (final (label, detail) in steps) {'label': label, 'detail': detail}],
+    'steps': [
+      for (final (label, detail) in steps) {'label': label, 'detail': detail},
+    ],
   };
 }
 
@@ -1653,8 +2051,12 @@ final class RunSeat {
     'bestCombo': bestCombo,
     'mvps': mvps,
     'exp': exp,
-    'buckets': [for (final (d, t, k) in buckets) [d, t, k]],
-    'skills': [for (final (s, d, h) in skills) [s, d, h]],
+    'buckets': [
+      for (final (d, t, k) in buckets) [d, t, k],
+    ],
+    'skills': [
+      for (final (s, d, h) in skills) [s, d, h],
+    ],
   };
 }
 
@@ -1699,21 +2101,10 @@ final class RunRewards extends ServerMsg {
     'clearZeny': clearZeny,
     'modExp': modExp,
     'modZeny': modZeny,
-    'items': [for (final (i, n) in items) [i, n]],
+    'items': [
+      for (final (i, n) in items) [i, n],
+    ],
   };
-}
-
-/// A player rides [mount] ([PlayerMount.peco]; [PlayerMount.none]: got
-/// off), [speed] percent faster (the mount's pace, what the rider's own
-/// prediction walks at). On arrival for every rider there, then on changes.
-final class PlayerMount extends ServerMsg {
-  const PlayerMount(this.entityId, this.mount, this.speed);
-  static const none = 0;
-  static const peco = 1;
-  final int entityId;
-  final int mount;
-  final int speed;
-  bool get riding => mount != none;
 }
 
 /// An entity sits down (`pose` 1) or stands up (0).
@@ -1722,6 +2113,46 @@ final class Pose extends ServerMsg {
   final int entityId;
   final int pose;
   bool get sitting => pose == 1;
+}
+
+/// The arrow an archer on the stage has nocked (Arrow Change): a damage
+/// type id as in a hit's flags ([element] 0 = the plain steel arrow).
+final class Quiver extends ServerMsg {
+  const Quiver(this.entityId, this.element);
+  final int entityId;
+  final int element;
+
+  /// `QUIVER_REQ`: the next arrow open.
+  static const next = 0xFF;
+
+  /// Engine names of the arrows by damage type (`shot_arrow_<name>`,
+  /// `arrow_<name>`); '' = the plain one.
+  static const names = <int, String>{1: 'fire', 2: 'cold', 3: 'lightning', 4: 'earth', 5: 'poison', 6: 'radiant', 7: 'necrotic', 8: 'force'};
+
+  /// The arrow's name on the HUD.
+  static const labels = <int, String>{
+    0: 'Steel Arrow',
+    1: 'Fire Arrow',
+    2: 'Crystal Arrow',
+    3: 'Wind Arrow',
+    4: 'Stone Arrow',
+    5: 'Rusty Arrow',
+    6: 'Silver Arrow',
+    7: 'Shadow Arrow',
+    8: 'Immaterial Arrow',
+  };
+
+  /// The arrow's colour on the HUD chip.
+  static const tints = <int, String>{
+    1: '#ff7a2a',
+    2: '#6fc8ff',
+    3: '#d6f26a',
+    4: '#c8994f',
+    5: '#8fd44a',
+    6: '#fff2b0',
+    7: '#a070ff',
+    8: '#e0e0ff',
+  };
 }
 
 /// The own belongings: zeny, bag stacks and the ten equipment slots
@@ -1747,10 +2178,16 @@ final class ItemDefs extends ServerMsg {
 
 /// A merchant's goods (talking to a `shop` NPC); prices in [ItemDefs].
 final class Shop extends ServerMsg {
-  const Shop(this.npc, this.name, this.items);
+  const Shop(this.npc, this.name, this.items, {this.buyPct = 0, this.sellPct = 0});
   final String npc;
   final String name;
   final List<String> items;
+
+  /// Percent off the purchases (the buyer's Discount; 0 without).
+  final int buyPct;
+
+  /// Percent more for the sales (Overcharge).
+  final int sellPct;
 }
 
 /// The own refine attempt (`refine`): [item] is the key the item has now,
@@ -1787,21 +2224,6 @@ final class ItemUsed extends ServerMsg {
   const ItemUsed(this.item, this.cooldownMs);
   final String item;
   final int cooldownMs;
-}
-
-/// A player on the map now holds [weapon] (an item id).
-final class PlayerGear extends ServerMsg {
-  const PlayerGear(this.entityId, this.weapon);
-  final int entityId;
-  final String weapon;
-}
-
-/// A player on the map wears [items] on the head (item ids, any slot; empty:
-/// bare-headed). On arrival for everyone there, and after each change.
-final class PlayerHeadgear extends ServerMsg {
-  const PlayerHeadgear(this.entityId, this.items);
-  final int entityId;
-  final List<String> items;
 }
 
 /// The monster [entityId] (at cell [x], [y]) dropped [count] of [item] for
@@ -2146,7 +2568,20 @@ final class BossZone {
   /// draws the jump).
   bool get lands => flags & 4 != 0;
 
-  Map<String, Object> toJson() => {...area.toJson(), 'delayMs': delayMs, 'safe': safe, 'centre': centre, 'lands': lands};
+  /// Ground that carries bodies along [Telegraph.dir] (a conveyor belt).
+  bool get drift => flags & 8 != 0;
+
+  /// Its speed, cells per second (0: stopped).
+  double get driftSpeed => drift ? (flags >> 4) / 2 : 0;
+
+  Map<String, Object> toJson() => {
+    ...area.toJson(),
+    'delayMs': delayMs,
+    'safe': safe,
+    'centre': centre,
+    'lands': lands,
+    if (drift) 'drift': driftSpeed,
+  };
 }
 
 /// Affixed monsters by `(slot, generation)`: upserts, kept until that
@@ -2189,7 +2624,17 @@ final class AffixEvent {
   final double x;
   final double y;
 
-  static const names = ['blink_mark', 'blink', 'summon', 'split', 'frenzy', 'shield_break', 'shield_up', 'thorns', 'fuse'];
+  static const names = [
+    'blink_mark',
+    'blink',
+    'summon',
+    'split',
+    'frenzy',
+    'shield_break',
+    'shield_up',
+    'thorns',
+    'fuse',
+  ];
   String get name => event < names.length ? names[event] : '';
 }
 
@@ -2511,12 +2956,21 @@ abstract final class MobStatus {
   /// what scared them, no attacks or casts.
   static const feared = 1024;
 
+  /// No skills, basic attacks only (a Mind save; Rot Bolt, Forbidden
+  /// Page): drawn as a muted violet tint.
+  static const silenced = 2048;
+
   /// Cannot move or act: the animation holds.
   static const held = frozen | stunned | petrified;
 
   /// Burrowed (server `FLAG_BURROWED`): under the ground, untargetable;
   /// drawn as a moving mound. Not a condition: the wire's top bit.
   static const burrowed = 1 << 15;
+
+  /// A player cloaked (Cloaking, Tunnel Drive, Smoke Bomb: walking unseen;
+  /// server `STATUS_CLOAKED`): drawn as a shimmer. A hiding thief carries
+  /// [burrowed] instead (a mound of earth).
+  static const cloaked = 1 << 14;
 }
 
 /// Dead reckoning (server `horde::view`): a record `(p, v, stamp)` is drawn
@@ -2799,4 +3253,84 @@ final class FeedbackResult extends ServerMsg {
   final String message;
 
   bool get ok => code.isEmpty && id > 0;
+}
+
+/// A recipe of a recipe giver ([Recipes]).
+final class RecipeInfo {
+  const RecipeInfo(this.id, this.item, this.zeny, this.needs);
+  final String id;
+  final String item;
+  final int zeny;
+  final List<({String item, int count})> needs;
+
+  static RecipeInfo _read(WireReader r) =>
+      RecipeInfo(r.str(), r.str(), r.varint(), r.list((r) => (item: r.str(), count: r.varint())));
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'item': item,
+    'zeny': zeny,
+    'needs': [
+      for (final n in needs) {'item': n.item, 'count': n.count},
+    ],
+  };
+}
+
+/// A recipe giver's recipes (the Hatter): after [ClientMsg.npcInteract].
+final class Recipes extends ServerMsg {
+  const Recipes(this.npc, this.name, this.recipes);
+  final String npc;
+  final String name;
+  final List<RecipeInfo> recipes;
+}
+
+/// A [ClientMsg.craft] went through ([item] is in the next inventory).
+final class Crafted extends ServerMsg {
+  const Crafted(this.recipe, this.item);
+  final String recipe;
+  final String item;
+}
+
+/// A member line of a [PartyListing], the leader first.
+typedef ListedMember = ({String name, String archetype, int level, bool online});
+
+/// One party on the Kafra's list.
+final class PartyListing {
+  const PartyListing(this.lobbyId, this.mission, this.missionName, this.capacity, this.state, this.elapsedSecs, this.mine, this.members);
+  final int lobbyId;
+  final String mission;
+  final String missionName;
+  final int capacity;
+
+  /// [forming] in town, [onMission] on a run ([elapsedSecs] into it).
+  final int state;
+  final int elapsedSecs;
+
+  /// The recipient's own party.
+  final bool mine;
+  final List<ListedMember> members;
+
+  static const forming = 0;
+  static const onMission = 1;
+
+  bool get running => state == onMission;
+  bool get full => members.length >= capacity;
+
+  static PartyListing _read(WireReader r) => PartyListing(
+    r.varint(),
+    r.str(),
+    r.str(),
+    r.varint(),
+    r.u8(),
+    r.varint(),
+    r.boolean(),
+    r.list((r) => (name: r.str(), archetype: r.str(), level: r.varint(), online: r.boolean())),
+  );
+}
+
+/// The Kafra's party list: every public party with someone online, and the
+/// recipient's own (first).
+final class Parties extends ServerMsg {
+  const Parties(this.parties);
+  final List<PartyListing> parties;
 }

@@ -208,6 +208,7 @@ pub fn validate(head: &[u8], request: &Request<'_>) -> Result<Option<String>, Fa
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use super::*;
 
     const KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -277,14 +278,14 @@ mod tests {
             );
         }
         // A refusal from an HTTP/1.0 intermediary keeps its status.
-        assert!(matches!(
+        assert_matches!(
             check("HTTP/1.0 403 Forbidden\r\nX: y", &[]),
             Err(Failure::Status(403, _))
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             check("HTTP/1.1 403", &[]),
             Err(Failure::Status(403, _))
-        ));
+        );
     }
 
     #[test]

@@ -29,6 +29,7 @@ static MISSION_TEST: MissionInfo = MissionInfo {
             ObjectDef { monster: BRAZIER_MONSTER, spots: &[(10.5, 10.5)], on_felled: ObjectEffect::Hook(BRAZIER_HOOK), hatch: None },
             ObjectDef { monster: BELL_MONSTER, spots: &[(30.5, 10.5)], on_felled: ObjectEffect::Hook(BELL_HOOK), hatch: None },
         ],
+        strikes: &[],
     },
     ..MissionInfo::TEMPLATE
 };
@@ -72,6 +73,7 @@ fn stage() -> HubInstance {
         weapon: String::new(),
         loadout: Default::default(),
         bag: Default::default(),
+        homunculus: None,
     };
     let mut out = Vec::new();
     stage.join(profile, Uuid::nil(), None, 0, &mut out);

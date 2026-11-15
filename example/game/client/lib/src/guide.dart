@@ -5,7 +5,10 @@
 /// in step with the rules when they change (changelog.dart too).
 ///
 /// Blocks: `{p}`, `{list}`, `{keys: [[key, what]]}`, `{tip}`, `{figure:
-/// {diagram?, icons?, labels?, caption?}}`. Text takes `**bold**`.
+/// {diagram?, icons?, labels?, caption?}}`, `{glossary: true}` (the rules
+/// glossary, drawn by the engine from glossary.json). Text takes `**bold**`
+/// and glossary links `[[id]]` / `[[id|text]]` (assets/glossary.toml ids);
+/// rules words the glossary knows link on their own.
 library;
 
 import 'key_bindings.dart';
@@ -97,8 +100,9 @@ List<Map<String, Object?>> guideTopics(Bindings binds, List<MissionCard> ladder,
     ]),
     _topic('town', 'Izlude', 'Who is who in town', 'item:emperium', [
       _list([
-        '**Kafra Employee**: expeditions, parties by code, hair and dyes, forgetting skills, feedback and this guide.',
-        '**Dega the Weapon Dealer**, the **Armor Dealer** and the **Tool Dealer** (potions); the **Food Vendor** sells cheap fruit and meat.',
+        '**Kafra Employee**: expeditions, parties by code or from the list of public ones, hair and dyes, forgetting skills, feedback and this guide.',
+        '**Dega the Weapon Dealer** and the **Armor Dealer** keep shop in the west hall, the **Tool Dealer** (potions) in the east house; the **Food Vendor** sells cheap fruit and meat by the south-west market stalls.',
+        '**Mirabel the Hatter**, in the north-west market: hats stitched from monster drops and a few coins.',
         '**Kylick the Stylist**: a new hair style and dyes.',
         '**Aldric the Skill Master**: forget every skill and spend the points again.',
         "**Notice Board**: what's new, and the Hall of Fame.",
@@ -106,10 +110,10 @@ List<Map<String, Object?>> guideTopics(Bindings binds, List<MissionCard> ladder,
       ]),
       _p('Town is safe: no monsters. Players **trade** with each other in town only (right click a player).'),
     ]),
-    _topic('classes', 'Classes', 'Five class lines and how they grow', 'class:swordsman', [
+    _topic('classes', 'Classes', 'Six class lines and how they grow', 'class:swordsman', [
       _fig(
-        icons: ['class:swordsman', 'class:mage', 'class:archer', 'class:acolyte', 'class:thief'],
-        labels: ['Sword', 'Mage', 'Archer', 'Acolyte', 'Thief'],
+        icons: ['class:swordsman', 'class:mage', 'class:archer', 'class:acolyte', 'class:thief', 'class:merchant'],
+        labels: ['Sword', 'Mage', 'Archer', 'Acolyte', 'Thief', 'Merchant'],
       ),
       _list([
         '**Swordsman** → Crusader → Paladin: tough, up close, taunts the horde. Rides a Peco Peco.',
@@ -117,11 +121,52 @@ List<Map<String, Object?>> guideTopics(Bindings binds, List<MissionCard> ladder,
         '**Archer** → Hunter → Sniper: at range, piercing arrows and traps.',
         '**Acolyte** → Priest → High Priest: heals and blesses the party.',
         '**Thief** → Assassin → Assassin Cross: poison, quick blows and hiding.',
+        '**Merchant** → Alchemist → Creator: an axe, war cries for the party and fire bottles.',
       ]),
       _p(
         'The next title comes on its own at **level 30** and **level 60**, with new skills to learn. '
         'You get a skill point every level (and one more at 30 and 60); the Skill Master gives them back if you want another build.',
       ),
+    ]),
+    _topic('combat', 'How combat rolls work', 'Attack rolls, AC, saves, k and the element wheel', 'cc:axis_damage', [
+      _p(
+        'Every fight is decided by a [[d20]]: a twenty-sided die plus a bonus, against a number; each point of bonus is 5%. '
+        'Hover or tap an underlined word anywhere in the game to read what it means, click it to pin it.',
+      ),
+      _p(
+        '**Weapon blows** (your [[basic_attack|basic attacks]] and weapon skills such as Bash) roll an [[attack_roll|attack roll]]: '
+        'd20 + your Attack bonus against the monster\'s [[ac|Armor Class]]. Reach it and you hit; a 1 always misses, '
+        'a 20 always hits and may become a [[crit|critical hit]], its dice rolled twice.',
+      ),
+      _list([
+        'Attack bonus = [[proficiency|Proficiency]] (+2 at level 1, +1 every 12 levels) + [[class_mod|class modifier]] (+3, +4 at 30, +5 at 60) '
+            '+ [[weapon_level|weapon level]] − 1 + "to hit" from your gear.',
+        'Damage = the [[weapon_die|weapon die]] + class modifier + weapon level − 1 + refine + "damage on every weapon hit".',
+        'Monsters roll against **your** AC the same way: every +1 AC is 5% fewer hits.',
+      ]),
+      _p(
+        '**Spells** (bolts, novas, storms: anything with its own dice) never miss. The monster makes a [[save|saving throw]] instead: '
+        'd20 + its save bonus against your [[dc|spell DC]], 8 + Proficiency + class modifier. A success halves the damage ("save for half") '
+        'or shrugs off the condition ("save or Stunned"). Your weapon and its bonuses do not count for spells.',
+      ),
+      _list([
+        'Three saves: [[save_body|Body]] (poison, stun, fire), [[save_reflex|Reflex]] (blasts, ice, snares) and [[save_mind|Mind]] (fear, taunts, blindness).',
+        'You roll them too: your class save gets your full Proficiency, the other two half of it. The Equipment window lists yours.',
+        'Bosses turn a failed save into a success three times a fight ([[legendary_resistance|legendary resistance]]).',
+      ]),
+      _p(
+        '**(k)**: skill dice marked [[k|(k)]] are rolled k times, and k grows by one every 15 character levels: '
+        "Fire Bolt's 1d4 is 3d4 at level 30. Weapon blows do not use k; martial classes strike more often instead "
+        '([[extra_attack|Extra Attack]] at 30 and 60).',
+      ),
+      _fig(diagram: 'wheel', caption: 'Each arrow: double damage'),
+      _p(
+        '**Damage types**: every hit is [[physical|physical]], [[fire|fire]], [[cold|cold]], [[lightning|lightning]], [[earth|earth]], '
+        '[[poison|poison]], [[radiant|radiant]], [[necrotic|necrotic]] or [[force|force]]. A monster\'s [[element|element]] takes double, half '
+        'or none of some, after the dice: fire burns Earth and Undead, cold Fire, lightning Water, earth Wind, '
+        'radiant the Undead, Shadow, Poison and Ghost.',
+      ),
+      _tip('The Mage skill Sense shows a monster\'s AC, saves and resistances when you hover it.'),
     ]),
     _topic('expeditions', 'Expeditions', 'Where to fight and how a run goes', 'item:clover', [
       _fig(diagram: 'timeline', caption: 'The run clock: waves, elites, the boss'),
@@ -177,13 +222,29 @@ List<Map<String, Object?>> guideTopics(Bindings binds, List<MissionCard> ladder,
       ]),
       _fig(diagram: 'aim', caption: 'Manual aiming: the monster nearest the pointer'),
     ]),
+    _topic('companions', 'Homunculus and cart', "The Merchant line's companions", 'skill:am_callhomun', [
+      _p(
+        'An **Alchemist** calls a **homunculus**: a pet that fights beside you, levels with you and keeps its level between runs. '
+        'The first **Call Homunculus** asks which one, and the choice is for good (changing it later costs 5,000 zeny in town and resets its Bond).',
+      ),
+      _list([
+        '**Lif** heals you, **Amistr** holds the horde off you, **Filir** finishes the wounded, **Vanilmirth** bolts the crowd from afar.',
+        'Its plate sits under Basic Info: HP, SP, experience, **Bond** and its skills. **Aggressive**, **Defensive** or **Passive** set how far it looks for a fight; **Rest** lets it heal.',
+        'Press the Call Homunculus slot again while it is out: aimed at a monster it goes for that one, otherwise it comes back to you.',
+        'Bond grows with every mission cleared together. At **level 60**, Bond 75 and with a **Stone of Sage** (Pharmacy) it evolves in town.',
+        'Plants (**Summon Flora**) and **Sphere Mines** take root where you cast them and fight for a while; monsters may bite them instead of you.',
+        'Allies stand on a **teal ring**; your own is the brighter one. Your attacks never hurt them.',
+        "**Pushcart** rolls behind a Merchant who learned it: more room in the bag, and the cart skills' power grows with what it carries.",
+        '**Discount** and **Overcharge** move shop prices; the shop shows the old price struck out. **Pharmacy** brews potions and bottles from herbs and drops.',
+      ]),
+    ]),
     _topic('survival', 'Staying alive', 'Potions, being downed and the fog', 'item:red_potion', [
       _fig(
         icons: ['item:red_potion', 'item:orange_potion', 'item:blue_potion', 'item:green_potion'],
         labels: ['HP', 'More HP', 'SP', 'Cure'],
       ),
       _p(
-        'Drink with **${_k(binds.potion, 'R')}** (healing) and **${_k(binds.potion2, 'T')}** (SP), or click the orbs. '
+        'Drink with **${_k(binds.potion, 'R')}** (healing) and **${_k(binds.potion2, 'T')}** (SP), or turn on Auto-use potions in the settings. '
         'Potions heal over a few seconds; Green Potions and Green Herbs cure poison and other conditions.',
       ),
       _fig(diagram: 'downed', caption: 'Stand by a downed ally to get them up'),
@@ -220,7 +281,7 @@ List<Map<String, Object?>> guideTopics(Bindings binds, List<MissionCard> ladder,
         caption: 'Refine ores',
       ),
       _p(
-        '**Refining**: Hollgrehenn the Smith, by the weapon dealer in Izlude, hammers a weapon, body armour, shield, hat, garment or shoes '
+        '**Refining**: Hollgrehenn the Smith, at his forge in the round house north-east of the square in Izlude, hammers a weapon, body armour, shield, hat, garment or shoes '
         'one level up, to +10, for an ore and a fee. A weapon gains damage, armour gains HP (and AC at +4 and +8).',
       ),
       _list([
@@ -275,6 +336,13 @@ List<Map<String, Object?>> guideTopics(Bindings binds, List<MissionCard> ladder,
         '**Interface**: UI scale, full screen, reset window positions.',
       ]),
       _p('Open them with **F10** or from the menu (**Esc**).'),
+    ]),
+    _topic('rules', 'Rules and glossary', 'Every rules word, explained', 'cc:hit_die', [
+      _p(
+        'Every underlined word in the game is here. Search, or open a word to read it; lines marked **You** are your own numbers. '
+        'The rolls behind them are in **How combat rolls work**.',
+      ),
+      {'glossary': true},
     ]),
   ];
 }

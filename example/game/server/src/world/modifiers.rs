@@ -633,7 +633,7 @@ mod tests {
         if let Ok(baked) = MonsterCatalog::load(&dist) {
             for mission in crate::world::missions::MISSIONS {
                 let roster = crate::world::missions::roster(mission, &baked);
-                if roster.defs().iter().any(|d| !d.boss) {
+                if roster.defs().iter().any(|d| !d.boss && !d.is_plant()) {
                     bounded_on(&roster);
                 }
             }
@@ -685,9 +685,13 @@ mod tests {
             let cap = (m.monsters().count as f64).powf(COUNT_LOOT_GROWTH as f64) * 1.08;
             assert!(got.1 <= plain.1 * cap, "{m:?}: item drops {} vs {} (cap ×{cap:.2})", got.1, plain.1);
             assert!(got.2 <= plain.2 * cap, "{m:?}: kill zeny {} vs {} (cap ×{cap:.2})", got.2, plain.2);
-            // (A roster whose regular monsters drop nothing yet, only its
-            // elites and boss, has no swarm loot to compare.)
-            let regular_drops = c.defs().iter().any(|d| matches!(d.archetype, Archetype::Swarm | Archetype::Chaser | Archetype::Tank) && !d.drops.is_empty());
+            // (A roster whose regular monsters drop nothing yet but their
+            // cards (Payon), only its elites and boss, has no swarm loot to
+            // compare.)
+            let regular_drops = c.defs().iter().any(|d| {
+                matches!(d.archetype, Archetype::Swarm | Archetype::Chaser | Archetype::Tank)
+                    && d.drops.iter().any(|r| crate::world::combat::cards::card(r.item).is_none())
+            });
             if m == (Modifiers { tier: 0, flags: ModFlags::SWARM }) && regular_drops {
                 assert!(got.1 > plain.1 * 1.05, "{m:?}: a swarm pays somewhat more ({} vs {})", got.1, plain.1);
                 assert!(got.1 / plain.1 < got.0 / plain.0 * 0.85, "{m:?}: loot grows slower than the count");

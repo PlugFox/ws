@@ -53,6 +53,7 @@ static MISSION: MissionInfo = MissionInfo {
             ObjectDef { monster: "brazier", spots: &[(5.5, 5.5)], on_felled: ObjectEffect::Light { scale: 1.5, secs: 20.0 }, hatch: None },
             ObjectDef { monster: "valve", spots: &[(6.5, 15.5), (0.2, 0.2)], on_felled: ObjectEffect::EndHazard("tar"), hatch: None },
         ],
+        strikes: &[],
     },
     ..MissionInfo::TEMPLATE
 };
@@ -69,6 +70,7 @@ fn profile(user_id: u32) -> PlayerProfile {
         weapon: String::new(),
         loadout: Default::default(),
         bag: Default::default(),
+        homunculus: None,
     }
 }
 
@@ -310,8 +312,9 @@ static HATCHERY: MissionInfo = MissionInfo {
             monster: "valve",
             spots: &[(20.5, 10.5), (30.5, 10.5)],
             on_felled: ObjectEffect::None,
-            hatch: Some(crate::world::environment::Hatch { secs: 10.0, monster: "blob", count: 3 }),
+            hatch: Some(crate::world::environment::Hatch::once(10.0, "blob", 3)),
         }],
+        strikes: &[],
     },
     ..MissionInfo::TEMPLATE
 };
@@ -344,4 +347,172 @@ fn an_event_can_shake_the_camera_as_it_begins() {
     at(&mut s, 1.0, &mut out);
     at(&mut s, 100.0, &mut out);
     assert!(msgs(&out, 1).contains(&ServerMsg::EnvShake { intensity: 120, duration_ms: 1000 }));
+}
+
+#[test]
+fn nothing_hatches_once_the_fog_has_closed_the_waves() {
+    let mut s = stage();
+    s.env = Env::new(Some(&HATCHERY), &[]);
+    let mut out = Vec::new();
+    at(&mut s, 1.0, &mut out);
+    s.horde.as_mut().unwrap().close_spawning();
+    for t in 0..OBJECT_SCAN {
+        at(&mut s, 11.0 + t as f32 * 0.05, &mut out);
+    }
+    assert_eq!(s.env.objects.len(), 2, "the eggs stay eggs");
+    assert_eq!(s.horde.as_ref().unwrap().store().alive().len(), 2, "no brood");
+}
+
+// --- Spawners and event strikes (the ladder from 60 to 99) -------------------
+
+static GRAVEYARD: MissionInfo = MissionInfo {
+    id: "env_graves",
+    name: "Graves",
+    map: "field",
+    fog: None,
+    env: Environment {
+        light_scale: 1.0,
+        hazards: &[],
+        events: &[],
+        objects: &[ObjectDef {
+            monster: "valve",
+            spots: &[(20.5, 10.5)],
+            on_felled: ObjectEffect::None,
+            hatch: Some(crate::world::environment::Hatch::every(10.0, 20.0, "blob", 2)),
+        }],
+        strikes: &[],
+    },
+    ..MissionInfo::TEMPLATE
+};
+
+/// Ticks the run clock from `from` to `to` seconds, a scan's worth of
+/// ticks at each whole second.
+fn walk_clock(s: &mut HubInstance, from: f32, to: f32, out: &mut Outgoing) {
+    let mut t = from;
+    while t <= to {
+        for k in 0..OBJECT_SCAN {
+            at(s, t + k as f32 * 0.01, out);
+        }
+        t += 1.0;
+    }
+}
+
+#[test]
+fn a_spawner_lets_its_brood_out_on_every_beat_until_felled() {
+    let mut s = stage();
+    s.env = Env::new(Some(&GRAVEYARD), &[]);
+    let f = me(&mut s);
+    (f.max_hp, f.hp) = (100_000, 100_000);
+    // Spawned so far (the brood may die on the player's blows: count births).
+    let born = |s: &HubInstance| s.horde.as_ref().unwrap().stats().spawned;
+    let mut out = Vec::new();
+    // Planted on the first step (1 s): the first brood at 11 s, then 31 s.
+    walk_clock(&mut s, 1.0, 7.0, &mut out);
+    let base = born(&s);
+    assert_eq!(s.horde.as_ref().unwrap().store().alive().len(), 1, "the grave alone");
+    assert!(!zones(&out).iter().any(|z| z.0.starts_with("hatch:")), "no warning yet");
+    out.clear();
+    walk_clock(&mut s, 8.0, 10.0, &mut out);
+    let rings: Vec<_> = zones(&out).into_iter().filter(|z| z.0 == "hatch:valve").collect();
+    assert_eq!(rings.len(), 1, "one warning ring, {} s ahead", crate::world::environment::HATCH_WARN_SECS);
+    assert!(rings[0].1 > 0 && rings[0].1 <= 3000, "it fills until the brood: {} ms", rings[0].1);
+    walk_clock(&mut s, 11.0, 12.0, &mut out);
+    assert_eq!(born(&s) - base, 2, "two out, the grave stays");
+    assert_eq!(s.env.objects.len(), 1);
+    walk_clock(&mut s, 13.0, 32.0, &mut out);
+    assert_eq!(born(&s) - base, 4, "and two more on the next beat");
+    // Felled: no more.
+    let grave = s.env.objects[0].slot;
+    s.horde.as_mut().unwrap().despawn(grave);
+    walk_clock(&mut s, 33.0, 54.0, &mut out);
+    assert!(s.env.objects.is_empty());
+    assert_eq!(born(&s) - base, 4, "felled: nothing new");
+}
+
+#[test]
+fn a_grave_planted_again_keeps_spawning() {
+    let mut s = stage();
+    s.env = Env::new(Some(&GRAVEYARD), &[]);
+    let f = me(&mut s);
+    (f.max_hp, f.hp) = (100_000, 100_000);
+    let mut out = Vec::new();
+    walk_clock(&mut s, 1.0, 1.0, &mut out);
+    let hatch = crate::world::environment::Hatch::every(2.0, 5.0, "blob", 1);
+    assert!(s.env_plant_hatching("valve", 30.5, 10.5, ObjectEffect::None, Some(hatch)).is_some());
+    assert!(s.env_plant_hatching("valve", 31.5, 10.5, ObjectEffect::None, Some(Hatch::once(1.0, "nobody", 1))).is_none(), "an unknown brood is refused");
+    let born = |s: &HubInstance| s.horde.as_ref().unwrap().stats().spawned;
+    let base = born(&s);
+    walk_clock(&mut s, 2.0, 9.0, &mut out);
+    assert_eq!(born(&s) - base, 2, "the new grave's brood at 3 s and 8 s");
+}
+
+const BOMB_PATCH: Hazard = Hazard { look: "fire", damage: [1, 4], damage_type: "fire", ..Hazard::circle("embers", 0.0, 0.0, 1.5) };
+const BOMBS: Strikes = Strikes {
+    damage: [2, 6],
+    damage_type: "fire",
+    look: "fire",
+    push: 2.0,
+    patch: Some(BOMB_PATCH),
+    patch_secs: 3.0,
+    ..Strikes::new("volcanic_bombs", "storm", 3.0, 2.0)
+};
+/// Masked round the player's spot (and nothing else is open to it).
+const MASKED: Strikes = Strikes { mask: &[(10.5, 10.5)], mask_r: 5.0, ..Strikes::new("beams", "storm", 2.5, 2.0) };
+const BROKEN: Strikes = Strikes::new("nothing", "no_such_event", 2.0, 2.0);
+
+static BOMBARDED: MissionInfo = MissionInfo {
+    id: "env_bombs",
+    name: "Bombs",
+    map: "field",
+    fog: None,
+    env: Environment { light_scale: 1.0, hazards: &[], events: &[STORM], objects: &[], strikes: &[BOMBS, MASKED, BROKEN] },
+    ..MissionInfo::TEMPLATE
+};
+
+#[test]
+fn event_strikes_fall_on_the_players_while_their_event_runs() {
+    let mut s = stage();
+    s.env = Env::new(Some(&BOMBARDED), &[]);
+    assert_eq!(s.env.strikes.len(), 2, "a strike table without its event is skipped");
+    put(&mut s, 1, 10.5, 10.5);
+    let f = me(&mut s);
+    (f.max_hp, f.hp) = (100_000, 100_000);
+    let mut out = Vec::new();
+    at(&mut s, 1.0, &mut out);
+    at(&mut s, 99.0, &mut out);
+    assert!(!zones(&out).iter().any(|z| z.0 == "volcanic_bombs"), "nothing before the event");
+    out.clear();
+    at(&mut s, 100.0, &mut out);
+    let volley: Vec<BossZone> = msgs(&out, 1)
+        .into_iter()
+        .filter_map(|m| match m {
+            ServerMsg::BossZones { caster: 0, ability, zones } if ability == "volcanic_bombs" => Some(zones),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(volley.len(), 1, "one circle per player");
+    assert_eq!((volley[0].area.x, volley[0].area.y, volley[0].area.a, volley[0].delay_ms), (10.5, 10.5, 2.0, 1000), "on them, falling for a second");
+    assert!(!zones(&out).iter().any(|z| z.0 == "beams"), "the masked spot is never struck");
+    // It lands: fire, a push, an ember patch.
+    out.clear();
+    at(&mut s, 101.05, &mut out);
+    let burnt = msgs(&out, 1).iter().any(|m| matches!(m, ServerMsg::Combat { hits, .. } if hits.iter().any(|h| h.target == 101 && h.amount > 0 && h.flags >> 4 == DamageType::Fire as u8)));
+    assert!(burnt, "the bomb burns whoever stood still");
+    let (x, y) = pos(&s, 1);
+    assert!((x - 12.5).abs() < 0.3 && (y - 10.5).abs() < 1e-3, "and throws them: ({x}, {y})");
+    assert!(zones(&out).iter().any(|z| z.0 == "hazard:embers" && z.2 == 3000), "the patch shows for 3 s");
+    assert!(s.env.hazards.iter().any(|h| h.def.id == "embers" && h.on && h.def.shape.centre() == (10.5, 10.5)));
+    at(&mut s, 104.5, &mut out);
+    assert!(!s.env.hazards.iter().any(|h| h.def.id == "embers" && h.def.shape.centre() == (10.5, 10.5)), "the first patch is gone");
+    // The next volleys come every 3 s while it runs, then stop.
+    out.clear();
+    for t in [107.0, 110.0, 113.0] {
+        at(&mut s, t, &mut out);
+    }
+    assert_eq!(zones(&out).iter().filter(|z| z.0 == "volcanic_bombs").count(), 3);
+    out.clear();
+    at(&mut s, 131.0, &mut out);
+    at(&mut s, 134.0, &mut out);
+    assert!(!zones(&out).iter().any(|z| z.0 == "volcanic_bombs"), "over with the event");
 }

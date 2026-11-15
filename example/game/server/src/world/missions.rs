@@ -86,12 +86,20 @@ pub struct RosterEntry {
     /// Seconds before the game master may buy it; negative keeps the baked
     /// one (bosses: when the boss shows up).
     pub unlock_secs: f32,
+    /// Seconds after which the game master buys no more of it (a run in
+    /// acts: each act's roster retires as the next begins; those on the
+    /// field stay until killed). Infinite: never.
+    pub retire_secs: f32,
 }
 
 impl RosterEntry {
     /// The monster as baked.
     pub const fn of(monster: &'static str) -> Self {
-        Self { monster, weight: 0, unlock_secs: -1.0 }
+        Self { monster, weight: 0, unlock_secs: -1.0, retire_secs: f32::INFINITY }
+    }
+    /// No more are bought from `retire_secs` into the run.
+    pub const fn retire(self, retire_secs: f32) -> Self {
+        Self { retire_secs, ..self }
     }
     pub const fn weight(self, weight: u32) -> Self {
         Self { weight, ..self }
@@ -319,6 +327,7 @@ pub const MISSIONS: &[MissionInfo] = &[
             hazards: &[],
             events: &[SANDSTORM, CHURNING],
             objects: &[],
+            strikes: &[],
         },
         tips: &[
             "Sandstorms come every <b>2½ minutes</b>: fight from the <b>lee of the ruins, bones and cacti</b>, the open sand gets blasted.",
@@ -355,6 +364,168 @@ pub const MISSIONS: &[MissionInfo] = &[
         ],
         ..MissionInfo::TEMPLATE
     },
+    // The ladder from 60 to 99 (docs/locations/ladder_60_99.md): coming
+    // soon until each location and its monsters are baked.
+    // >>> orc_village (agent ORC) >>>
+    MissionInfo {
+        id: "orc_village",
+        name: "Orc Village",
+        description: "Break the orc warband's camp before the Orc Lord rides out.",
+        story: "A daylight war camp of huts, palisades and banners on two plateaus joined by a rope bridge. The \
+                orcs fight as a warband: packs come in formation, archers stand behind shields, banners rally whoever \
+                fights under them and a war horn sends a whole column in from one side. The Orc Lord comes at the end.",
+        map: "gef_fild10",
+        place: "Orc Village",
+        terrain: Terrain::Field,
+        levels: LevelBand::new(60, 62, 68),
+        // Starting points of docs/locations/ladder_60_99.md §2.1.
+        waves: WaveRules { levels: (60, 73), budget: 13.0, cluster_chance: 0.45, surround_chance: 0.2, ..WaveRules::NORMAL },
+        bosses: &[("orc_lord", "Orc Lord")],
+        tags: &["war banners", "war horn"],
+        env: ORC_ENV,
+        tips: &[
+            "Orcs fight harder <b>under a war banner</b>. Cut the banner down, then the orcs.",
+            "The <b>war horn</b> names a side. A whole column comes from there: be somewhere else, or be ready.",
+            "Arrows fall during a horn: <b>keep moving</b>, and <b>Pneuma</b> turns them aside.",
+            "Orcs are creatures of earth: <b>fire</b> burns them. High Orcs are fire themselves: use <b>cold</b>.",
+            "Never stand in a line with a <b>Savage</b>, the <b>Orc Hero</b> or the <b>Orc Lord</b>: they charge.",
+            "When the Orc Lord's <b>drums</b> start, break them: each one left calls a High Orc.",
+        ],
+        ..MissionInfo::TEMPLATE
+    },
+    // <<< orc_village <<<
+    // >>> toy_factory (agent TOY) >>>
+    MissionInfo {
+        id: "toy_factory",
+        name: "Toy Factory",
+        description: "Survive the frozen toy factory, where the floor itself moves.",
+        story: "A bright, frozen factory whose floor moves: conveyor belts carry players and monsters alike, a \
+                whistle turns them round while the cranes drop crates, and wind-up toys and clockwork alarms pour out of \
+                the packing halls. The Stormy Knight rides in last and tries to blow the party onto the belts.",
+        map: "xmas_dun02",
+        place: "Toy Factory",
+        terrain: Terrain::Dungeon,
+        levels: LevelBand::new(66, 68, 75),
+        // Starting points of docs/locations/ladder_60_99.md §2.1: the
+        // corridors are Payon's width, packs land a little closer.
+        waves: WaveRules { levels: (66, 80), surround_chance: 0.1, spawn_margin: (4.0, 10.0), ..WaveRules::NORMAL },
+        bosses: &[("knight_of_windstorm", "Stormy Knight")],
+        tags: &["conveyor belts", "switches"],
+        env: TOY_ENV,
+        tips: &[
+            "The belts carry you <b>and the monsters</b>. Fight at a belt's end and it delivers them to you.",
+            "When the whistle blows the belts <b>reverse and speed up</b>, and the cranes drop crates.",
+            "Hit a <b>switch</b> to stop the belts near it for half a minute.",
+            "Most toys are <b>neutral</b>: no element helps. Hatii hates <b>lightning</b>, the Stormy Knight hates <b>earth</b>.",
+            "A <b>Marionette</b> pulls you toward it. Look at what is behind it first.",
+            "The Stormy Knight's <b>Gale</b> throws you: keep a wall at your back, never a belt.",
+        ],
+        ..MissionInfo::TEMPLATE
+    },
+    // <<< toy_factory <<<
+    // >>> glast_heim (agent GLAST) >>>
+    MissionInfo {
+        id: "glast_heim",
+        name: "Glast Heim Churchyard",
+        description: "Consecrate the graves of the fallen capital before the Dark Lord rises.",
+        story: "The churchyard of a fallen capital at night: hundreds of graves round a broken chapel. The dead here \
+                wear armour, shoot, heal each other and climb back out of their graves until someone consecrates them, \
+                and twice a run the bell tolls thirteen and every grave opens again. The Dark Lord waits at the chapel.",
+        map: "gl_chyard",
+        place: "Glast Heim",
+        terrain: Terrain::Field,
+        levels: LevelBand::new(73, 75, 83),
+        // Starting points of docs/locations/ladder_60_99.md §2.1.
+        waves: WaveRules { levels: (73, 88), budget: 13.0, growth: 1.125, surround_chance: 0.2, elite_weight: 1.2, ..WaveRules::NORMAL },
+        bosses: &[("dark_lord", "Dark Lord")],
+        tags: &["undead", "graves", "holy fonts"],
+        env: GLAST_ENV,
+        tips: &[
+            "<b>Radiant</b> hurts almost everything here; <b>poison</b> does nothing to the dead.",
+            "A <b>restless grave</b> keeps sending Ghouls until someone breaks it. Break them early.",
+            "When the bell tolls <b>thirteen</b>, every grave opens again and the plots are cursed: get to a court.",
+            "Strike a <b>holy font</b>: its pool heals you and burns the dead.",
+            "<b>Evil Druids</b> silence with their rot bolts. Casters: kill them first, or stand behind someone.",
+            "<b>Dark Priests</b> mend the dead from behind the armour. Reach them, or hit them as they chant.",
+            "The Dark Lord's <b>Hell's Gate</b> is shared: stand together on the marked one.",
+        ],
+        ..MissionInfo::TEMPLATE
+    },
+    // <<< glast_heim <<<
+    // >>> thor_volcano (agent THOR) >>>
+    MissionInfo {
+        id: "thor_volcano",
+        name: "Thor Volcano",
+        description: "Hold out in the heart of a volcano while the lava floods the chambers.",
+        story: "A volcano's heart of round magma chambers joined by narrow cracks in the rock. The lava surges into \
+                the chambers in turn, bombs fall out of the smoke and the party is driven into the cracks where the horde \
+                waits. Almost everything here burns and almost nothing fears fire. Ifrit rises at the end.",
+        map: "thor_v03",
+        place: "Thor Volcano",
+        terrain: Terrain::Dungeon,
+        levels: LevelBand::new(81, 83, 91),
+        // Starting points of docs/locations/ladder_60_99.md §2.1.
+        waves: WaveRules { levels: (81, 96), growth: 1.13, cluster_chance: 0.45, surround_chance: 0.1, spawn_margin: (4.0, 10.0), ..WaveRules::NORMAL },
+        bosses: &[("ifrit", "Ifrit")],
+        tags: &["fire", "lava surges"],
+        env: THOR_ENV,
+        tips: &[
+            "Nearly everything here is fire: <b>cold</b> hits twice as hard, fire barely scratches.",
+            "When the mountain groans, lava floods the <b>chambers</b> of one side. Fight in the cracks until it sinks.",
+            "A <b>cold</b> spell on a vent or on rising lava leaves <b>obsidian</b>: safe ground for a few seconds.",
+            "An <b>Explosion</b> swells before it bursts. Kill it then, or step back.",
+            "A shimmer in the air is a <b>Byorgue</b>. Keep moving: it strikes whoever stands still.",
+            "Ifrit's <b>Meteor</b> is shared: stand together under it. His <b>Eruption</b> is not: find the obsidian.",
+        ],
+        ..MissionInfo::TEMPLATE
+    },
+    // <<< thor_volcano <<<
+    // >>> thanatos_tower (agent TOWER) >>>
+    MissionInfo {
+        id: "thanatos_tower",
+        name: "Thanatos Tower",
+        description: "Climb the tower in three acts and face Thanatos at the summit.",
+        story: "The last rung of the ladder is a climb: three floors played as three acts on one map, each with its \
+                own monsters, its own rule and a stair that opens on the clock. Books and mimics give way to plasma of \
+                five colours, then to the angels of the sanctum, and everything the ladder taught comes back once. \
+                Thanatos waits at the summit.",
+        map: "tha_t02",
+        place: "Thanatos Tower",
+        terrain: Terrain::Dungeon,
+        levels: LevelBand::new(89, 91, 99),
+        // Starting points of docs/locations/ladder_60_99.md §2.1.
+        waves: WaveRules { levels: (89, 104), budget: 15.0, growth: 1.13, surround_chance: 0.25, elite_weight: 1.3, opening_boost: 2.0, ..WaveRules::NORMAL },
+        // Three acts on one floor (docs/locations/thanatos_tower.md §3.1):
+        // each act's kinds retire as the next stair opens (those on the
+        // field stay); the elites guard their own act.
+        roster: &[
+            RosterEntry::of("deathword").retire(360.0),
+            RosterEntry::of("ancient_mimic").retire(360.0),
+            RosterEntry::of("curator").retire(180.0),
+            RosterEntry::of("owl_duke").retire(600.0),
+            RosterEntry::of("tha_odium").retire(360.0),
+            RosterEntry::of("plasma_r").retire(600.0),
+            RosterEntry::of("plasma_b").retire(600.0),
+            RosterEntry::of("plasma_g").retire(600.0),
+            RosterEntry::of("plasma_p").retire(600.0),
+            RosterEntry::of("plasma_y").retire(600.0),
+            RosterEntry::of("tha_despero").retire(600.0),
+        ],
+        bosses: &[("thanatos", "Thanatos")],
+        tags: &["three acts", "colour wheel", "specimen tubes", "judgment", "ghosts"],
+        env: TOWER_ENV,
+        tips: &[
+            "The tower is three floors: the monsters change when a <b>stair opens</b> at 3:00 and 6:00.",
+            "Break the <b>specimen tubes</b> in the galleries before they crack: each one left hatches plasma.",
+            "Every <b>plasma</b> fears one thing: red cold, blue lightning, green fire, purple holy, yellow force.",
+            "The angels of the Sanctum are <b>holy</b>: radiant skills are weak against Solace and Shelter. Kill <b>Shelter</b> first.",
+            "When the statues open their eyes, beams fall. They never strike <b>beside a statue</b>.",
+            "Thanatos and his fragments are <b>ghosts</b>: swords and arrows do half. Force and holy do double.",
+            "<b>Burden</b> is shared: stand together under the mask.",
+        ],
+        ..MissionInfo::TEMPLATE
+    },
+    // <<< thanatos_tower <<<
 ];
 
 /// Prontera Culvert (docs/locations/culvert.md §3): a cellar (the light
@@ -391,6 +562,7 @@ const CULVERT_ENV: Environment = Environment {
         },
     ],
     objects: &CULVERT_EGGS,
+    strikes: &[],
 };
 
 /// An egg cluster of the culvert: six eggs round a spot of a side hall,
@@ -400,7 +572,7 @@ const fn egg_cluster(spots: &'static [(f32, f32)], secs: f32) -> ObjectDef {
         monster: "thief_bug_egg",
         spots,
         on_felled: ObjectEffect::None,
-        hatch: Some(Hatch { secs, monster: "thief_bug_larva", count: 2 }),
+        hatch: Some(Hatch::once(secs, "thief_bug_larva", 2)),
     }
 }
 
@@ -457,7 +629,8 @@ const PAYON_ENV: Environment = Environment {
             id: "coffin",
             name: "The Coffin",
             warning: "Something is pounding on a coffin lid in the south cave...",
-            first_secs: 540.0,
+            // Just before the Jiangshi General may rise (5:00).
+            first_secs: 290.0,
             every_secs: 0.0,
             warn_secs: 10.0,
             duration_secs: 4.0,
@@ -510,7 +683,439 @@ const PAYON_ENV: Environment = Environment {
     // The two shrine bells, out in the open on the north and south outer
     // ring (the map's own bell pavilions stand walled in).
     ObjectDef { monster: "shrine_bell", spots: &[(149.5, 42.5), (97.5, 201.5)], on_felled: ObjectEffect::Hook("bell"), hatch: None }],
+    strikes: &[],
 };
+
+// >>> orc_village: env (agent ORC) >>>
+/// Orc Village's war horn: every 2½ minutes from 2:00 (2:00, 4:30, 7:00,
+/// 9:30; the one at 12:00 falls after the fog and spawns nothing). The
+/// column it calls from one side, the replanted banners and the side
+/// itself are `hub/orc.rs`; the Orc Lord's Call the Clans forces one.
+const WAR_HORN: MapEvent = MapEvent {
+    id: "war_horn",
+    name: "War Horn",
+    warning: "A war horn sounds across the valley... an orc column is marching in!",
+    first_secs: 120.0,
+    every_secs: 150.0,
+    warn_secs: 10.0,
+    duration_secs: 25.0,
+    light_scale: 1.0,
+    shake: 40,
+};
+
+/// The war banners planted at the start (cells, by the map's banner
+/// models): four in the east village round the chief's hall, two in the
+/// north-west village, two on the approaches (`hub/orc.rs` replants them).
+pub(crate) const ORC_BANNERS: [(f32, f32); 8] =
+    [(221.5, 165.5), (204.5, 161.5), (232.5, 170.5), (188.5, 187.5), (63.5, 324.5), (76.5, 344.5), (162.5, 76.5), (213.5, 296.5)];
+
+/// Orc Village (docs/locations/orc_village.md §3): plain daylight, the war
+/// horn with its arrow volleys, and eight war banners planted round the
+/// villages and on the approaches (`hub/orc.rs`: they rally the orcs round
+/// them; the horn replants the fallen).
+const ORC_ENV: Environment = Environment {
+    light_scale: 1.0,
+    hazards: &[],
+    events: &[WAR_HORN],
+    objects: &[ObjectDef {
+        monster: "orc_banner",
+        spots: &ORC_BANNERS,
+        on_felled: ObjectEffect::Hook("orc_banner"),
+        hatch: None,
+    }],
+    // Arrow volleys while the horn sounds: a circle on or near each player
+    // every 2.5 s, falling for 0.9 s (Pneuma turns them aside).
+    strikes: &[crate::world::environment::Strikes {
+        fall_secs: 0.9,
+        scatter: 2.0,
+        extra: 1,
+        extra_spread: 5.0,
+        look: "damage",
+        damage: [2, 6],
+        damage_type: "physical",
+        ranged: true,
+        dc: 13,
+        ..crate::world::environment::Strikes::new("orc_arrows", "war_horn", 2.5, 1.8)
+    }],
+};
+// <<< orc_village: env <<<
+
+// >>> toy_factory: env (agent TOY) >>>
+/// Toy Factory (docs/locations/toy_factory.md §3): a bright hall (no
+/// darkness); the belts are baked (`hazards.json` `belt_<n>`, a drift
+/// each) and run by `hub/toy.rs` (reversed in a shift, stopped by a
+/// switch); every two minutes from 2:00 a shift change reverses them while
+/// the cranes drop crates; ten switches stop the belts near them.
+const TOY_ENV: Environment = Environment {
+    light_scale: 1.0,
+    hazards: &[],
+    events: &[SHIFT_CHANGE],
+    objects: &[ObjectDef {
+        monster: "factory_switch",
+        // The walkable cell beside each of the map's ten switch models.
+        spots: &[
+            (129.5, 117.5),
+            (27.5, 105.5),
+            (17.5, 105.5),
+            (235.5, 41.5),
+            (191.5, 67.5),
+            (173.5, 48.5),
+            (183.5, 109.5),
+            (215.5, 27.5),
+            (51.5, 105.5),
+            (61.5, 105.5),
+        ],
+        on_felled: ObjectEffect::Hook("switch"),
+        hatch: None,
+    }],
+    strikes: &[CRATES],
+};
+
+/// The factory whistle: every two minutes from 2:00 the belts run
+/// reversed and faster for 30 s (`hub/toy.rs`).
+const SHIFT_CHANGE: MapEvent = MapEvent {
+    id: "shift_change",
+    name: "Shift Change",
+    warning: "The whistle blows! Shift change: the belts are turning!",
+    first_secs: 120.0,
+    every_secs: 120.0,
+    warn_secs: 10.0,
+    duration_secs: 30.0,
+    light_scale: 1.0,
+    shake: 30,
+};
+
+/// Crates from the cranes during a shift: one near each player every 3 s;
+/// some leave a Myst Case (`hub/toy.rs` crate hook).
+const CRATES: super::environment::Strikes = super::environment::Strikes {
+    fall_secs: 1.0,
+    scatter: 3.0,
+    look: "damage",
+    damage: [2, 8],
+    damage_type: "physical",
+    dc: 14,
+    push: 2.0,
+    hook: Some("crate"),
+    ..super::environment::Strikes::new("toy_crate", "shift_change", 3.0, 2.0)
+};
+// <<< toy_factory: env <<<
+
+// >>> glast_heim: env (agent GLAST) >>>
+/// Glast Heim Churchyard (docs/locations/glast_heim.md §3): a night field
+/// (the light ×0.7), ten restless graves that keep letting Ghouls out
+/// until they are broken, the Witching Hour at 4:00 and 8:00 (the bell
+/// tolls thirteen: every broken grave rises again and the plots are
+/// cursed), four holy fonts in the corner courts and the eclipse before
+/// the Dark Lord (`hub/glast.rs`).
+const GLAST_ENV: Environment = Environment {
+    light_scale: 0.7,
+    hazards: &GLAST_PLOTS,
+    events: &[
+        MapEvent {
+            id: "witching_hour",
+            name: "The Witching Hour",
+            warning: "The bell is tolling thirteen... the graves are opening!",
+            first_secs: 240.0,
+            every_secs: 240.0,
+            warn_secs: 13.0,
+            duration_secs: 30.0,
+            light_scale: 0.7,
+            shake: 50,
+        },
+        MapEvent {
+            id: "eclipse",
+            name: "Eclipse",
+            warning: "The moon goes black over the chapel... the Dark Lord is rising!",
+            first_secs: 585.0,
+            every_secs: 0.0,
+            warn_secs: 15.0,
+            duration_secs: 35.0,
+            light_scale: 0.55,
+            shake: 120,
+        },
+    ],
+    objects: &GLAST_OBJECTS,
+    strikes: &[],
+};
+
+/// A restless grave on a big plot (the walkable cell nearest the plot's
+/// centre with 3 cells of room): from 1:30, one after another 20 s apart,
+/// it lets two Ghouls out every 25 s until it is broken (`grave` hook).
+const fn grave(spot: &'static [(f32, f32)], first: f32) -> ObjectDef {
+    ObjectDef { monster: "grave", spots: spot, on_felled: ObjectEffect::Hook("grave"), hatch: Some(Hatch::every(first, 25.0, "ghoul", 2)) }
+}
+
+/// The ten graves and the four holy fonts of the corner courts.
+const GLAST_OBJECTS: [ObjectDef; 11] = [
+    grave(&[(54.5, 86.5)], 90.0),
+    grave(&[(251.5, 89.5)], 110.0),
+    grave(&[(46.5, 210.5)], 130.0),
+    grave(&[(251.5, 210.5)], 150.0),
+    grave(&[(116.5, 185.5)], 170.0),
+    grave(&[(182.5, 222.5)], 190.0),
+    grave(&[(110.5, 222.5)], 210.0),
+    grave(&[(171.5, 184.5)], 230.0),
+    grave(&[(178.5, 74.5)], 250.0),
+    grave(&[(107.5, 124.5)], 270.0),
+    ObjectDef {
+        monster: "holy_font",
+        spots: &[(84.5, 50.5), (212.5, 51.5), (86.5, 197.5), (219.5, 202.5)],
+        on_felled: ObjectEffect::Hook("font"),
+        hatch: None,
+    },
+];
+
+/// A grave plot cursed while the Witching Hour runs (the box round its
+/// gravestones): 1d6 necrotic a second, slowed, DC 14.
+const fn plot(id: &'static str, x0: f32, x1: f32, y0: f32, y1: f32) -> super::environment::Hazard {
+    super::environment::Hazard {
+        look: "curse",
+        damage: [1, 6],
+        damage_type: "necrotic",
+        condition: Some("slowed"),
+        condition_secs: 1.2,
+        dc: 14,
+        during: Some("witching_hour"),
+        shape: super::environment::HazardShape::Rect { x: (x0 + x1) / 2.0, y: (y0 + y1) / 2.0, w: x1 - x0 + 3.0, h: y1 - y0 + 3.0 },
+        ..super::environment::Hazard::circle(id, 0.0, 0.0, 1.0)
+    }
+}
+
+/// The ten big plots (their gravestones' extent, docs §1.2).
+const GLAST_PLOTS: [super::environment::Hazard; 10] = [
+    plot("cursed_plot_0", 43.0, 55.0, 71.0, 95.0),
+    plot("cursed_plot_1", 251.0, 257.0, 77.0, 98.0),
+    plot("cursed_plot_2", 43.0, 49.0, 198.0, 217.0),
+    plot("cursed_plot_3", 250.0, 257.0, 197.0, 218.0),
+    plot("cursed_plot_4", 107.0, 129.0, 177.0, 193.0),
+    plot("cursed_plot_5", 173.0, 194.0, 211.0, 225.0),
+    plot("cursed_plot_6", 101.0, 122.0, 211.0, 225.0),
+    plot("cursed_plot_7", 166.0, 189.0, 179.0, 193.0),
+    plot("cursed_plot_8", 175.0, 185.0, 66.0, 85.0),
+    plot("cursed_plot_9", 97.0, 118.0, 111.0, 135.0),
+];
+// <<< glast_heim: env <<<
+
+// >>> thor_volcano: env (agent THOR) >>>
+/// Thor Volcano (docs/locations/thor_volcano.md §3): a hot dark (the light
+/// ×0.9), the magma vents (baked `hazards.json`, always on), the Lava Surge
+/// flooding the chambers of one half and then the other every five minutes
+/// (the `surge_*` hazards, `during` their event), volcanic bombs falling on
+/// everyone while a surge runs, and the tremor that warns of Ifrit. Cold
+/// spells on the lava leave obsidian (`hub/env.rs` `ground_meets`); Ifrit's
+/// chamber and the hidden Byorgues are `hub/thor.rs`.
+const THOR_ENV: Environment = Environment { light_scale: 0.9, hazards: &[], events: &THOR_EVENTS, objects: &[], strikes: &THOR_BOMBS };
+
+/// The Lava Surge of one half (`surge_west` / `surge_east`).
+const fn surge(id: &'static str, name: &'static str, warning: &'static str, first_secs: f32) -> MapEvent {
+    MapEvent { id, name, warning, first_secs, every_secs: 300.0, warn_secs: 12.0, duration_secs: 25.0, light_scale: 1.1, shake: 90 }
+}
+
+const THOR_EVENTS: [MapEvent; 3] = [
+    surge("surge_west", "Lava Surge (west)", "The mountain groans... lava is rising in the west chambers!", 150.0),
+    surge("surge_east", "Lava Surge (east)", "The mountain groans... lava is rising in the east chambers!", 300.0),
+    // Ifrit's arrival (10:00): warned at 9:45, the whole mountain shakes.
+    MapEvent {
+        id: "tremor",
+        name: "The mountain shakes",
+        warning: "The whole mountain is shaking... something vast stirs in the magma!",
+        first_secs: 600.0,
+        every_secs: 0.0,
+        warn_secs: 15.0,
+        duration_secs: 8.0,
+        light_scale: 1.15,
+        shake: 200,
+    },
+];
+
+/// Volcanic bombs out of the smoke while a surge runs: one on every
+/// standing player every 3 s (and one more nearby), 1.2 s of shadow, and a
+/// patch of embers left for 3 s.
+const fn bombs(id: &'static str, during: &'static str) -> super::environment::Strikes {
+    super::environment::Strikes {
+        fall_secs: 1.2,
+        scatter: 1.5,
+        extra: 1,
+        extra_spread: 8.0,
+        look: "fire",
+        damage: [2, 8],
+        damage_type: "fire",
+        condition: Some("burning"),
+        condition_secs: 2.0,
+        dc: 14,
+        patch: Some(EMBERS),
+        patch_secs: 3.0,
+        ..super::environment::Strikes::new(id, during, 3.0, 2.2)
+    }
+}
+
+/// The embers a bomb leaves (moved to where it lands).
+const EMBERS: super::environment::Hazard = super::environment::Hazard {
+    look: "fire",
+    damage: [1, 4],
+    damage_type: "fire",
+    condition: Some("burning"),
+    condition_secs: 1.0,
+    dc: 13,
+    ..super::environment::Hazard::circle("thor_embers", 0.0, 0.0, 1.6)
+};
+
+const THOR_BOMBS: [super::environment::Strikes; 2] = [bombs("thor_bombs_w", "surge_west"), bombs("thor_bombs_e", "surge_east")];
+// <<< thor_volcano: env <<<
+
+// >>> thanatos_tower: env (agent TOWER) >>>
+/// Thanatos Tower (docs/locations/thanatos_tower.md §3): a tall dark hall
+/// (the light ×0.8) climbed in three acts. Three one-shot stairs mark the
+/// acts on the timeline (the engine re-tints the haze for each); the
+/// specimen tubes of the galleries and wings crack one cluster every 30 s
+/// from 2:00, each tube into two plasmas of its colour; from 7:30 the angel
+/// statues judge every 90 s: beams fall on and near every player, never
+/// beside a statue, and a beam that lands on angels mends them
+/// (`hub/thanatos.rs`, which also brings Thanatos into the nave).
+const TOWER_ENV: Environment = Environment {
+    light_scale: 0.8,
+    hazards: &[],
+    events: &[
+        MapEvent {
+            id: "stair_lab",
+            name: "The Laboratory",
+            warning: "The stair to the Laboratory grinds open... the specimen tubes are stirring!",
+            first_secs: 180.0,
+            every_secs: 0.0,
+            warn_secs: 10.0,
+            duration_secs: 20.0,
+            light_scale: 1.0,
+            shake: 80,
+        },
+        MapEvent {
+            id: "stair_sanctum",
+            name: "The Sanctum",
+            warning: "The stair to the Sanctum grinds open... wings beat somewhere above!",
+            first_secs: 360.0,
+            every_secs: 0.0,
+            warn_secs: 10.0,
+            duration_secs: 20.0,
+            light_scale: 1.0,
+            shake: 80,
+        },
+        MapEvent {
+            id: tower::JUDGMENT,
+            name: "Judgment",
+            warning: "The statues open their eyes... stand beside one!",
+            first_secs: 450.0,
+            every_secs: 90.0,
+            warn_secs: 8.0,
+            duration_secs: 15.0,
+            light_scale: 0.85,
+            shake: 40,
+        },
+        // The summit lasts to the end of the run: the chandeliers stay out.
+        MapEvent {
+            id: "summit",
+            name: "The Summit",
+            warning: "The chandeliers go out one by one... Thanatos is coming!",
+            first_secs: 600.0,
+            every_secs: 0.0,
+            warn_secs: 15.0,
+            duration_secs: 300.0,
+            light_scale: 0.85,
+            shake: 160,
+        },
+    ],
+    objects: &TOWER_TUBES,
+    strikes: &[super::environment::Strikes {
+        damage: [2, 8],
+        damage_type: "radiant",
+        look: "holy",
+        fall_secs: 1.0,
+        extra: 1,
+        extra_spread: 6.0,
+        dc: 14,
+        mask: tower::STATUES,
+        mask_r: 3.0,
+        hook: Some(tower::JUDGMENT),
+        ..super::environment::Strikes::new(tower::BEAM, tower::JUDGMENT, 2.5, 3.0)
+    }],
+};
+
+/// Names shared with `hub/thanatos.rs`.
+pub mod tower {
+    /// The Judgment's map event and the strikes' hook key.
+    pub const JUDGMENT: &str = "judgment";
+    /// The beams' zones (effects.toml `[skills.tower_beam]`).
+    pub const BEAM: &str = "tower_beam";
+    /// The angel statues of the court and the apse (cells, at their bases):
+    /// no beam lands within 3 cells of one.
+    pub const STATUES: &[(f32, f32)] = &[
+        (134.0, 138.0),
+        (166.0, 138.0),
+        (134.0, 162.0),
+        (166.0, 162.0),
+        (154.5, 192.0),
+        (142.0, 187.5),
+        (159.0, 189.0),
+        (154.0, 185.0),
+        (152.0, 200.0),
+        (141.0, 201.0),
+        (157.0, 201.0),
+        (144.0, 206.0),
+        (238.0, 64.0),
+        (187.0, 275.0),
+        (113.0, 275.0),
+    ];
+}
+
+/// One specimen tube of colour `$c` (`r`, `b`, `g`, `p`, `y`) at a spot,
+/// cracking `$secs` into the run into two plasmas of its colour.
+macro_rules! tube {
+    ($c:literal, $x:expr, $y:expr, $secs:expr) => {
+        ObjectDef {
+            monster: concat!("specimen_tube_", $c),
+            spots: &[($x, $y)],
+            on_felled: ObjectEffect::None,
+            hatch: Some(Hatch::once($secs, concat!("plasma_", $c), 2)),
+        }
+    };
+}
+
+/// A cluster: one tube of each colour on a ring round a spot (checked
+/// walkable in the bake's walk grid).
+macro_rules! tubes {
+    ($x:expr, $y:expr, $secs:expr) => {
+        [
+            tube!("r", $x, $y + 2.2, $secs),
+            tube!("b", $x - 2.1, $y + 0.7, $secs),
+            tube!("g", $x - 1.3, $y - 1.8, $secs),
+            tube!("p", $x + 1.3, $y - 1.8, $secs),
+            tube!("y", $x + 2.1, $y + 0.7, $secs),
+        ]
+    };
+}
+
+/// Eight clusters by the RSW's own tube groups: the four in the galleries
+/// crack first (from 2:00), then the wings, one every 30 s.
+const TOWER_CLUSTERS: [[ObjectDef; 5]; 8] = [
+    tubes!(118.5, 128.5, 120.0),
+    tubes!(182.5, 129.5, 150.0),
+    tubes!(117.5, 170.5, 180.0),
+    tubes!(182.5, 170.5, 210.0),
+    tubes!(23.5, 110.5, 240.0),
+    tubes!(273.5, 117.5, 270.0),
+    tubes!(24.5, 181.5, 300.0),
+    tubes!(276.5, 186.5, 330.0),
+];
+
+/// The clusters, flat (`Environment::objects`).
+const TOWER_TUBES: [ObjectDef; 40] = {
+    let mut out = [TOWER_CLUSTERS[0][0]; 40];
+    let mut i = 0;
+    while i < 40 {
+        out[i] = TOWER_CLUSTERS[i / 5][i % 5];
+        i += 1;
+    }
+    out
+};
+// <<< thanatos_tower: env <<<
 
 pub fn find(id: &str) -> Option<&'static MissionInfo> {
     MISSIONS.iter().find(|m| m.id == id)
@@ -560,6 +1165,7 @@ pub fn roster(mission: &MissionInfo, catalog: &MonsterCatalog) -> MonsterCatalog
                 if r.unlock_secs >= 0.0 {
                     d.unlock_secs = r.unlock_secs;
                 }
+                d.retire_secs = r.retire_secs;
             }
             if !d.is_plant() && d.level < floor {
                 for row in d.drops.iter_mut().filter(|r| r.is_zeny()) {
@@ -681,10 +1287,11 @@ pub fn brief_with(mission: &MissionInfo, rules: &WaveRules, catalog: &MonsterCat
         .defs()
         .iter()
         // Plants are scenery the stage plants, not waves the brief lists.
-        .filter(|d| d.unlock_secs < limit && !d.is_plant())
+        .filter(|d| d.unlock_secs < limit && d.unlock_secs < d.retire_secs && !d.is_plant())
         .map(|d| {
             let lo = rules.level_at(d.level, d.boss, d.unlock_secs);
-            let hi = rules.level_at(d.level, d.boss, limit);
+            // A kind that retires is last bought then.
+            let hi = rules.level_at(d.level, d.boss, limit.min(d.retire_secs));
             let hp = |level: u32| scale.apply(MonsterBlock::new(level, d.archetype, 1)).hp.max(0) as u32;
             MonsterBrief {
                 id: d.id.clone(),
@@ -909,6 +1516,29 @@ mod tests {
         }
     }
 
+    /// The baked pack: every expedition meets a mini-boss within its first
+    /// minute and every elite by the middle of the run; each one has a drop
+    /// table with its own card in it.
+    #[test]
+    fn every_expedition_meets_a_miniboss_early() {
+        let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/dist");
+        let Ok(all) = MonsterCatalog::load(&dist) else { return };
+        for m in MISSIONS {
+            let r = roster(m, &all);
+            if !has_monsters(&r) {
+                continue;
+            }
+            let elites: Vec<&MonsterDef> =
+                r.defs().iter().filter(|d| d.archetype == Archetype::Elite && d.unlock_secs < m.time_limit_secs).collect();
+            assert!(elites.iter().any(|d| d.unlock_secs <= 60.0), "{}: no mini-boss in the first minute", m.id);
+            for d in &elites {
+                assert!(d.unlock_secs <= m.time_limit_secs * 0.4, "{}: {} only at {} s", m.id, d.id, d.unlock_secs);
+                let card = crate::world::combat::cards::of_monster(&d.id).unwrap_or_else(|| panic!("{} has no card", d.id));
+                assert!(d.drops.iter().any(|r| r.item == card.id), "{} does not drop {}", d.id, card.id);
+            }
+        }
+    }
+
     #[test]
     fn rosters_follow_the_missions_tags() {
         let tagged = |id: &str, mission: &str| MonsterDef { missions: vec![mission.into()], ..test_def(id, 2.0, 1, 0.0, false) };
@@ -933,7 +1563,18 @@ mod tests {
         };
         let r = roster(&SHARED, &all);
         let bug = r.get(r.kind_of("thief_bug").unwrap());
-        assert_eq!((bug.weight, bug.unlock_secs), (77, 30.0));
+        assert_eq!((bug.weight, bug.unlock_secs, bug.retire_secs), (77, 30.0, f32::INFINITY));
+        // A roster row can retire a kind: the act it belongs to is over.
+        static ACTS: MissionInfo = MissionInfo {
+            id: "acts",
+            roster: &[RosterEntry::of("thief_bug").unlock(0.0).retire(180.0), RosterEntry::of("poring").unlock(170.0)],
+            ..MissionInfo::TEMPLATE
+        };
+        let r = roster(&ACTS, &all);
+        assert_eq!(r.get(r.kind_of("thief_bug").unwrap()).retire_secs, 180.0);
+        let b = brief(&ACTS, &ACTS.waves, &r);
+        let bug = b.monsters.iter().find(|m| m.id == "thief_bug").unwrap();
+        assert_eq!(bug.levels.1, ACTS.waves.level_at(1, false, 180.0), "last bought at its retire time");
         assert!(r.kind_of("golden_bug").is_none(), "another mission's monster stays out");
         assert!(r.kind_of("poring").is_some(), "a mission outside the ladder takes the untagged roster");
     }
@@ -975,7 +1616,10 @@ mod tests {
     #[test]
     fn the_ladder_is_well_formed() {
         let ids: Vec<&str> = MISSIONS.iter().map(|m| m.id).collect();
-        assert_eq!(ids, ["poring_island_survival", "prontera_culvert", "sograt_desert", "payon_caves"]);
+        assert_eq!(
+            ids,
+            ["poring_island_survival", "prontera_culvert", "sograt_desert", "payon_caves", "orc_village", "toy_factory", "glast_heim", "thor_volcano", "thanatos_tower"]
+        );
         for w in MISSIONS.windows(2) {
             assert!(w[1].levels.min >= w[0].levels.min, "{} after {}", w[1].id, w[0].id);
         }
@@ -1006,6 +1650,12 @@ mod tests {
         let empty = card(1, c, Some(&roster(c, &all)), true);
         assert_eq!(empty.available, Availability::ComingSoon, "a map without monsters is not open");
         assert_eq!(card(1, c, None, true).available, Availability::Open, "no catalogue at all: the map decides");
+        // The ladder from 60 to 99: listed, coming soon until baked.
+        for id in ["orc_village", "toy_factory", "glast_heim", "thor_volcano", "thanatos_tower"] {
+            let m = find(id).unwrap();
+            assert_eq!(card(4, m, Some(&roster(m, &all)), true).available, Availability::ComingSoon, "{id}: no monsters of its own yet");
+            assert_eq!(card(4, m, None, false).available, Availability::ComingSoon, "{id}: no map yet");
+        }
     }
 
     #[test]

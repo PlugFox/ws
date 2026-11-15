@@ -87,6 +87,13 @@ void main() {
       expect(toHex(ClientMsg.castPrefs(manualAim: false, auto: 0)), '85000000');
     });
 
+    test('use prefs golden (protocol.rs `use_prefs_match_the_dart_golden`)', () {
+      expect(toHex(ClientMsg.usePrefs(hp: 40, sp: 25)), 'a72819');
+      expect(toHex(ClientMsg.usePrefs(hp: 0, sp: 0)), 'a70000');
+      expect(toHex(ClientMsg.usePrefs(hp: 120, sp: -3)), 'a75f00', reason: 'clamped like the server');
+      expect(toHex(ClientMsg.itemUse(ClientMsg.quickHp)), '5803406870');
+    });
+
     test('item goldens decode', () {
       final inv =
           ServerMsg.decode(
@@ -100,26 +107,49 @@ void main() {
       expect(inv.count('red_potion'), 5);
       expect(inv.equip, ['', '', '', 'cotton_shirt', 'sword', '', '', '', '', '']);
       expect(inv.statsJson, '{"ac":12}');
-      final defs = ServerMsg.decode(hex(
-        '3b0203636170034361700500a01f0b052b31204143020401000000000a64726f70735f636172640a44726f7073204361726409ff90031f04436172640000000300084b696e646c696e670564726f7073',
-      ))! as ItemDefs;
+      final defs =
+          ServerMsg.decode(
+                hex(
+                  '3b0203636170034361700500a01f0b052b31204143020401000000000a64726f70735f636172640a44726f7073204361726409ff90031f04436172640000000300084b696e646c696e670564726f7073',
+                ),
+              )!
+              as ItemDefs;
       final cap = defs.items.first;
       expect(
-        (cap.id, cap.name, cap.kind, cap.slot, cap.price, cap.classes, cap.desc, cap.rarity, cap.refineSafe, cap.sockets, cap.card),
+        (
+          cap.id,
+          cap.name,
+          cap.kind,
+          cap.slot,
+          cap.price,
+          cap.classes,
+          cap.desc,
+          cap.rarity,
+          cap.refineSafe,
+          cap.sockets,
+          cap.card,
+        ),
         ('cap', 'Cap', 5, 0, 4000, 11, '+1 AC', 2, 4, 1, 0),
       );
+      expect(cap.label, 'Cap [1]', reason: 'socketed items name their sockets');
       final card = defs.items.last;
-      expect((card.id, card.kind, card.slot, card.card, card.prefix, card.suffix, card.monster), ('drops_card', 9, null, 3, '', 'Kindling', 'drops'));
+      expect(card.label, 'Drops Card');
+      expect(
+        (card.id, card.kind, card.slot, card.card, card.prefix, card.suffix, card.monster),
+        ('drops_card', 9, null, 3, '', 'Kindling', 'drops'),
+      );
       final shop = ServerMsg.decode(hex('3c04646567610444656761010573776f7264'))! as Shop;
       expect((shop.npc, shop.name), ('dega', 'Dega'));
       expect(shop.items, ['sword']);
+      expect((shop.buyPct, shop.sellPct), (0, 0));
+      // Discount / Overcharge trail the list (a server without them sends none).
+      final haggled = ServerMsg.decode(hex('3c04646567610444656761010573776f72641915'))! as Shop;
+      expect(haggled.items, ['sword']);
+      expect((haggled.buyPct, haggled.sellPct), (25, 21));
       final used = ServerMsg.decode(hex('3d0a7265645f706f74696f6ee807'))! as ItemUsed;
       expect((used.item, used.cooldownMs), ('red_potion', 1000));
-      final gear = ServerMsg.decode(hex('3eac0203626f77'))! as PlayerGear;
-      final hats = ServerMsg.decode(hex('8bac02020368617408666c755f6d61736b'))! as PlayerHeadgear;
-      expect(hats.entityId, 300);
-      expect(hats.items, ['hat', 'flu_mask']);
-      expect((gear.entityId, gear.weapon), (300, 'bow'));
+      // 0x3E PLAYER_GEAR and 0x8B PLAYER_HEADGEAR are retired (PLAYER_APPEARANCE).
+      expect(ServerMsg.decode(hex('3eac0203626f77')), isNull);
       final loot = ServerMsg.decode(hex('3f85808004a002d000056b6e6966650101'))! as Loot;
       expect(
         (loot.entityId, loot.x, loot.y, loot.item, loot.count, loot.rare, loot.isZeny),
@@ -128,15 +158,28 @@ void main() {
     });
 
     test('mission list golden decodes (protocol/mission.rs `MISSION_LIST`)', () {
-      final l = ServerMsg.decode(
-        hex(
-          '9201016d014d01640173016601500764756e67656f6e01610f121e0f238407080101420103666f6700017201017801',
-        ),
-      )! as MissionList;
+      final l =
+          ServerMsg.decode(
+                hex('9201016d014d01640173016601500764756e67656f6e01610f121e0f238407080101420103666f6700017201017801'),
+              )!
+              as MissionList;
       final c = l.missions.single;
-      expect((c.id, c.name, c.description, c.story, c.map, c.place, c.terrain, c.art), ('m', 'M', 'd', 's', 'f', 'P', 'dungeon', 'a'));
-      expect((c.band.min, c.band.recommended, c.band.max, c.monsterLevels, c.timeLimitSecs, c.maxPlayers), (15, 18, 30, (15, 35), 900, 8));
-      expect([c.bosses, c.tags, c.tips], [['B'], ['fog'], <String>[]]);
+      expect(
+        (c.id, c.name, c.description, c.story, c.map, c.place, c.terrain, c.art),
+        ('m', 'M', 'd', 's', 'f', 'P', 'dungeon', 'a'),
+      );
+      expect(
+        (c.band.min, c.band.recommended, c.band.max, c.monsterLevels, c.timeLimitSecs, c.maxPlayers),
+        (15, 18, 30, (15, 35), 900, 8),
+      );
+      expect(
+        [c.bosses, c.tags, c.tips],
+        [
+          ['B'],
+          ['fog'],
+          <String>[],
+        ],
+      );
       expect(c.rewards, 'r');
       expect((c.soon, c.reason, c.step), (true, 'x', 1));
     });
@@ -209,7 +252,10 @@ void main() {
       final l = ServerMsg.decode(hex('93000000e041dc0b'))! as EnvLight;
       expect((l.radius, l.fadeMs), (28.0, 1500));
       final e = ServerMsg.decode(hex('9301000474696465045469646503557021c0a907c0b802'))! as EnvEvent;
-      expect((e.phase, e.id, e.name, e.text, e.startMs, e.durationMs), (EnvEvent.warning, 'tide', 'Tide', 'Up!', 120000, 40000));
+      expect(
+        (e.phase, e.id, e.name, e.text, e.startMs, e.durationMs),
+        (EnvEvent.warning, 'tide', 'Tide', 'Up!', 120000, 40000),
+      );
       final k = ServerMsg.decode(hex('9302c8a006'))! as EnvShake;
       expect((k.intensity, k.durationMs), (200, 800));
       expect(() => ServerMsg.decode(hex('9309')), throwsA(isA<WireFormatError>()), reason: 'unknown op');
@@ -339,7 +385,11 @@ void main() {
     test('shop goldens (protocol.rs `golden::shop`)', () {
       expect(
         toHex(
-          ClientMsg.shopDeal('tool', [(id: 'red_potion', count: 12)], [(id: 'jellopy', count: 300), (id: 'sword+7', count: 1)]),
+          ClientMsg.shopDeal(
+            'tool',
+            [(id: 'red_potion', count: 12)],
+            [(id: 'jellopy', count: 300), (id: 'sword+7', count: 1)],
+          ),
         ),
         '8c04746f6f6c010a7265645f706f74696f6e0c02076a656c6c6f7079ac020773776f72642b3701',
       );
@@ -350,7 +400,10 @@ void main() {
       expect((r.item, r.ok, r.refine, r.slip), ('sword+8', true, 8, 0));
       final f = ServerMsg.decode(hex('8f0773776f72642b35000503'))! as Refined;
       expect((f.item, f.ok, f.refine, f.slip), ('sword+5', false, 5, 3));
-      expect(toHex(ClientMsg.card(insert: true, item: 'sword+7', slot: 4, card: 'drops_card')), '94000773776f72642b37040a64726f70735f63617264');
+      expect(
+        toHex(ClientMsg.card(insert: true, item: 'sword+7', slot: 4, card: 'drops_card')),
+        '94000773776f72642b37040a64726f70735f63617264',
+      );
       final c = ServerMsg.decode(hex('95010573776f72640b686f726e65745f63617264'))! as Carded;
       expect((c.inserted, c.item, c.card), (false, 'sword', 'hornet_card'));
     });
@@ -379,6 +432,72 @@ void main() {
       expect((no.id, no.code, no.message, no.ok), (0, 'feedback_too_soon', 'Wait.', false));
     });
 
+    test('town goldens (protocol/town.rs `goldens`)', () {
+      final r =
+          ServerMsg.decode(
+                hex(
+                  '990006686174746572044d6972610106726962626f6e06726962626f6ec80102076a656c6c6f70790a0c737469636b795f6d7563757303',
+                ),
+              )!
+              as Recipes;
+      expect((r.npc, r.name, r.recipes.length), ('hatter', 'Mira', 1));
+      final ribbon = r.recipes.single;
+      expect((ribbon.id, ribbon.item, ribbon.zeny), ('ribbon', 'ribbon', 200));
+      expect(ribbon.needs, [(item: 'jellopy', count: 10), (item: 'sticky_mucus', count: 3)]);
+      final c = ServerMsg.decode(hex('990106726962626f6e06726962626f6e'))! as Crafted;
+      expect((c.recipe, c.item), ('ribbon', 'ribbon'));
+      final p =
+          ServerMsg.decode(hex('9b0107026d31064d6561646f7704018201000203416e6e046d6167650c0102426f0574686965660900'))!
+              as Parties;
+      final party = p.parties.single;
+      expect(
+        (party.lobbyId, party.mission, party.missionName, party.capacity, party.running, party.elapsedSecs, party.mine),
+        (7, 'm1', 'Meadow', 4, true, 130, false),
+      );
+      expect(party.members, [
+        (name: 'Ann', archetype: 'mage', level: 12, online: true),
+        (name: 'Bo', archetype: 'thief', level: 9, online: false),
+      ]);
+      expect(toHex(ClientMsg.craft('hatter', 'ribbon')), '98000668617474657206726962626f6e');
+      expect(toHex(ClientMsg.partyList()), '9a00');
+      expect(toHex(ClientMsg.partyJoin(300)), '9a01ac02');
+      expect(toHex(ClientMsg.partyPublic(public: true)), '9a0201');
+      expect(() => ServerMsg.decode(hex('9902')), throwsA(isA<WireFormatError>()));
+    });
+
+    test('companion goldens (protocol/companion.rs `goldens`)', () {
+      final c =
+          ServerMsg.decode(
+                hex(
+                  'a30283808003ac0200056c69665f68034c69661f012003d0000084808003ac02010a6d616e647261676f72610a4d616e647261676f72611e0240008000c0b802',
+                ),
+              )!
+              as Companions;
+      final [lif, plant] = c.list;
+      expect(
+        (lif.entityId, lif.ownerEntityId, lif.kind, lif.sprite, lif.name, lif.level, lif.evolved, lif.gone, lif.x, lif.y),
+        (companionEntityBase + 3, 300, CompanionClass.homunculus, 'lif_h', 'Lif', 31, true, false, 12.5, 3.25),
+      );
+      expect((lif.expiresMs, lif.rooted), (0, false));
+      expect(
+        (plant.entityId, plant.kind, plant.sprite, plant.name, plant.level, plant.gone, plant.x, plant.y, plant.expiresMs),
+        (companionEntityBase + 4, CompanionClass.plant, 'mandragora', 'Mandragora', 30, true, 1.0, 2.0, 40000),
+      );
+      expect((ServerMsg.decode(hex('a300'))! as Companions).list, isEmpty);
+      final s = ServerMsg.decode(hex('a4041fdc0ba8464b0102e05d287800c41300e0d403'))! as CompanionState;
+      expect(
+        (s.homType, s.level, s.exp, s.expToNext, s.bond, s.stance, s.state, s.backMs, s.sp, s.maxSp),
+        (HomType.vanilmirth, 31, 1500, 9000, 75, CompanionStance.defensive, CompanionState.dead, 12000, 40, 120),
+      );
+      expect(s.cooldownsMs, [0, 2500, 0, 60000]);
+      expect(toHex(ClientMsg.companionChoose(HomType.amistr)), 'a80102');
+      expect(toHex(ClientMsg.companionStance(CompanionStance.passive)), 'a80202');
+      expect(toHex(ClientMsg.companionRename('Bo')), 'a80302426f');
+      expect(toHex(ClientMsg.companionEvolve()), 'a804');
+      expect(toHex(ClientMsg.companionRest()), 'a805');
+      expect(() => ServerMsg.decode(hex('a4041f')), throwsA(isA<WireFormatError>()));
+    });
+
     test('link goldens (protocol.rs `link_frames_round_trip_and_match_the_dart_goldens`)', () {
       final l = ServerMsg.decode(hex('73ac0200'))! as PlayerLink;
       expect((l.entityId, l.online), (300, false));
@@ -394,9 +513,27 @@ void main() {
       expect(() => ServerMsg.decode(hex('a50287808004ffac828004')), throwsA(isA<WireFormatError>()));
     });
 
+    test('town skill goldens (protocol.rs `town_skill_frames_match_the_dart_goldens`)', () {
+      expect(toHex(ClientMsg.townSkill('pharmacy')), 'a908706861726d616379');
+    });
+
     test('mount goldens (protocol.rs `mount_frames_match_the_dart_goldens`)', () {
-      final m = ServerMsg.decode(hex('90ac020119'))! as PlayerMount;
-      expect((m.entityId, m.mount, m.speed, m.riding), (300, PlayerMount.peco, 25, true));
+      final m =
+          ServerMsg.decode(hex('a6ac020973776f7264736d616e02000100000a73706561723a70696b6500011900'))!
+              as PlayerAppearance;
+      final a = m.appearance;
+      expect(
+        (m.entityId, a.cls, a.tier, a.look, a.weapon, a.mount, a.speed, a.riding),
+        (300, 'swordsman', 2, const Look(), 'spear:pike', Appearance.peco, 25, true),
+      );
+      expect(a.headgear, isEmpty);
+      expect(a.cart, isFalse);
+      final bytes = hex('a6ac020973776f7264736d616e02000100000a73706561723a70696b6500011900');
+      for (var cut = 1; cut < bytes.length; cut++) {
+        expect(() => ServerMsg.decode(bytes.sublist(0, cut)), throwsA(isA<WireFormatError>()), reason: 'cut at $cut');
+      }
+      // 0x90 PLAYER_MOUNT is retired.
+      expect(ServerMsg.decode(hex('90ac020119')), isNull);
       expect(toHex(ClientMsg.mount(on: false)), '9100');
       expect(toHex(ClientMsg.mount(on: true)), '9101');
       expect(riderJob('swordsman', 2, riding: true), 'crusader_peco');
@@ -405,12 +542,21 @@ void main() {
       expect(riderJob('swordsman', 2, riding: false), 'crusader');
     });
 
+    test('quiver goldens (protocol.rs `quiver_frames_match_the_dart_goldens`)', () {
+      final q = ServerMsg.decode(hex('9dac0201'))! as Quiver;
+      expect((q.entityId, q.element, Quiver.names[q.element]), (300, 1, 'fire'));
+      expect(toHex(ClientMsg.quiver(Quiver.next)), '9cff');
+      expect(toHex(ClientMsg.quiver(6)), '9c06');
+    });
+
     test('modifier goldens (protocol/modifiers.rs `goldens`)', () {
-      final d = ServerMsg.decode(
-        hex(
-          '7b020a646966666963756c7479ff01440164016904000001014e017804736c6f770101530173016a060a010002000000c8016405',
-        ),
-      )! as ModifierDefs;
+      final d =
+          ServerMsg.decode(
+                hex(
+                  '7b020a646966666963756c7479ff01440164016904000001014e017804736c6f770101530173016a060a010002000000c8016405',
+                ),
+              )!
+              as ModifierDefs;
       expect(d.defs.map((x) => (x.id, x.bit, x.risk, x.minLevel, x.locked)), [
         ('difficulty', ModifierDef.slider, 4, 0, false),
         ('slow', 1, 6, 10, true),
@@ -419,7 +565,10 @@ void main() {
       expect(d.defs[1].toJson()['steps'], isEmpty);
       expect(d.rewards.map((r) => (r.zenyPct, r.expPct, r.chest)), [(0, 0, 0), (200, 100, 5)]);
       final m = ServerMsg.decode(hex('7c00010342183018013b'))! as ModifierState;
-      expect((m.scope, m.tier, m.mask, m.risk, m.zenyPct, m.expPct, m.chest, m.lootPct), (1, 3, 0x42, 24, 48, 24, 1, 59));
+      expect(
+        (m.scope, m.tier, m.mask, m.risk, m.zenyPct, m.expPct, m.chest, m.lootPct),
+        (1, 3, 0x42, 24, 48, 24, 1, 59),
+      );
       final r = ServerMsg.decode(hex('7c01030212ac02dc0b01076a656c6c6f707902'))! as ModifierReward;
       expect((r.tier, r.mask, r.risk, r.zeny, r.exp), (3, 2, 18, 300, 1500));
       expect(r.items, [('jellopy', 2)]);
@@ -431,8 +580,12 @@ void main() {
       expect(m.monsters.map((a) => (a.slot, a.generation, a.bits, a.state)), [(5, 2, 0x11, 0), (300, 255, 0x8000, 5)]);
       expect((m.monsters[1].frenzied, m.monsters[1].minion, m.monsters[1].shieldBroken), (true, true, false));
       final e = ServerMsg.decode(hex('a1018580800401a002d000'))! as AffixEvents;
-      expect((e.events.single.entity, e.events.single.name, e.events.single.x, e.events.single.y), (0x800005, 'blink', 10.5, 3.25));
-      final d = ServerMsg.decode(hex('a201066861737465640001480164ffd1ff0402054d6167696304526172654b321414'))! as AffixDefs;
+      expect(
+        (e.events.single.entity, e.events.single.name, e.events.single.x, e.events.single.y),
+        (0x800005, 'blink', 10.5, 3.25),
+      );
+      final d =
+          ServerMsg.decode(hex('a201066861737465640001480164ffd1ff0402054d6167696304526172654b321414'))! as AffixDefs;
       expect(d.defs.map((x) => (x.id, x.bit, x.name, x.desc, x.color)), [('hasted', 0, 'H', 'd', 0x9fe8ff)]);
       expect(d.ranks, ['Magic', 'Rare']);
       expect((d.expPct, d.dropPct, d.extraPct, d.hpPct), (75, 50, 20, 20));
@@ -504,7 +657,7 @@ void main() {
       final enter =
           ServerMsg.decode(
                 hex(
-                  '210166054669656c64029003020000003f00000034c200002041000020420000a04106612e6f676702006000900000010902426f066e6f76696365c000000106010402031f03626f77',
+                  '210166054669656c64029003020000003f00000034c200002041000020420000a04106612e6f676702006000900000010902426f066e6f76696365c0000001061f06617263686572020104020307626f773a626f77020368617408666c755f6d61736b000000',
                 ),
               )!
               as MapEnter;
@@ -525,7 +678,11 @@ void main() {
       expect((p.entityId, p.name, p.archetype, p.x, p.y, p.facing), (9, 'Bo', 'novice', 3.0, 4.0, 6));
       expect(p.look, const Look(gender: 1, hair: 4, hairColor: 2, bodyColor: 3));
       expect(p.level, 31);
-      expect(p.weapon, 'bow');
+      expect(
+        (p.appearance.cls, p.appearance.tier, p.appearance.weapon, p.appearance.riding),
+        ('archer', 2, 'bow:bow', false),
+      );
+      expect(p.appearance.headgear, ['hat', 'flu_mask']);
 
       final lobby =
           (ServerMsg.decode(
@@ -540,7 +697,10 @@ void main() {
         (1, 'AB2CD', false, 'poring_island_survival', 8),
       );
       final m = lobby.members.single;
-      expect((m.entityId, m.name, m.leader, m.online, m.away, m.level, m.offlineSecs), (9, 'Bo', true, true, false, 1, 0));
+      expect(
+        (m.entityId, m.name, m.leader, m.online, m.away, m.level, m.offlineSecs),
+        (9, 'Bo', true, true, false, 1, 0),
+      );
 
       expect(
         (ServerMsg.decode(hex('32ff06637573746f6d'))! as LobbyLeft).reason,
@@ -548,8 +708,21 @@ void main() {
         reason: 'unknown codes travel as strings',
       );
       expect((ServerMsg.decode(hex('1105'))! as Pong).ts, -3);
-      final look = ServerMsg.decode(hex('29ac02000c0f07'))! as PlayerLook;
-      expect((look.entityId, look.look), (300, const Look(hair: 12, hairColor: 15, bodyColor: 7)));
+      final look =
+          ServerMsg.decode(hex('a6ac020973776f7264736d616e03000c0f070a73706561723a70696b650103686174011901'))!
+              as PlayerAppearance;
+      expect((look.entityId, look.appearance.look), (300, const Look(hair: 12, hairColor: 15, bodyColor: 7)));
+      expect((look.appearance.tier, look.appearance.weapon, look.appearance.mount), (3, 'spear:pike', Appearance.peco));
+      expect(look.appearance.headgear, ['hat']);
+      expect(look.appearance.cart, isTrue, reason: 'a Pushcart is drawn behind it');
+      expect(look.appearance.toUi(), {
+        'gender': 0,
+        'hair': 12,
+        'hairColor': 15,
+        'bodyColor': 7,
+        'weapon': 'spear:pike',
+        'headgear': ['hat'],
+      });
       final v = ServerMsg.decode(hex('2aac02287a07830101800503041f'))! as PlayerVitals;
       expect((v.entityId, v.hp, v.maxHp, v.sp, v.maxSp, v.state), (300, 40, 122, 7, 131, 1));
       expect((v.status, v.tempHp, v.light, v.level), (640, 3, 4, 31));
@@ -583,6 +756,10 @@ void main() {
         (9, 1, 2, 10.5, 3.25, 64, 8.0, 1.0, 6000, 300),
       );
       expect((ServerMsg.decode(hex('2f09'))! as ZoneEnd).id, 9);
+      // skill strikes golden (protocol.rs `skill_strikes_match_the_dart_golden`).
+      final strikes = ServerMsg.decode(hex('9eac02066d6574656f72d00001a002d000d804'))! as SkillStrikes;
+      expect((strikes.caster, strikes.skill, strikes.radius), (300, 'meteor', 3.25));
+      expect(strikes.strikes.single, (x: 10.5, y: 3.25, delayMs: 600));
       final end = ServerMsg.decode(hex('3401a503d209cd8306904e'))! as StageEnd;
       expect((end.victory, end.secs, end.kills, end.exp, end.leaveMs), (true, 421, 1234, 98765, 10000));
       final boss = ServerMsg.decode(hex('35858080040442617068d00fe615'))! as Boss;
@@ -665,7 +842,8 @@ void main() {
 
     String table(ItemDef d) => [
       for (var r = 0; r < maxRefine; r++)
-        if (refineStep(d, r) case final s?) '${s.to}:${s.ore.substring(0, 2)}:${s.fee}:${s.chance}${s.chance < 100 ? 'd${s.slip}' : ''}',
+        if (refineStep(d, r) case final s?)
+          '${s.to}:${s.ore.substring(0, 2)}:${s.fee}:${s.chance}${s.chance < 100 ? 'd${s.slip}' : ''}',
     ].join(' ');
 
     test('refine table (combat/refine.rs `ores_fees_and_odds_follow_the_level`)', () {
@@ -700,7 +878,10 @@ void main() {
       Map<String, Object?>? row(String key, int? slot, {int have = 1, int zeny = 100000}) =>
           refineRow(sword, key, slot, have: (_) => have, oreName: (o) => o == oridecon ? 'Oridecon' : o, zeny: zeny);
       final r = row('sword+7', 4)!;
-      expect((r['id'], r['where'], r['level'], r['safe'], r['bonus'], r['blocked']), ('4:sword+7', 'Weapon · worn', 7, 7, '+4 damage', ''));
+      expect(
+        (r['id'], r['where'], r['level'], r['safe'], r['bonus'], r['blocked']),
+        ('4:sword+7', 'Weapon · worn', 7, 7, '+4 damage', ''),
+      );
       expect(r['next'], {
         'to': 8,
         'ore': oridecon,
@@ -766,6 +947,39 @@ void main() {
         p.render(1, 1 / 60);
       }
       expect(p.errX.abs(), lessThan(0.01), reason: 'error decays');
+    });
+
+    test('a belt carries the prediction as the server does, so reconciling leaves no error', () {
+      // A belt along y in [2, 5) running +x at 2 cells/s (server drift_step).
+      final p = LocalPredictor(town, 2.5, 3.5);
+      p.drift.put(7, circle: false, x: 5.5, y: 3.5, dir: 0, along: 7, across: 3, speed: 2);
+      var (sx, sy) = (2.5, 3.5);
+      final drift = DriftField()..put(7, circle: false, x: 5.5, y: 3.5, dir: 0, along: 7, across: 3, speed: 2);
+      const lag = 3;
+      final inFlight = Queue<(int, double, double)>();
+      for (var t = 0; t < 30; t++) {
+        final dir = t < 20 ? (0.0, 0.4) : (0.0, 0.0);
+        final seq = p.step(dir.$1, dir.$2);
+        inFlight.add((seq, dir.$1, dir.$2));
+        if (inFlight.length > lag) {
+          final (s, dx, dy) = inFlight.removeFirst();
+          (sx, sy) = const MoveRules().apply(town, sx, sy, dx, dy);
+          (sx, sy) = drift.step(town, sx, sy, 20);
+          p.reconcile(s, sx, sy);
+        }
+        expect(p.errX.abs() + p.errY.abs(), lessThan(1e-9), reason: 'tick $t');
+      }
+      expect(p.x, greaterThan(3), reason: 'it rode east');
+      // Off the belt nothing drifts; a stopped belt carries nobody.
+      expect(drift.step(town, 2.5, 6.5, 20), (2.5, 6.5));
+      drift.put(7, circle: false, x: 5.5, y: 3.5, dir: 0, along: 7, across: 3, speed: 0);
+      expect(drift.step(town, 3.0, 3.5, 20), (3.0, 3.5));
+      final q = LocalPredictor(town, 3.0, 3.5)..drift.put(1, circle: false, x: 5.5, y: 3.5, dir: 128, along: 7, across: 3, speed: 2);
+      q.idle();
+      expect(q.x, closeTo(2.9, 1e-9), reason: 'standing still on a belt still rides it (west)');
+      q.drift.remove(1);
+      q.idle();
+      expect(q.x, closeTo(2.9, 1e-9));
     });
 
     test('large corrections snap (teleport)', () {

@@ -77,16 +77,19 @@ const CRUMBLE_SECS: f32 = 8.0;
 const CRUMBLE_PULL: f32 = 1.0;
 const CRUMBLE_PULSE: f32 = 0.5;
 
+/// The diagonal component of a unit wind vector (1/sqrt 2).
+const D: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
 /// The 8 wind directions a sandstorm blows toward (unit vectors, cells).
 const WINDS: [(f32, f32); 8] = [
     (1.0, 0.0),
-    (0.7071, 0.7071),
+    (D, D),
     (0.0, 1.0),
-    (-0.7071, 0.7071),
+    (-D, D),
     (-1.0, 0.0),
-    (-0.7071, -0.7071),
+    (-D, -D),
     (0.0, -1.0),
-    (0.7071, -0.7071),
+    (D, -D),
 ];
 
 /// Where the storm that began at `start_secs` blows (index into the 8

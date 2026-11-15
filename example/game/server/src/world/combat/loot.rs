@@ -13,9 +13,23 @@ use super::items::{self, Kind};
 pub const ZENY: &str = "zeny";
 /// A chance of 100% in [`Drop::rate`] units.
 pub const ALWAYS: u32 = 10_000;
-/// Drops at or under this chance (2%), and any equipment, are rare: the
-/// client adds a toast to the floating name.
+/// A drop is rare (the client's loot feed highlights it) by what the item
+/// is, never by chance alone: any equipment, card or magic item; an etc
+/// item or consumable only when it is worth [`RARE_VALUE`] zeny or more (a
+/// gem, a refining metal, a Yggdrasil Berry), or half that when its row
+/// drops at or under [`RARE_RATE`] (2%). A Jellopy is never rare, however
+/// unlikely its roll.
 pub const RARE_RATE: u32 = 200;
+/// See [`RARE_RATE`].
+pub const RARE_VALUE: u32 = 1000;
+
+/// Whether a drop of `e` at `rate` is rare (see [`RARE_RATE`]).
+pub fn is_rare(e: &items::Entry, rate: u32) -> bool {
+    match e.kind {
+        Kind::Etc | Kind::Consumable(_) => e.price >= RARE_VALUE || (e.price * 2 >= RARE_VALUE && rate <= RARE_RATE),
+        _ => true,
+    }
+}
 
 /// One row of a drop table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,12 +48,8 @@ impl Drop {
     /// `count` defaults to one. Unknown items and empty chances are errors
     /// (the catalogue warns and skips them).
     pub fn new(item: &str, chance: f64, count: Option<[u32; 2]>) -> Result<Drop, String> {
-        let (item, equipment) = if item == ZENY {
-            (ZENY, false)
-        } else {
-            let e = items::find(item).ok_or_else(|| format!("unknown item {item}"))?;
-            (e.id, !matches!(e.kind, Kind::Etc | Kind::Consumable(_)))
-        };
+        let entry = if item == ZENY { None } else { Some(items::find(item).ok_or_else(|| format!("unknown item {item}"))?) };
+        let item = entry.map_or(ZENY, |e| e.id);
         if !(chance.is_finite() && chance > 0.0) {
             return Err(format!("{item}: chance must be > 0"));
         }
@@ -48,7 +58,7 @@ impl Drop {
         if min == 0 || max < min || max > items::MAX_STACK {
             return Err(format!("{item}: count must be 1 <= min <= max"));
         }
-        Ok(Drop { item, rate, min, max, rare: item != ZENY && (rate <= RARE_RATE || equipment) })
+        Ok(Drop { item, rate, min, max, rare: entry.is_some_and(|e| is_rare(e, rate)) })
     }
 
     pub fn is_zeny(&self) -> bool {
@@ -115,7 +125,12 @@ mod tests {
         let t = table();
         assert_eq!((t[0].item, t[0].rate, t[0].rare), ("jellopy", 1200, false));
         assert_eq!((t[1].min, t[1].max), (1, 3));
-        assert!(t[2].rare && t[2].rate == 5, "equipment and tiny chances are rare");
+        assert!(t[2].rare && t[2].rate == 5, "equipment is rare");
+        // Junk is never rare, however small its chance; valuables are.
+        assert!(!Drop::new("jellopy", 0.01, None).unwrap().rare, "a Jellopy at 0.01%");
+        assert!(!Drop::new("red_herb", 1.0, None).unwrap().rare);
+        assert!(Drop::new("oridecon", 50.0, None).unwrap().rare, "worth 5000 z");
+        assert!(Drop::new("blue_potion", 2.0, None).unwrap().rare && !Drop::new("blue_potion", 5.0, None).unwrap().rare, "800 z: rare at 2%");
         assert!(t[3].is_zeny() && !t[3].rare && t[3].rate == ALWAYS);
         assert!(Drop::new("nope", 1.0, None).is_err());
         assert!(Drop::new("jellopy", 0.0, None).is_err());

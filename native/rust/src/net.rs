@@ -305,13 +305,14 @@ fn proxy_error(message: String) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[tokio::test]
     async fn failures_are_classified() {
         let dns = connect("nonexistent.invalid", 80, None, None).await;
-        assert!(matches!(dns, Err(ConnectError::Dns(_))), "{dns:?}");
+        assert_matches!(dns, Err(ConnectError::Dns(_)), "{dns:?}");
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

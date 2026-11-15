@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
+use std::assert_matches;
 
 fn dist() -> Option<PathBuf> {
     let dir = std::env::var("GAME_ASSETS_DIR")
@@ -101,8 +102,8 @@ fn real_maps_load_and_portals_resolve() {
     let izlude_in = world.map_index("izlude_in").unwrap();
     let city = world.map(izlude);
     assert_eq!((city.walk.width(), city.walk.height()), (268, 268));
-    assert!(matches!(city.manifest.camera, CameraConstraint::Free { .. }));
-    assert!(matches!(world.map(izlude_in).manifest.camera, CameraConstraint::Fixed { .. }));
+    assert_matches!(city.manifest.camera, CameraConstraint::Free { .. });
+    assert_matches!(world.map(izlude_in).manifest.camera, CameraConstraint::Fixed { .. });
 
     // Every city portal must be reachable from the spawn.
     for p in &city.manifest.portals {
@@ -128,7 +129,7 @@ fn walk_through_every_house_door_and_back() {
     let mut hub = HubInstance::new(1, Arc::clone(&world), HubSimConfig::default());
     let mut out = Vec::new();
     hub.join(
-        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default() },
+        PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default(), homunculus: None },
         Uuid::nil(),
         None,
         0,
@@ -151,7 +152,7 @@ fn walk_through_every_house_door_and_back() {
         assert_eq!((ax, ay), arrival);
         match &map_enters(&events)[..] {
             [ServerMsg::MapEnter { map, via_portal, .. }] => {
-                assert!(matches!(map.camera, CameraConstraint::Fixed { .. }));
+                assert_matches!(map.camera, CameraConstraint::Fixed { .. });
                 assert_eq!(via_portal.as_deref(), Some(door.name.as_str()));
             }
             other => panic!("expected one map_enter, got {other:?}"),
@@ -205,35 +206,13 @@ fn walk_through_every_house_door_and_back() {
 }
 
 #[test]
-fn stage_on_prt_fild08_exits_to_izlude_arrival() {
+fn prt_fild08_has_no_walk_out_portal() {
     let Some(dir) = dist() else { return };
-    let hub = load_world().unwrap();
-    let stage_world = Arc::new(HubWorld::load(&dir, &["prt_fild08".into()], "prt_fild08").expect("stage map loads"));
+    // The bridge portal to Izlude is gone: a run ends on the result screen
+    // and the stage sends everyone to town's return point.
+    let stage_world = HubWorld::load(&dir, &["prt_fild08".into()], "prt_fild08").expect("stage map loads");
     let field = stage_world.map(stage_world.entry());
-    let exit = field.manifest.portals.iter().find(|p| p.target_map == "izlude").expect("field has an exit to izlude");
-    assert!(
-        matches!(stage_world.link(stage_world.entry(), 0), PortalLink::External { .. }),
-        "the hub map is outside the stage world"
-    );
-    // The hub side of the exit must be a walkable spot in izlude.
-    let izlude = hub.map(hub.map_index("izlude").unwrap());
-    let [ax, ay] = exit.target_pos;
-    assert!(izlude.walk.is_walkable_cell(ax as i32, ay as i32), "arrival ({ax},{ay}) is walkable in izlude");
-
-    let mut stage = HubInstance::stage(1, "poring_island_survival", Arc::clone(&stage_world), HubSimConfig::default());
-    let mut out = Vec::new();
-    let walker = PlayerProfile { user_id: 1, character_id: 1, name: "walker".into(), archetype: "novice".into(), look: game_server::world::protocol::Look::default(), level: 1, exp: 0, weapon: String::new(), loadout: Default::default(), bag: Default::default() };
-    stage.join(walker, Uuid::nil(), None, 0, &mut out);
-    let path = bfs(field, field.spawn, |cx, cy| exit.contains(cx as f32 + 0.5, cy as f32 + 0.5))
-        .expect("the exit is reachable from the stage spawn");
-    let mut seq = 0;
-    let events = follow(&mut stage, 1, &mut seq, &path);
-    assert!(
-        events.iter().any(|(_, e)| matches!(e, HubEvent::Transfer { target_map, arrival }
-            if target_map == "izlude" && *arrival == (ax as f32 + 0.5, ay as f32 + 0.5))),
-        "walking into the exit transfers to izlude"
-    );
-    assert_eq!(stage.population(), 0);
+    assert!(field.manifest.portals.is_empty(), "{:?}", field.manifest.portals);
 }
 
 #[test]
