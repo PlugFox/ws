@@ -117,6 +117,12 @@ pub struct HordeStorage {
     pub affix_taken: Vec<i32>,
     /// A monster skill's spur ([`Rally`]; zero for nearly all).
     pub rally: Vec<Rally>,
+    /// Its kind's [`super::tactics::Behaviour`] byte (0: a plain chaser).
+    pub behaviour: Vec<u8>,
+    /// Behaviour state ([`super::tactics::ADVANCE`], `RETREAT`, `WINDED`)
+    /// and its tick budget (a skirmisher's: the melee cooldown last seen).
+    pub tactic: Vec<u8>,
+    pub tactic_ticks: Vec<u16>,
     /// Dense list of live slots (iteration order).
     alive: Vec<u16>,
     /// Position of a slot in `alive` (`u16::MAX` when free).
@@ -154,6 +160,9 @@ impl HordeStorage {
             affix_state: vec![0; capacity],
             affix_taken: vec![0; capacity],
             rally: vec![Rally::default(); capacity],
+            behaviour: vec![0; capacity],
+            tactic: vec![0; capacity],
+            tactic_ticks: vec![0; capacity],
             alive: Vec::with_capacity(capacity),
             alive_pos: vec![u16::MAX; capacity],
             free: (0..capacity as u16).collect(),
@@ -208,6 +217,9 @@ impl HordeStorage {
         self.affix_state[s] = 0;
         self.affix_taken[s] = 0;
         self.rally[s] = Rally::default();
+        self.behaviour[s] = 0;
+        self.tactic[s] = 0;
+        self.tactic_ticks[s] = 0;
         self.alive_pos[s] = self.alive.len() as u16;
         self.alive.push(slot);
         Some(slot)

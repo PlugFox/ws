@@ -118,6 +118,7 @@ async fn start_with(stages: Vec<HubWorld>) -> (SocketAddr, AppState) {
         drops: Vec::new(),
         hits: (0, 0),
         missions: Vec::new(),
+        behaviour: Default::default(),
     };
     let monsters = MonsterCatalog::new(vec![poring]).unwrap();
     let (app, state) =

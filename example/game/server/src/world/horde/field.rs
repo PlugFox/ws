@@ -227,6 +227,35 @@ impl FlowField {
         let len = (vx * vx + vy * vy).sqrt();
         (len > 1e-4).then(|| (vx / len, vy / len))
     }
+
+    /// The opposite of [`Self::descent`]: towards the neighbouring cell
+    /// farthest (by walking) from every player, the way a monster backs
+    /// off without walking into a wall. `None` in a dead end or where no
+    /// player is reachable.
+    pub fn ascent(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        let (cx, cy) = (x.floor() as i32, y.floor() as i32);
+        let here = self.dist(cx, cy);
+        if here == UNREACHABLE {
+            return None;
+        }
+        let mut best = (here, 0, 0);
+        for (dx, dy, _) in NEIGHBOURS {
+            let d = self.dist(cx + dx, cy + dy);
+            if d != UNREACHABLE && d > best.0 {
+                if dx != 0 && dy != 0 && (self.dist(cx + dx, cy) == UNREACHABLE || self.dist(cx, cy + dy) == UNREACHABLE) {
+                    continue;
+                }
+                best = (d, dx, dy);
+            }
+        }
+        if best.0 == here {
+            return None;
+        }
+        let (tx, ty) = ((cx + best.1) as f32 + 0.5, (cy + best.2) as f32 + 0.5);
+        let (vx, vy) = (tx - x, ty - y);
+        let len = (vx * vx + vy * vy).sqrt();
+        (len > 1e-4).then(|| (vx / len, vy / len))
+    }
 }
 
 #[cfg(test)]
@@ -244,6 +273,33 @@ mod tests {
             "#........#",
             "##########",
         ])
+    }
+
+    #[test]
+    fn ascent_backs_away_along_the_corridor_never_into_a_wall() {
+        let mut f = FlowField::new(&grid());
+        f.build_now(&[(1, 1)]);
+        // Every open cell but the farthest: one step up the field lands on
+        // an open cell farther from the player.
+        let mut tops = 0;
+        for y in 0..7 {
+            for x in 0..10 {
+                let here = f.dist(x, y);
+                if here == UNREACHABLE {
+                    assert!(f.ascent(x as f32 + 0.5, y as f32 + 0.5).is_none(), "a wall");
+                    continue;
+                }
+                match f.ascent(x as f32 + 0.5, y as f32 + 0.5) {
+                    Some((ux, uy)) => {
+                        let (nx, ny) = ((x as f32 + 0.5 + ux).floor() as i32, (y as f32 + 0.5 + uy).floor() as i32);
+                        let there = f.dist(nx, ny);
+                        assert!(there != UNREACHABLE && there > here, "({x}, {y}) -> ({nx}, {ny}): {here} -> {there}");
+                    }
+                    None => tops += 1,
+                }
+            }
+        }
+        assert!((1..=2).contains(&tops), "only the far end has nowhere to go: {tops}");
     }
 
     #[test]

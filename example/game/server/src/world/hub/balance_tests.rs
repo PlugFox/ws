@@ -107,11 +107,16 @@ fn minute_of(id: &str, hp_pct: i32) -> Option<Tally> {
 }
 
 /// Basic attacks and monster skills per minute of every plain monster in
-/// the pack, kept under the readable ceilings of COMBAT.md "Cadence".
+/// the pack, kept under the readable ceilings of COMBAT.md "Cadence". A
+/// kiter's shot is its attack (it backs out of melee): its skills may run
+/// to one every ~4 s, and it must loose something. Supports and healers
+/// hang back and cast only over a pack or a wounded monster (none here),
+/// so they may do nothing at all.
 #[test]
 fn plain_monsters_attack_at_a_readable_pace() {
+    use crate::world::horde::tactics::Behaviour;
     let Some(stage) = arena(5) else { return };
-    let defs: Vec<(String, crate::world::combat::Archetype, bool)> = stage
+    let defs: Vec<(String, crate::world::combat::Archetype, bool, Behaviour)> = stage
         .horde
         .as_ref()
         .unwrap()
@@ -119,14 +124,20 @@ fn plain_monsters_attack_at_a_readable_pace() {
         .defs()
         .iter()
         .filter(|d| !d.is_plant() && !super::boss::scripted(&d.id))
-        .map(|d| (d.id.clone(), d.archetype, d.skills.is_empty()))
+        .map(|d| (d.id.clone(), d.archetype, d.skills.is_empty(), d.behaviour))
         .collect();
     // Every row is printed first (`--nocapture` shows the table), then judged.
     let mut bad = Vec::new();
-    for (id, archetype, quiet) in defs {
+    for (id, archetype, quiet, behaviour) in defs {
         let t = minute_of(&id, 100).unwrap();
-        println!("{id:>14} {:>7}: {:>3} swings/min, {:>2} skills/min", archetype.id(), t.swings, t.skills);
-        if t.swings == 0 || t.swings > 40 || t.skills > 8 || (quiet && t.skills > 0) {
+        println!("{id:>14} {:>7} {:>10}: {:>3} swings/min, {:>2} skills/min", archetype.id(), behaviour.id(), t.swings, t.skills);
+        let busy = t.swings > 40 || (quiet && t.skills > 0);
+        let wrong = match behaviour {
+            Behaviour::Kiter => t.swings + t.skills == 0 || t.skills > 16,
+            Behaviour::Support | Behaviour::Healer => t.skills > 8,
+            Behaviour::Chaser | Behaviour::Skirmisher => t.swings == 0 || t.skills > 8,
+        };
+        if busy || wrong {
             bad.push(format!("{id}: {t:?}"));
         }
     }

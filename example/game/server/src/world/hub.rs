@@ -62,6 +62,8 @@ mod adept_tests;
 mod hunter_tests;
 #[cfg(test)]
 mod monster_skill_tests;
+#[cfg(test)]
+mod tactics_tests;
 mod quiver;
 mod residents;
 mod shop;

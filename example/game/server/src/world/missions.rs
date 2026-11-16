@@ -302,6 +302,8 @@ pub const MISSIONS: &[MissionInfo] = &[
             "<b>Fire</b> fizzles in sewage; <b>cold</b> freezes it into safe ice for a while.",
             "The <b>Rat King</b>'s stampedes run in lanes: stand in the gap.",
         ],
+        // Kiters earlier and more often, backline monsters mid-run (COMBAT.md §4.4 Behaviours).
+        roster: &[RosterEntry::of("plankton").weight(45).unlock(45.0)],
         ..MissionInfo::TEMPLATE
     },
     MissionInfo {
@@ -339,6 +341,8 @@ pub const MISSIONS: &[MissionInfo] = &[
             "Don't stand in a line with a <b>Peco Peco</b> or <b>Phreeoni</b>: they charge.",
             "When the dunes start to churn, <b>Phreeoni</b> is coming up out of the great sinkhole.",
         ],
+        // Kiters earlier and more often, backline monsters mid-run (COMBAT.md §4.4 Behaviours).
+        roster: &[RosterEntry::of("frilldora").weight(55).unlock(75.0)],
         ..MissionInfo::TEMPLATE
     },
     MissionInfo {
@@ -364,6 +368,8 @@ pub const MISSIONS: &[MissionInfo] = &[
             "The <b>Weeping Bride</b>'s wail terrifies: you run from her and cannot fight until it passes.",
             "When the bells ring on their own, Moonlight Flower is coming. Light the braziers round the shrine first.",
         ],
+        // Kiters earlier and more often, backline monsters mid-run (COMBAT.md §4.4 Behaviours).
+        roster: &[RosterEntry::of("archer_skeleton").weight(55).unlock(45.0), RosterEntry::of("sohee").unlock(150.0)],
         ..MissionInfo::TEMPLATE
     },
     // The ladder from 60 to 99 (docs/locations/ladder_60_99.md): coming
@@ -393,6 +399,8 @@ pub const MISSIONS: &[MissionInfo] = &[
             "Never stand in a line with a <b>Savage</b>, the <b>Orc Hero</b> or the <b>Orc Lord</b>: they charge.",
             "When the Orc Lord's <b>drums</b> start, break them: each one left calls a High Orc.",
         ],
+        // Kiters earlier and more often, backline monsters mid-run (COMBAT.md §4.4 Behaviours).
+        roster: &[RosterEntry::of("orc_archer").weight(60).unlock(60.0), RosterEntry::of("orc_lady").weight(45).unlock(90.0)],
         ..MissionInfo::TEMPLATE
     },
     // <<< orc_village <<<
@@ -422,6 +430,8 @@ pub const MISSIONS: &[MissionInfo] = &[
             "A <b>Marionette</b> pulls you toward it. Look at what is behind it first.",
             "The Stormy Knight's <b>Gale</b> throws you: keep a wall at your back, never a belt.",
         ],
+        // Kiters earlier and more often, backline monsters mid-run (COMBAT.md §4.4 Behaviours).
+        roster: &[RosterEntry::of("cruiser").weight(55).unlock(40.0), RosterEntry::of("chepet").weight(45).unlock(120.0), RosterEntry::of("alarm").unlock(200.0)],
         ..MissionInfo::TEMPLATE
     },
     // <<< toy_factory <<<
@@ -451,6 +461,8 @@ pub const MISSIONS: &[MissionInfo] = &[
             "<b>Dark Priests</b> mend the dead from behind the armour. Reach them, or hit them as they chant.",
             "The Dark Lord's <b>Hell's Gate</b> is shared: stand together on the marked one.",
         ],
+        // Kiters earlier and more often, backline monsters mid-run (COMBAT.md §4.4 Behaviours).
+        roster: &[RosterEntry::of("raydric_archer").weight(60).unlock(60.0), RosterEntry::of("evil_druid").unlock(120.0), RosterEntry::of("dark_priest").weight(35).unlock(150.0)],
         ..MissionInfo::TEMPLATE
     },
     // <<< glast_heim <<<
@@ -479,6 +491,8 @@ pub const MISSIONS: &[MissionInfo] = &[
             "A shimmer in the air is a <b>Byorgue</b>. Keep moving: it strikes whoever stands still.",
             "Ifrit's <b>Meteor</b> is shared: stand together under it. His <b>Eruption</b> is not: find the obsidian.",
         ],
+        // Kiters earlier and more often, backline monsters mid-run (COMBAT.md §4.4 Behaviours).
+        roster: &[RosterEntry::of("kaho").weight(55).unlock(45.0), RosterEntry::of("blazzer").unlock(180.0)],
         ..MissionInfo::TEMPLATE
     },
     // <<< thor_volcano <<<
@@ -504,7 +518,9 @@ pub const MISSIONS: &[MissionInfo] = &[
             RosterEntry::of("deathword").retire(360.0),
             RosterEntry::of("ancient_mimic").retire(360.0),
             RosterEntry::of("curator").retire(180.0),
-            RosterEntry::of("owl_duke").retire(600.0),
+            RosterEntry::of("owl_duke").retire(600.0).weight(55).unlock(30.0),
+            RosterEntry::of("observation").unlock(300.0),
+            RosterEntry::of("shelter").weight(35).unlock(240.0),
             RosterEntry::of("tha_odium").retire(360.0),
             RosterEntry::of("plasma_r").retire(600.0),
             RosterEntry::of("plasma_b").retire(600.0),

@@ -12,6 +12,8 @@
 //!   the mission's difficulty grants and releases it around the players.
 //! * [`plants`]: the field's flora, planted once at creation (rooted,
 //!   harmless, outside the wave budget).
+//! * [`tactics`]: how a monster places itself (chaser, kiter, skirmisher,
+//!   support, healer): one behaviour byte per slot, full tier only.
 //!
 //!
 //! A player sees monsters only within their *light radius*: a fixed circle
@@ -34,6 +36,7 @@ pub mod field;
 pub mod grid;
 pub mod plants;
 pub mod storage;
+pub mod tactics;
 pub mod view;
 
 use super::hub::{HubWorld, MapIdx};
@@ -299,6 +302,10 @@ pub struct Horde {
     /// Companions as the horde sees them (taunt targets, body blocks):
     /// copied in each tick, reserved once.
     lures: Vec<Lure>,
+    /// Reach (cells) of each kind's shot, catalog order (kiters keep their
+    /// band inside it; 0: unknown, [`tactics::DEFAULT_REACH`]). Set by the
+    /// hub from the monster skills ([`Self::set_reach`]).
+    reach: Vec<f32>,
 }
 
 impl Horde {
@@ -356,6 +363,7 @@ impl Horde {
             plants: 0,
             affixes,
             lures: Vec::with_capacity(64),
+            reach: Vec::new(),
         };
         horde.plant_flora();
         horde
@@ -457,6 +465,8 @@ impl Horde {
         self.store.legendary[s] = block.legendary_resistance;
         // Stagger first swings so a surround does not land in one tick.
         self.store.cooldown[s] = slot % 8;
+        self.store.behaviour[s] = def.behaviour as u8;
+        (self.store.tactic[s], self.store.tactic_ticks[s]) = tactics::initial(def.behaviour);
         self.stats.spawned += 1;
         if !self.index.hold {
             if self.index.fresh.len() >= MAX_FRESH {
@@ -709,6 +719,17 @@ impl Horde {
         self.lures.extend_from_slice(lures);
     }
 
+    /// The reach (cells) of each kind's shot, in catalog order (the hub
+    /// reads it off the monster skills): kiters keep their band inside it.
+    pub fn set_reach(&mut self, reach: Vec<f32>) {
+        self.reach = reach;
+    }
+
+    /// The reach a kind's kiters keep to (cells).
+    pub fn reach_of(&self, kind: u8) -> f32 {
+        self.reach.get(kind as usize).copied().filter(|&r| r > 0.0).unwrap_or(tactics::DEFAULT_REACH)
+    }
+
     /// The lures of the last [`Self::set_lures`].
     pub fn lures(&self) -> &[Lure] {
         &self.lures
@@ -921,6 +942,52 @@ impl Horde {
                 (None, None) => Self::nearest(&self.targets, x, y),
             };
             let contact = def.radius + lure.map_or(c.player_radius, |l| l.radius);
+            // Behaviours (tactics.rs): a monster that keeps its distance or
+            // breaks off plans its own step; a taunt overrides it.
+            let behaviour = tactics::Behaviour::from_u8(s.behaviour[k]);
+            if behaviour != tactics::Behaviour::Chaser && full && !status.has(Condition::Taunted) && nd2 > 1e-6 {
+                // It may stop short of the chase below: probe here.
+                if nd2 < los_r2 && tick.wrapping_add(slot as u32).is_multiple_of(4) {
+                    let clear = line_clear(walk, x, y, x + ndx, y + ndy);
+                    s.flags[k] = (s.flags[k] & !FLAG_LOS) | if clear { FLAG_LOS } else { 0 };
+                }
+                let nd = nd2.sqrt();
+                let walked = self.field.dist(x.floor() as i32, y.floor() as i32);
+                let path = if walked == UNREACHABLE { nd } else { walked as f32 / 5.0 };
+                // Away: up the flow field (around walls), else straight back.
+                let away = self.field.ascent(x, y).or(Some((-ndx / nd, -ndy / nd))).filter(|&(ax, ay)| {
+                    walk.is_walkable(x + ax * 0.6, y) || walk.is_walkable(x, y + ay * 0.6)
+                });
+                let see = tactics::Sight {
+                    dist: nd,
+                    path,
+                    los: s.flags[k] & FLAG_LOS != 0,
+                    reach: self.reach.get(s.kind[k] as usize).copied().unwrap_or(0.0),
+                    cooldown: s.cooldown[k],
+                    hz: self.hz as f32,
+                };
+                // Its own legs only: a spur or a haste never makes a
+                // retreating monster outrun the players.
+                let legs = def.speed * status.speed() * dt * period as f32;
+                match tactics::plan(behaviour, &mut s.tactic[k], &mut s.tactic_ticks[k], see, period as u16, away.is_none()) {
+                    tactics::Move::Chase => {}
+                    tactics::Move::Stay => continue,
+                    tactics::Move::Away { pace, max } => {
+                        if let Some((ax, ay)) = away {
+                            self.step[k] = (ax, ay, (legs * pace).min(max * dt * period as f32));
+                        }
+                        continue;
+                    }
+                    tactics::Move::Strafe { pace } => {
+                        let side = tactics::strafe_side(slot, s.generation[k], tick, self.hz);
+                        let (sx, sy) = (-ndy / nd * side, ndx / nd * side);
+                        if walk.is_walkable(x + sx * 0.6, y + sy * 0.6) {
+                            self.step[k] = (sx, sy, legs * pace);
+                        }
+                        continue;
+                    }
+                }
+            }
             if nd2 <= contact * contact {
                 continue; // touching: Phase 6 turns this into attacks
             }

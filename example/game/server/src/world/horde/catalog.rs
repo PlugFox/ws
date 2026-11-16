@@ -5,6 +5,7 @@
 //! what `stage_joined.monsters` names.
 
 use crate::world::combat::loot::Drop;
+use super::tactics::Behaviour;
 use crate::world::combat::{Archetype, Element, Size};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -37,6 +38,9 @@ struct RawDirector {
     /// original Poring Island roster ([`crate::world::missions::LEGACY_ROSTER`]).
     #[serde(default)]
     missions: Vec<String>,
+    /// How it fights ([`Behaviour`]): absent, a plain chaser.
+    #[serde(default)]
+    behaviour: String,
 }
 
 #[derive(Deserialize)]
@@ -145,6 +149,9 @@ pub struct MonsterDef {
     /// Mission ids whose roster it is in (recipe `director.missions`);
     /// empty: the legacy Poring Island roster (`missions::roster`).
     pub missions: Vec<String>,
+    /// How it places itself in a fight (recipe `director.behaviour`,
+    /// `tactics.rs`).
+    pub behaviour: Behaviour,
 }
 
 impl MonsterDef {
@@ -230,6 +237,7 @@ impl MonsterCatalog {
                 skills: m.skills.into_iter().map(|s| s.id).collect(),
                 evil: matches!(m.stats.race.as_str(), "undead" | "demon"),
                 hits: m.stats.hits.map_or((0, 0), |[a, b]| (a, b)),
+                behaviour: Behaviour::from_id(&m.director.behaviour),
                 missions: m.director.missions,
             })
             .collect();
@@ -289,6 +297,7 @@ pub(crate) fn test_def(id: &str, speed: f32, cost: u32, unlock: f32, boss: bool)
         drops: Vec::new(),
         hits: (0, 0),
         missions: Vec::new(),
+        behaviour: Behaviour::Chaser,
     }
 }
 
@@ -320,19 +329,23 @@ mod tests {
           "vocal": {"id":"vocal","name":"Vocal","radius":0.55,
             "director":{"archetype":"elite","spawn_cost":20,"min_wave_time":420,"weight":6,"xp_reward":80},
             "stats":{"move_speed":3.4,"level":13}},
+          "orc_archer": {"id":"orc_archer","name":"Orc Archer","radius":0.4,
+            "director":{"archetype":"chaser","spawn_cost":4,"min_wave_time":135,"weight":40,"behaviour":"kiter"},
+            "stats":{"move_speed":2.8,"level":64}},
           "angeling": {"id":"angeling","name":"Angeling","radius":0.8,
             "director":{"archetype":"boss","spawn_cost":50,"min_wave_time":600,"tier":3,"weight":5,"xp_reward":500},
             "stats":{"max_hp":8000,"move_speed":4.0,"touch_damage":40}}
         }"#;
         let c = MonsterCatalog::parse(json).unwrap();
-        assert_eq!(c.ids(), vec!["angeling", "vocal", "willow"]);
+        assert_eq!(c.ids(), vec!["angeling", "orc_archer", "vocal", "willow"]);
         assert!(c.get(0).boss);
-        assert_eq!(c.kind_of("willow"), Some(2));
-        assert_eq!(c.get(2).unlock_secs, 150.0);
-        assert_eq!(c.get(2).pack, (1, 3), "tanks come alone or in twos and threes");
+        assert_eq!(c.kind_of("willow"), Some(3));
+        assert_eq!(c.get(3).unlock_secs, 150.0);
+        assert_eq!(c.get(3).pack, (1, 3), "tanks come alone or in twos and threes");
         assert_eq!(c.get(0).pack, (1, 1));
-        assert_eq!((c.get(1).pack, c.get(1).archetype, c.get(1).boss), ((1, 1), Archetype::Elite, false), "elites come alone");
-        assert_eq!((c.get(2).level, c.get(2).element, c.get(2).archetype), (7, Element::Earth, Archetype::Tank));
+        assert_eq!((c.get(2).pack, c.get(2).archetype, c.get(2).boss), ((1, 1), Archetype::Elite, false), "elites come alone");
+        assert_eq!((c.get(3).level, c.get(3).element, c.get(3).archetype), (7, Element::Earth, Archetype::Tank));
+        assert_eq!((c.get(1).behaviour, c.get(3).behaviour), (Behaviour::Kiter, Behaviour::Chaser), "a behaviour, else a chaser");
         assert_eq!((c.get(0).level, c.get(0).element), (1, Element::Neutral), "defaults");
     }
 

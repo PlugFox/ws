@@ -754,3 +754,133 @@ fn a_burrowed_monster_moves_unseen_and_surfaces_findable() {
     assert_eq!(h.nearest_to(mx, my, 0.5, |s| s == wall).map(|f| f.0), Some(mole));
     assert_eq!(h.store().status[mole as usize] & STATUS_BURROWED, 0);
 }
+
+/// A catalog with a kiter, a skirmisher and a healer (speed 3 cells/s).
+fn tactics_catalog() -> Arc<MonsterCatalog> {
+    use tactics::Behaviour;
+    let with = |id: &str, b: Behaviour| MonsterDef { behaviour: b, ..test_def(id, 3.0, 1, 0.0, false) };
+    Arc::new(
+        MonsterCatalog::new(vec![with("archer", Behaviour::Kiter), with("goblin", Behaviour::Skirmisher), with("priest", Behaviour::Healer)])
+            .unwrap(),
+    )
+}
+
+fn at(h: &Horde, slot: u16) -> (f32, f32) {
+    h.monsters().find(|m| m.0 == slot).map(|m| (m.3, m.4)).unwrap()
+}
+
+#[test]
+fn a_kiter_keeps_its_band_and_backs_off_slower_than_a_player() {
+    let w = world(80, 30, None);
+    let mut h = Horde::new(Arc::clone(&w), tactics_catalog(), config(30.0));
+    h.set_reach(vec![16.0, 0.0, 0.0]);
+    let player = (10.5, 15.5);
+    let archer = h.spawn(0, 40.5, 15.5).unwrap();
+    for t in 0..200 {
+        h.tick(t, 20, &[player]);
+    }
+    let (x, y) = at(&h, archer);
+    let d = ((x - player.0).powi(2) + (y - player.1).powi(2)).sqrt();
+    assert!((8.0..=13.5).contains(&d), "it closes in and holds its band (9..13 cells): {d}");
+    // The player rushes it: it backs off, but slower than a walking player.
+    let mut p = (x - 4.0, y);
+    let mut gap = Vec::new();
+    for t in 200..230 {
+        h.tick(t, 20, &[p]);
+        let (mx, my) = at(&h, archer);
+        gap.push(((mx - p.0).powi(2) + (my - p.1).powi(2)).sqrt());
+        p.0 += 6.0 / 20.0;
+    }
+    let (mx, my) = at(&h, archer);
+    assert!(((mx - x).powi(2) + (my - y).powi(2)).sqrt() > 1.5 && mx > x, "it backed off: ({x}, {y}) -> ({mx}, {my})");
+    let closest = gap.iter().copied().fold(f32::MAX, f32::min);
+    assert!(closest < 1.5, "a player catches it within 1.5 s: {gap:?}");
+}
+
+#[test]
+fn a_kiter_out_of_sight_comes_round_the_wall() {
+    let w = world(60, 30, Some(30));
+    let mut h = Horde::new(Arc::clone(&w), tactics_catalog(), config(40.0));
+    h.set_reach(vec![16.0, 0.0, 0.0]);
+    let player = (36.5, 20.5);
+    // Behind the wall, 10 cells away in a straight line: no shot from there.
+    let archer = h.spawn(0, 26.5, 20.5).unwrap();
+    for t in 0..300 {
+        h.tick(t, 20, &[player]);
+    }
+    let (x, y) = at(&h, archer);
+    assert!(line_clear(&w.map(0).walk, x, y, player.0, player.1), "it found a line of sight: ({x}, {y})");
+}
+
+#[test]
+fn a_skirmisher_breaks_off_after_its_swing_and_returns() {
+    let w = world(60, 30, None);
+    let mut h = Horde::new(Arc::clone(&w), tactics_catalog(), config(30.0));
+    let player = (20.5, 15.5);
+    let goblin = h.spawn(1, 26.5, 15.5).unwrap();
+    let dist = |h: &Horde| {
+        let (x, y) = at(h, goblin);
+        ((x - player.0).powi(2) + (y - player.1).powi(2)).sqrt()
+    };
+    for t in 0..60 {
+        h.tick(t, 20, &[player]);
+    }
+    assert!(dist(&h) < 1.0, "it closes in: {}", dist(&h));
+    // The hub's melee sets its cooldown as it swings (32 ticks: 1.6 s).
+    h.store_mut().cooldown[goblin as usize] = 32;
+    let mut far = 0.0f32;
+    for t in 60..80 {
+        h.tick(t, 20, &[player]);
+        h.store_mut().cooldown[goblin as usize] -= 1;
+        far = far.max(dist(&h));
+    }
+    assert!(far > 2.0, "it broke off: {far}");
+    for t in 80..140 {
+        h.tick(t, 20, &[player]);
+        let c = &mut h.store_mut().cooldown[goblin as usize];
+        *c = c.saturating_sub(1);
+    }
+    assert!(dist(&h) < 1.0, "and came back for the next swing: {}", dist(&h));
+}
+
+#[test]
+fn a_healer_stays_behind_and_tires_when_chased() {
+    let w = world(100, 30, None);
+    let mut h = Horde::new(Arc::clone(&w), tactics_catalog(), config(40.0));
+    let player = (10.5, 15.5);
+    let priest = h.spawn(2, 50.5, 15.5).unwrap();
+    for t in 0..400 {
+        h.tick(t, 20, &[player]);
+    }
+    let (x, _) = at(&h, priest);
+    assert!((x - player.0) >= 7.5 && (x - player.0) <= 12.5, "it hangs back 8..12 cells: {}", x - player.0);
+    // Chased at a walk: it flees, tires and is caught.
+    let mut p = (x - 5.0, 15.5);
+    let mut caught = false;
+    for t in 400..520 {
+        h.tick(t, 20, &[p]);
+        p.0 += 6.0 / 20.0;
+        let (mx, _) = at(&h, priest);
+        if (mx - p.0).abs() < 1.5 {
+            caught = true;
+            break;
+        }
+    }
+    assert!(caught, "a player catches a fleeing healer");
+}
+
+#[test]
+fn a_taunt_turns_any_behaviour_into_a_chase() {
+    let w = world(60, 30, None);
+    let mut h = Horde::new(Arc::clone(&w), tactics_catalog(), config(30.0));
+    h.set_reach(vec![16.0, 0.0, 0.0]);
+    let archer = h.spawn(0, 30.5, 15.5).unwrap();
+    h.store_mut().afflict(archer, Condition::Taunted, 400);
+    let players = [PlayerView { x: 20.5, y: 15.5, light: 30.0, id: 7, hunted: true }];
+    h.store_mut().taunter[archer as usize] = 7;
+    for t in 0..100 {
+        h.tick_views(t, 20, &players);
+    }
+    let (x, _) = at(&h, archer);
+    assert!(x - 20.5 < 1.5, "taunted, it walks up to its taunter: {x}");
+}

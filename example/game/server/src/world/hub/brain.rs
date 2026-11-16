@@ -8,6 +8,19 @@
 //! the end as [`Hazard`]s. Damage is a saving throw for half against
 //! `10 + the monster's save bonus`; ranged skills miss players under a
 //! ranged ward (Pneuma).
+//!
+//! Behaviours (`horde/tactics.rs`) change how a kind uses its kit:
+//! * a **kiter**'s ranged skill is its attack: it needs line of sight, its
+//!   global cooldown is [`KITER_GCD_SECS`], its cooldowns are jittered so a
+//!   pack does not loose in step, and at most [`MAX_VOLLEYS`] (+1 per
+//!   extra player) kiter wind-ups are in the air at once;
+//! * a **support** rallies when a player is within [`SUPPORT_TRIGGER`]
+//!   cells and at least [`RALLY_MIN_PACK`] other monsters stand in its
+//!   area (a spur over nobody is wasted);
+//! * a **healer**'s heal aimed at `nearest` goes to the most wounded
+//!   monster in range (under [`HEAL_BELOW`] of its HP, never a boss, one
+//!   healer per patient): a beam from the healer to it, telegraphed in the
+//!   heal look.
 
 use super::aim::{norm, Aimed, BODY};
 use super::area::Area;
@@ -17,11 +30,12 @@ use super::{HubEvent, HubInstance, HubPlayer, MapIdx, Outgoing};
 use crate::world::combat::rules::saving_throw;
 use crate::world::combat::skills::{Act, DamageFx, Effect, EffectDice, MobTarget, MonsterSkill, Payload, RallyFx, SkillBook};
 use crate::world::combat::{Condition, DamageType, Dice, Rng};
-use crate::world::horde::storage::{Rally, FLAG_BOSS, FLAG_FULL};
+use crate::world::horde::storage::{Rally, FLAG_BOSS, FLAG_FULL, FLAG_LOS};
+use crate::world::horde::tactics::Behaviour;
 use crate::world::horde::{Horde, LURE_BASE};
 use super::companion::Companions;
 use crate::world::map::WalkGrid;
-use crate::world::protocol::{hit, BossZone, HitEvent, ServerMsg, Telegraph, MONSTER_ENTITY_BASE};
+use crate::world::protocol::{hit, look, BossZone, HitEvent, ServerMsg, Telegraph, MONSTER_ENTITY_BASE};
 
 /// Skills a monster kind may carry.
 pub(super) const MAX_MOB_SKILLS: usize = 4;
@@ -30,6 +44,18 @@ const CHECK_SECS: f32 = 1.0;
 /// After a skill lands a monster casts none of its skills for this long
 /// (seconds): a kind with several skills chains them no faster than this.
 const SKILL_GCD_SECS: f32 = 4.0;
+/// A kiter's global skill cooldown: its shot is its attack.
+const KITER_GCD_SECS: f32 = 1.5;
+/// Kiter wind-ups in the air at once (+1 per extra player): the rest hold
+/// and look again a second later, so a pack of archers never paints the
+/// screen with lines.
+const MAX_VOLLEYS: usize = 3;
+/// A support rallies when a player is this close (cells) ...
+const SUPPORT_TRIGGER: f32 = 20.0;
+/// ... and this many other monsters stand in its rally.
+const RALLY_MIN_PACK: usize = 2;
+/// A healer's beam goes to monsters under this share of their HP.
+const HEAL_BELOW: f32 = 0.8;
 
 /// What one monster slot remembers about its skills.
 #[derive(Clone, Copy, Debug, Default)]
@@ -47,7 +73,7 @@ pub(super) struct Mind {
 /// A monster's wind-up.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct MobCast {
-    slot: u16,
+    pub(super) slot: u16,
     generation: u8,
     /// Index in [`SkillBook::monster`].
     skill: u16,
@@ -56,6 +82,8 @@ pub(super) struct MobCast {
     y: f32,
     dir: (f32, f32),
     zone: u32,
+    /// A heal beam's patient (slot, generation): one healer each.
+    ally: Option<(u16, u8)>,
 }
 
 /// A monster effect in flight or on the ground.
@@ -167,9 +195,51 @@ fn telegraphs(planned: &[(Area, &Act)], zone: u32) -> Vec<Telegraph> {
             } else {
                 0
             };
-            area.telegraph(tid, look_of(act), (span * 1000.0).round() as u32, 0)
+            area.telegraph(tid, telegraph_look(act), (span * 1000.0).round() as u32, 0)
         })
         .collect()
+}
+
+/// A monster act's telegraph look: a heal (a rally that heals) in the heal
+/// colour, so a healer's beam reads as one; else the act's own.
+fn telegraph_look(act: &Act) -> u8 {
+    match &act.payload {
+        Payload::Rally(r) if r.heal > 0.0 => look::HEAL,
+        _ => look_of(act),
+    }
+}
+
+/// A monster skill's rally, when it has one.
+fn rally_fx(sk: &MonsterSkill) -> Option<&RallyFx> {
+    sk.effects.iter().filter_map(Effect::act).find_map(|a| if let Payload::Rally(r) = &a.payload { Some(r) } else { None })
+}
+
+/// The most wounded monster a healer at `(x, y)` can beam within `range`
+/// (cells): under [`HEAL_BELOW`] of its HP, alive, above ground, no
+/// plant, no boss, not itself, and no other healer's patient already.
+/// `(slot, x, y)`.
+fn wounded_ally(horde: &Horde, healer: u16, x: f32, y: f32, range: f32, taken: &[MobCast]) -> Option<(u16, f32, f32)> {
+    let mut near = Vec::new();
+    horde.near_box(x - range, y - range, x + range, y + range, &mut near);
+    let st = horde.store();
+    let mut best: Option<(f32, u16)> = None;
+    for &m in &near {
+        let i = m as usize;
+        if m == healer || st.is_plant(m) || st.flags[i] & FLAG_BOSS != 0 || st.hp[i] <= 0 {
+            continue;
+        }
+        if (st.x[i] - x).powi(2) + (st.y[i] - y).powi(2) > range * range {
+            continue;
+        }
+        let frac = st.hp[i] as f32 / horde.block(m).hp.max(1) as f32;
+        if frac >= HEAL_BELOW || taken.iter().any(|c| c.ally == Some((m, st.generation[i]))) {
+            continue;
+        }
+        if best.is_none_or(|(f, b)| frac < f || (frac == f && m < b)) {
+            best = Some((frac, m));
+        }
+    }
+    best.map(|(_, m)| (m, st.x[m as usize], st.y[m as usize]))
 }
 
 /// What a monster skill needs of its caster once it lands (a corpse's
@@ -469,6 +539,9 @@ impl HubInstance {
         let now = self.tick;
         if self.kind_skills.len() != horde.catalog().defs().len() {
             self.kind_skills = kind_skills(horde, &book);
+            // Kiters keep their band inside their longest ranged shot.
+            let reach = self.kind_skills.iter().map(|v| v.iter().map(|&k| book.monster(k)).filter(|m| m.ranged).map(|m| m.range).fold(0.0, f32::max)).collect();
+            horde.set_reach(reach);
         }
         if self.minds.len() != horde.store().capacity() {
             self.minds = vec![Mind::default(); horde.store().capacity()];
@@ -528,6 +601,15 @@ impl HubInstance {
             .map(|p| (p.x, p.y))
             .collect();
         let check = ticks_of(CHECK_SECS, hz).max(1);
+        // Kiter wind-ups in the air (capped: MAX_VOLLEYS).
+        let volley_cap = MAX_VOLLEYS + ups.len().saturating_sub(1);
+        let mut volleys = {
+            let st = horde.store();
+            self.mob_casts
+                .iter()
+                .filter(|c| st.is_alive(c.slot) && st.generation[c.slot as usize] == c.generation && st.behaviour[c.slot as usize] == Behaviour::Kiter as u8)
+                .count()
+        };
         // Nobody to hunt: no new wind-ups (the cancels above still go out).
         let alive = if ups.is_empty() { 0 } else { horde.store().alive().len() };
         for a in 0..alive {
@@ -542,10 +624,18 @@ impl HubInstance {
             let mind = &mut self.minds[s];
             if mind.generation != store.generation[s] || !mind.fresh {
                 *mind = Mind { generation: store.generation[s], fresh: true, next_check: now + 1 + s as u32 % check, ..Mind::default() };
-                // Bosses open with their skills ready; the rest wait a cooldown.
+                // Bosses open with their skills ready; the rest wait a cooldown
+                // (kiters a random share of one: a pack does not loose in step).
+                let kiter = store.behaviour[s] == Behaviour::Kiter as u8;
                 for (j, &sk) in skills.iter().enumerate() {
                     let cd = ticks_of(book.monster(sk).cooldown, hz);
-                    mind.ready[j] = if store.flags[s] & crate::world::horde::storage::FLAG_BOSS != 0 { now } else { now + cd / 2 };
+                    mind.ready[j] = if store.flags[s] & FLAG_BOSS != 0 {
+                        now
+                    } else if kiter {
+                        now + cd * self.dice.die(100) / 100
+                    } else {
+                        now + cd / 2
+                    };
                 }
                 continue;
             }
@@ -569,6 +659,13 @@ impl HubInstance {
                     .map(|(d2, x, y)| (d2.sqrt(), x, y)),
             };
             let Some((dist, nx, ny)) = nearest else { continue };
+            let behaviour = Behaviour::from_u8(store.behaviour[s]);
+            let kiter = behaviour == Behaviour::Kiter;
+            let backline = matches!(behaviour, Behaviour::Support | Behaviour::Healer) && lure.is_none();
+            if kiter && volleys >= volley_cap {
+                continue; // the sky is full: it looks again in a second
+            }
+            let los = store.flags[s] & FLAG_LOS != 0;
             let mut chosen = None;
             for (j, &sk) in skills.iter().enumerate() {
                 let def = book.monster(sk);
@@ -577,8 +674,35 @@ impl HubInstance {
                 if def.on_death || (def.interrupt && store.staggered(slot)) {
                     continue;
                 }
-                if now < mind.ready[j] || hp_frac > def.hp_below || dist > def.range + BODY {
+                let rally = rally_fx(def).filter(|_| backline);
+                let reach = if rally.is_some() { SUPPORT_TRIGGER } else { def.range + BODY };
+                if now < mind.ready[j] || hp_frac > def.hp_below || dist > reach {
                     continue;
+                }
+                // A kiter shoots only what it sees.
+                if kiter && def.ranged && !los {
+                    continue;
+                }
+                // Backline rallies: a heal beam needs a patient, a spur a pack.
+                let mut patient = None;
+                if let Some(r) = rally {
+                    if r.heal > 0.0 && matches!(def.target, MobTarget::Nearest) {
+                        match wounded_ally(horde, slot, mx, my, def.range, &self.mob_casts) {
+                            Some(p) => patient = Some(p),
+                            None => continue,
+                        }
+                    } else {
+                        let planned = plan(def, walk, mx, my, (mx, my), (1.0, 0.0));
+                        let mut near = Vec::new();
+                        if let Some((area, _)) = planned.iter().find(|(_, a)| matches!(a.payload, Payload::Rally(_))) {
+                            area.monsters(horde, &mut near);
+                        }
+                        let st = horde.store();
+                        let pack = near.iter().filter(|&&m| m != slot && !st.is_plant(m) && st.flags[m as usize] & FLAG_BOSS == 0).count();
+                        if pack < RALLY_MIN_PACK {
+                            continue;
+                        }
+                    }
                 }
                 if def.chance < 100 && self.dice.die(100) > def.chance {
                     // A miss waits a cooldown's fraction so a crowd does
@@ -586,11 +710,12 @@ impl HubInstance {
                     mind.ready[j] = now + ticks_of(def.cooldown, hz) / 4;
                     continue;
                 }
-                chosen = Some((j, sk));
+                chosen = Some((j, sk, patient));
                 break;
             }
-            let Some((j, sk)) = chosen else { continue };
+            let Some((j, sk, patient)) = chosen else { continue };
             let def = book.monster(sk);
+            let (nx, ny) = patient.map_or((nx, ny), |p| (p.1, p.2));
             let dir = norm(nx - mx, ny - my).unwrap_or((1.0, 0.0));
             let aim = match def.target {
                 MobTarget::Caster | MobTarget::Front => (mx, my),
@@ -605,8 +730,12 @@ impl HubInstance {
                 }
             };
             let cast = ticks_of(def.cast, hz);
-            mind.ready[j] = now + ticks_of(def.cooldown, hz);
-            mind.busy_until = now + cast + 1 + ticks_of(SKILL_GCD_SECS, hz);
+            let cooldown = ticks_of(def.cooldown, hz);
+            mind.ready[j] = now + if kiter { cooldown * (85 + self.dice.die(31)) / 100 } else { cooldown };
+            mind.busy_until = now + cast + 1 + ticks_of(if kiter { KITER_GCD_SECS } else { SKILL_GCD_SECS }, hz);
+            if kiter {
+                volleys += 1;
+            }
             let zone = self.next_zone;
             let planned = plan(def, walk, mx, my, aim, dir);
             let lasting = planned.iter().filter(|(_, a)| a.timing.lasting(1)).count() as u32;
@@ -621,7 +750,8 @@ impl HubInstance {
                 areas: telegraphs(&planned, zone),
                 level: 1,
             });
-            self.mob_casts.push(MobCast { slot, generation: store.generation[s], skill: sk, land: now + cast, x: aim.0, y: aim.1, dir, zone });
+            let ally = patient.map(|p| (p.0, store.generation[p.0 as usize]));
+            self.mob_casts.push(MobCast { slot, generation: store.generation[s], skill: sk, land: now + cast, x: aim.0, y: aim.1, dir, zone, ally });
             // It stands still and holds its melee through the wind-up.
             let store = horde.store_mut();
             store.afflict(slot, Condition::Rooted, (cast + 1).min(u16::MAX as u32) as u16);
