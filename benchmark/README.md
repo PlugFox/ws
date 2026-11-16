@@ -32,6 +32,9 @@ build/cli/bundle/bin/bench --variant=d-tape --scenario=pingpong --size=14336 --c
 | `d-bytes` | Rust (tokio + tungstenite) | main | external typed data |
 | `d-tape` | Rust | Rust, simd-json into a tape | external tape → lazy views |
 | `d-cobject` | Rust | Rust, simd-json into a `Dart_CObject` tree | VM-rebuilt `List` tree → views |
+| `ws-dart` | `package:ws`, pure-Dart transport | main, fused UTF-8 + JSON | `Map` |
+| `ws-native` | `package:ws` + `ws_native` | Rust, simd-json into a tape | lazy `Map` views |
+| `wsc` | `package:web_socket_channel` (`IOWebSocketChannel`) | main, `jsonDecode(String)` | `Map` |
 
 `--consume=full` maps every message to typed models (`Order.fromJson`, all
 fields), as an app would. The default reads only `seq` and `ts`.
@@ -56,7 +59,34 @@ the Rust builder (`native/src/tape.rs`) produce the same layout.
 Payload sizes follow typical limits: Centrifugo rejects messages over 64 KB.
 The 1 MB cases are stress tests.
 
-Results: [RESULTS.md](RESULTS.md).
+Results: [RESULTS.md](RESULTS.md) (prototypes, the design study) and
+[COMPARISON.md](COMPARISON.md) (the library vs `web_socket_channel` on
+macOS, iPad, Android and Chrome; method in [METHODOLOGY.md](METHODOLOGY.md)).
+
+## Suites
+
+`bin/matrix.dart --suite=…`, the app's `--dart-define=SUITE=…` (comma
+separated) and `bin/web_bench.dart --suite=…` pick the case list from
+`lib/src/cases.dart`:
+
+| suite | what |
+|---|---|
+| `default` | the prototype matrix of `RESULTS.md` |
+| `mobile` | the prototype matrix for phones and tablets |
+| `compare` / `compare-web` | `ws` vs `web_socket_channel`: flood and stream, json and binary, wss |
+| `compare-model` / `compare-model-web` | the same with every JSON message mapped to typed models |
+| `grid` | ping-pong over wss: 6 sizes × 100/1 000/10 000 messages × json/binary |
+
+## Browsers
+
+`web/main.dart` runs a suite in a page; `bin/web_bench.dart` compiles it
+with dart2js and dart2wasm, serves it, starts the server and a headless
+Chrome, and collects the results:
+
+```bash
+dart run bin/web_bench.dart --suite=grid --repeat=3 --out=results/grid-web.jsonl
+dart run bin/report.dart "macOS=results/grid-macos.jsonl" "Chrome=results/grid-web.jsonl"
+```
 
 ## Mobile devices
 
@@ -90,6 +120,42 @@ Peak RSS is not meaningful here, because every case runs in one process.
 The build hook builds the Rust crate for Android with the NDK clang that
 Flutter passes to it. Release `print` output on iOS goes to os_log, not to
 the console, so read the results file from the app container.
+
+## Profiling on Android
+
+The app's manifest has `<profileable android:shell="true"/>`, so the
+system `simpleperf` can record the release build without root, and the app
+logs `BENCH_CASE <scenario>: <case> — <variant>` when a case starts.
+
+```sh
+# symbols for Dart AOT code; one case and variant keep the timing simple
+flutter build apk --release --target-platform android-arm64 \
+  --split-debug-info=/tmp/dartsyms --dart-define=SUITE=grid \
+  "--dart-define=FILTER=json 14KB ×10000" --dart-define=VARIANTS=ws-native --dart-define=REPEAT=1
+adb install -r build/app/outputs/flutter-apk/app-release.apk
+adb logcat -c && adb shell am start -n dev.wsbench.ws_bench_app/.MainActivity
+until adb logcat -d -s flutter | grep -q BENCH_CASE; do sleep 0.3; done; sleep 2
+# cpu-clock sees every core (cpu-cycles is not counted on all cores of a
+# big.LITTLE SoC); -g unwinds with DWARF
+adb shell simpleperf record --app dev.wsbench.ws_bench_app -e cpu-clock -f 4000 -g \
+  --duration 6 -o /data/local/tmp/perf.data
+adb pull /data/local/tmp/perf.data
+NDK_SP=$ANDROID_HOME/ndk/<version>/simpleperf
+mkdir -p syms && cp /tmp/dartsyms/app.android-arm64.symbols syms/
+python3 $NDK_SP/binary_cache_builder.py -i perf.data -lib syms
+$NDK_SP/bin/darwin/x86_64/simpleperf report -i perf.data --symfs binary_cache \
+  --sort comm,dso,symbol
+```
+
+Gradle strips the `.so` files it packages, and `ws_native` is built with
+`strip = true` and without a build id, so its frames show as
+`libws_native.so[+addr]`. Build once with `strip = false` in
+`native/rust/Cargo.toml`, take the unstripped library from
+`app/.dart_tool/hooks_runner/shared/ws_native/build/*/libws_native.so`,
+report with `--sort dso,vaddr_in_file` and look the addresses up in
+`llvm-nm -n -C` of that file (the addresses are virtual addresses, no
+offset). `simpleperf dump` gives the CPU of every sample, for which cluster
+a thread ran on.
 
 ## Library variants and Autobahn
 

@@ -2,10 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'clients.dart';
+import 'bench_client.dart';
 import 'model.dart';
 import 'probe.dart';
-import 'rusage.dart';
 import 'stats.dart';
 
 /// Parses `--key=value` / `--flag` arguments.
@@ -20,13 +19,54 @@ Map<String, String> parseBenchArgs(List<String> arguments) => {
 /// time, when the server runs embedded (mobile devices).
 int Function()? serverCpuMicros;
 
-int _cpuMicros() => ResourceUsage.now().cpuMicros - (serverCpuMicros?.call() ?? 0);
+late BenchPlatform _platform;
+
+int? _cpuMicros() => switch (_platform.cpuMicros) {
+      null => null,
+      final cpu => cpu() - (serverCpuMicros?.call() ?? 0),
+    };
+
+int _cpuDelta(int? cpu0, int? cpu1) => cpu0 == null || cpu1 == null ? 0 : cpu1 - cpu0;
+
+double? _rssMb() => switch (_platform.maxRssBytes) {
+      null => null,
+      final rss => rss() / (1 << 20),
+    };
+
+/// Wall clock with the resolution of `Stopwatch` (µs on the VM,
+/// `performance.now()` in browsers, where `DateTime.now()` has 1 ms).
+/// Re-anchored at the start of every case: over a long process (the
+/// mobile and browser runners) the system clock, which stamps the server's
+/// messages, drifts from the monotonic one by milliseconds.
+int _epochMicros = DateTime.now().microsecondsSinceEpoch;
+final Stopwatch _clock = Stopwatch()..start();
+
+void _anchorClock() {
+  _clock.reset();
+  _epochMicros = DateTime.now().microsecondsSinceEpoch;
+}
+
+int _nowMicros() => _epochMicros + _clock.elapsedMicroseconds;
+
+// `ByteData.get/setUint64` throw under dart2js; two 32-bit halves work
+// everywhere for values below 2^53.
+int _getU64(ByteData d, int offset) =>
+    d.getUint32(offset, Endian.little) + d.getUint32(offset + 4, Endian.little) * 0x100000000;
+
+ByteData _setU64(ByteData d, int offset, int value) => d
+  ..setUint32(offset, value % 0x100000000, Endian.little)
+  ..setUint32(offset + 4, value ~/ 0x100000000, Endian.little);
 
 /// Runs one benchmark case (see `bin/bench.dart` for the arguments).
-Future<Map<String, Object?>> runBenchCase(Map<String, String> args) async {
+Future<Map<String, Object?>> runBenchCase(
+  Map<String, String> args,
+  BenchPlatform platform,
+) async {
+  _platform = platform;
+  _anchorClock();
   _checksum = 0;
   final server0 = serverCpuMicros?.call();
-  final variant = Variant.parse(args['variant'] ?? 'a');
+  final variant = args['variant'] ?? 'ws-dart';
   final scenario = args['scenario'] ?? 'stream';
   final format = args['format'] ?? 'json';
   final size = int.parse(args['size'] ?? '1024');
@@ -40,7 +80,7 @@ Future<Map<String, Object?>> runBenchCase(Map<String, String> args) async {
   _consumeFull = args['consume'] == 'full';
 
   final result = <String, Object?>{
-    'variant': variant.id,
+    'variant': variant,
     'scenario': scenario,
     'format': format,
     'tls': tls,
@@ -56,7 +96,7 @@ Future<Map<String, Object?>> runBenchCase(Map<String, String> args) async {
         '$scheme://$host:$port/stream?format=$format&size=$size'
         '&rate=${flood ? 0 : rate}&count=$count&unicode=${unicode ? 1 : 0}',
       );
-      result.addAll(await _stream(variant, uri, count, probe: !flood));
+      result.addAll(await _stream(variant, uri, count, probe: !flood && platform.probe));
     case 'echo':
       final uri = Uri.parse('$scheme://$host:$port/echo');
       result.addAll(await _echo(variant, uri, format, size, rate, duration, unicode));
@@ -90,15 +130,10 @@ int _checksum = 0;
   return _header(message);
 }
 
-int _nowMicros() => DateTime.now().microsecondsSinceEpoch;
-
 /// Extracts (seq, ts) from a delivered message.
 (int, int) _header(Object message) => switch (message) {
       Map<String, Object?> m => (m['seq']! as int, m['ts']! as int),
-      Uint8List b => (
-          ByteData.sublistView(b).getUint64(0, Endian.little),
-          ByteData.sublistView(b).getUint64(8, Endian.little),
-        ),
+      Uint8List b => (_getU64(ByteData.sublistView(b), 0), _getU64(ByteData.sublistView(b), 8)),
       _ => throw StateError('Unexpected message ${message.runtimeType}'),
     };
 
@@ -109,7 +144,7 @@ int _messageBytes(Object message) => switch (message) {
     };
 
 Future<Map<String, Object?>> _stream(
-  Variant variant,
+  String variant,
   Uri uri,
   int expected, {
   required bool probe,
@@ -125,10 +160,10 @@ Future<Map<String, Object?>> _stream(
   final sw = Stopwatch();
 
   final cpu0 = _cpuMicros();
-  final client = await BenchClient.connect(
+  final client = await _platform.connect(
     variant,
-    format: uri.queryParameters['format'] ?? 'json',
     uri,
+    format: uri.queryParameters['format'] ?? 'json',
     onMessage: (message) {
       final (seq, ts) = _consume(message);
       latencies.add(_nowMicros() - ts);
@@ -146,11 +181,10 @@ Future<Map<String, Object?>> _stream(
   sw.stop();
   final busy = probe ? mainProbe.stop() : null;
   final cpu1 = _cpuMicros();
-  final usage1 = ResourceUsage.now();
 
   final wallUs = sw.elapsedMicroseconds;
   // Exclude the CPU burnt by the probe's spin loop.
-  final cpuUs = cpu1 - cpu0 - (busy?.spunMicros ?? 0);
+  final cpuUs = _cpuDelta(cpu0, cpu1) - (busy?.spunMicros ?? 0);
   final lat = Percentiles.of(latencies);
   return {
     'received': received,
@@ -161,9 +195,9 @@ Future<Map<String, Object?>> _stream(
     'wallMs': wallUs / 1000,
     'msgsPerSec': wallUs == 0 ? 0 : received * 1e6 / wallUs,
     'mbPerSec': wallUs == 0 ? 0 : received * messageBytes / wallUs,
-    'cpuUsPerMsg': received == 0 ? 0 : cpuUs / received,
-    'cpuCores': wallUs == 0 ? 0 : cpuUs / wallUs,
-    'rssMb': usage1.maxRssBytes / (1 << 20),
+    if (_platform.cpuMicros != null) 'cpuUsPerMsg': received == 0 ? 0 : cpuUs / received,
+    if (_platform.cpuMicros != null) 'cpuCores': wallUs == 0 ? 0 : cpuUs / wallUs,
+    'rssMb': _rssMb(),
     'latP50Us': lat.p50,
     'latP99Us': lat.p99,
     'latMaxUs': lat.max,
@@ -199,7 +233,7 @@ Map<String, Object?> _jsonPayload(int size, bool unicode) {
 }
 
 Future<Map<String, Object?>> _echo(
-  Variant variant,
+  String variant,
   Uri uri,
   String format,
   int size,
@@ -214,10 +248,10 @@ Future<Map<String, Object?>> _echo(
   final allReceived = Completer<void>();
 
   final cpu0 = _cpuMicros();
-  final client = await BenchClient.connect(
+  final client = await _platform.connect(
     variant,
-    format: format,
     uri,
+    format: format,
     onMessage: (message) {
       final (_, ts) = _consume(message);
       rtts.add(_nowMicros() - ts);
@@ -234,9 +268,7 @@ Future<Map<String, Object?>> _echo(
       final due = (sw.elapsedMicroseconds * rate ~/ 1000000 + 1).clamp(0, count);
       for (; sent < due; sent++) {
         if (format == 'binary') {
-          ByteData.sublistView(binary)
-            ..setUint64(0, sent, Endian.little)
-            ..setUint64(8, _nowMicros(), Endian.little);
+          _setU64(_setU64(ByteData.sublistView(binary), 0, sent), 8, _nowMicros());
           client.send(Uint8List.fromList(binary));
         } else {
           client.send({...template, 'seq': sent, 'ts': _nowMicros()});
@@ -249,17 +281,16 @@ Future<Map<String, Object?>> _echo(
   timer.cancel();
   final wallUs = sw.elapsedMicroseconds;
   final cpu1 = _cpuMicros();
-  final usage1 = ResourceUsage.now();
   await client.close();
 
   final rtt = Percentiles.of(rtts);
-  final cpuUs = cpu1 - cpu0;
+  final cpuUs = _cpuDelta(cpu0, cpu1);
   return {
     'received': rtts.length,
     'expected': count,
     'wallMs': wallUs / 1000,
-    'cpuUsPerMsg': rtts.isEmpty ? 0 : cpuUs / rtts.length,
-    'rssMb': usage1.maxRssBytes / (1 << 20),
+    if (_platform.cpuMicros != null) 'cpuUsPerMsg': rtts.isEmpty ? 0 : cpuUs / rtts.length,
+    'rssMb': _rssMb(),
     'rttP50Us': rtt.p50,
     'rttP99Us': rtt.p99,
     'rttMaxUs': rtt.max,
@@ -267,7 +298,7 @@ Future<Map<String, Object?>> _echo(
 }
 
 Future<Map<String, Object?>> _pingPong(
-  Variant variant,
+  String variant,
   Uri uri,
   String format,
   int size,
@@ -284,9 +315,7 @@ Future<Map<String, Object?>> _pingPong(
 
   void sendNext(int seq) {
     if (format == 'binary') {
-      ByteData.sublistView(binary)
-        ..setUint64(0, seq, Endian.little)
-        ..setUint64(8, _nowMicros(), Endian.little);
+      _setU64(_setU64(ByteData.sublistView(binary), 0, seq), 8, _nowMicros());
       client.send(Uint8List.fromList(binary));
     } else {
       client.send({...template, 'seq': seq, 'ts': _nowMicros()});
@@ -294,10 +323,10 @@ Future<Map<String, Object?>> _pingPong(
   }
 
   final cpu0 = _cpuMicros();
-  client = await BenchClient.connect(
+  client = await _platform.connect(
     variant,
-    format: format,
     uri,
+    format: format,
     onMessage: (message) {
       final (seq, ts) = _consume(message);
       rtts.add(_nowMicros() - ts);
@@ -310,15 +339,14 @@ Future<Map<String, Object?>> _pingPong(
   );
   final sw = Stopwatch()..start();
   sendNext(0);
-  await finished.future.timeout(const Duration(minutes: 2), onTimeout: () {});
+  await finished.future.timeout(const Duration(minutes: 5), onTimeout: () {});
   sw.stop();
   final cpu1 = _cpuMicros();
-  final usage1 = ResourceUsage.now();
   await client.close();
 
   final wallUs = sw.elapsedMicroseconds;
   final rtt = Percentiles.of(rtts);
-  final cpuUs = cpu1 - cpu0;
+  final cpuUs = _cpuDelta(cpu0, cpu1);
   return {
     'received': rtts.length,
     'expected': count,
@@ -326,8 +354,8 @@ Future<Map<String, Object?>> _pingPong(
     'wallMs': wallUs / 1000,
     'msgsPerSec': wallUs == 0 ? 0 : rtts.length * 1e6 / wallUs,
     'mbPerSec': wallUs == 0 ? 0 : rtts.length * messageBytes / wallUs,
-    'cpuUsPerMsg': rtts.isEmpty ? 0 : cpuUs / rtts.length,
-    'rssMb': usage1.maxRssBytes / (1 << 20),
+    if (_platform.cpuMicros != null) 'cpuUsPerMsg': rtts.isEmpty ? 0 : cpuUs / rtts.length,
+    'rssMb': _rssMb(),
     'rttP50Us': rtt.p50,
     'rttP99Us': rtt.p99,
     'rttMaxUs': rtt.max,

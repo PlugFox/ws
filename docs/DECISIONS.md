@@ -1854,3 +1854,52 @@ the feature freeze of the release.
   which the pack never had (PNG and WebP through `TextureLoader`).
 
 - Status: **adopted**.
+
+### D57. `ws` vs `web_socket_channel` on four platforms
+
+Benchmarked the library's typed modes (`WebSocketClient.json` /
+`.binary`) against `web_socket_channel` 3.0.3, the most used WebSocket
+package on pub.dev, over wss on macOS (M3 Max), an iPad Pro M2, a Galaxy
+S22 Ultra and Chrome 157 (dart2js, dart2wasm): flood, fixed-rate stream,
+and a ping-pong grid of 6 sizes × 100/1 000/10 000 messages in spinify's
+layout. Method: `benchmark/METHODOLOGY.md`; numbers:
+`benchmark/COMPARISON.md`. The harness's scenario code became
+platform-neutral (`BenchPlatform`) so the same code runs on the VM, in
+Flutter and in browsers.
+
+- `ws + ws_native` vs `web_socket_channel`, flood: 4–13× (macOS), 6–19×
+  (iPad), 6–32× (Android) the throughput; 4.5–10× with every JSON message
+  mapped to models. Main-isolate cost at a fixed rate is within the probe's
+  noise on macOS and iPad; 1.5–9 % of the main isolate on Android against
+  10–24 % for the Dart clients.
+- `ws` with the pure-Dart transport ≈ `web_socket_channel` (0–13 %
+  faster): both are bound by `dart:io`'s `SecureSocket`, which caps every
+  Dart client on Android at ~15 MB/s regardless of message size. This is
+  the strongest argument for `ws_native` on mobile.
+- Browsers: equal within ±4 % from 14 KB up, `ws` 6–24 % faster on 1 KB
+  messages (synchronous `onMessage` instead of a `Stream`). dart2wasm
+  decodes JSON slower than dart2js (209 vs 307 MB/s at 14 KB).
+- Harness pitfall: `WsNative.install()` switches the process-wide default
+  transport, so in the one-process mobile runner "`ws-dart`" ran on Rust
+  after the first native case. `ws-dart` now passes
+  `WebSocketTransports.platform` explicitly; the mobile runs were redone.
+  The same applies to apps that want both transports in one process.
+- Harness pitfall: anchoring the message clock once per process let the
+  system and monotonic clocks drift apart over 45 minutes (negative
+  latencies on the iPad); the clock is re-anchored per case.
+- Explained (profile, 2026-11-17): on Android, JSON ping-pong gains
+  nothing from `ws_native` (418 vs 392 round trips/s at 14 KB) because the
+  limit is encoding each 14 KB request on the Dart main isolate:
+  `JsonUtf8Encoder` takes ~450 µs per request on the A710 cores, 60 % of
+  the main thread, the same in all three clients. `ws_native`'s receive
+  path costs ~100 µs (simd-json + tape) in Rust and 3 µs on main. In the
+  JSON case the scheduler also kept the Rust threads on the A710 cluster
+  (binary: 67 % on the X2), which inflates their other work. Candidate
+  follow-up (API decision, open): encode off the main isolate, or accept
+  pre-encoded JSON in `WebSocketClient.json.push`. Profiling how-to in
+  `benchmark/README.md`.
+- Open: `ws_native` peaks at 31–295 MB RSS in flood (Dart clients 22–29 MB)
+  with read-ahead bounded at 8 MB; most likely external tapes awaiting
+  GC, unverified.
+
+- Status: **measured**; the RSS item and the encoding follow-up are open.

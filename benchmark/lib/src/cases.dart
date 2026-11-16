@@ -11,7 +11,7 @@ final class Case {
 
 // Sizes follow spinify's benchmark (1 / 14 / 30 / 60 KB; Centrifugo rejects
 // messages over 64 KB). 1 MB cases are stress tests beyond typical limits.
-const kb1 = 1024, kb14 = 14336, kb30 = 30720, kb60 = 61440, mb1 = 1048576;
+const kb1 = 1024, kb5 = 5120, kb10 = 10240, kb14 = 14336, kb30 = 30720, kb60 = 61440, mb1 = 1048576;
 
 List<Case> cases({required bool quick}) {
   final d = quick ? 1500 : 3000;
@@ -85,3 +85,80 @@ List<Case> mobileCases() {
 
 /// Variants measured on mobile devices.
 const mobileVariants = ['a', 'c', 'c-worker', 'c-worker-model', 'd-bytes', 'd-tape'];
+
+/// Variants of the library-vs-`web_socket_channel` comparison on the VM.
+const compareVariants = ['ws-dart', 'ws-native', 'wsc'];
+
+/// Variants of the comparison in browsers (no native transport there).
+const compareWebVariants = ['ws', 'wsc'];
+
+/// Library vs `web_socket_channel`, every case over wss, both formats.
+/// The same cases (counts, rates) run on desktop, mobile and in browsers so
+/// the numbers line up; sized so the slowest platform still runs >= 1 s.
+/// [web] drops the stream cases: the main-isolate probe needs `Timer.run`
+/// without the browsers' 4 ms clamp.
+List<Case> compareCases({bool web = false}) {
+  const d = 3000;
+  return [
+    Case('json 1KB', 'flood', ['--tls', '--size=$kb1', '--count=50000']),
+    Case('json 14KB', 'flood', ['--tls', '--size=$kb14', '--count=10000']),
+    Case('json 60KB', 'flood', ['--tls', '--size=$kb60', '--count=3000']),
+    Case('binary 1KB', 'flood', ['--tls', '--format=binary', '--size=$kb1', '--count=100000']),
+    Case('binary 60KB', 'flood', ['--tls', '--format=binary', '--size=$kb60', '--count=20000']),
+    if (!web) ...[
+      Case('json 1KB @2k/s', 'stream', ['--tls', '--size=$kb1', '--rate=2000', '--duration=$d']),
+      Case('json 14KB @500/s', 'stream', ['--tls', '--size=$kb14', '--rate=500', '--duration=$d']),
+      Case('binary 60KB @200/s', 'stream',
+          ['--tls', '--format=binary', '--size=$kb60', '--rate=200', '--duration=$d']),
+    ],
+  ];
+}
+
+/// JSON cases where every message is mapped to typed models
+/// (`Order.fromJson`, all fields), as an app would. `ws + ws_native` hands
+/// out lazy views over a tape, so reading only `seq` and `ts` (the default
+/// `compare` suite) skips most of the document; these cases make every
+/// variant touch every field.
+List<Case> compareModelCases({bool web = false}) {
+  const full = '--consume=full';
+  return [
+    Case('json 1KB → model', 'flood', ['--tls', '--size=$kb1', '--count=50000', full]),
+    Case('json 14KB → model', 'flood', ['--tls', '--size=$kb14', '--count=10000', full]),
+    Case('json 60KB → model', 'flood', ['--tls', '--size=$kb60', '--count=3000', full]),
+    if (!web)
+      Case('json 14KB @500/s → model', 'stream',
+          ['--tls', '--size=$kb14', '--rate=500', '--duration=3000', full]),
+    for (final size in [kb1, kb14, kb60])
+      Case('json ${sizeLabel(size)} ×10000 → model', 'pingpong',
+          ['--tls', '--size=$size', '--count=10000', full]),
+  ];
+}
+
+/// Message sizes and counts of the ping-pong grid. Sizes are the union of
+/// spinify's VM (1/14/30/60 KB) and browser (1/5/10/14 KB) tables.
+const gridSizes = [kb1, kb5, kb10, kb14, kb30, kb60];
+const gridCounts = [100, 1000, 10000];
+
+String sizeLabel(int size) => size >= mb1 ? '${size ~/ mb1}MB' : '${size ~/ kb1}KB';
+
+/// Sequential request/response over wss as in spinify's benchmark: the next
+/// message goes out only after the echo of the previous one arrived.
+List<Case> gridCases() => [
+      for (final format in ['json', 'binary'])
+        for (final size in gridSizes)
+          for (final count in gridCounts)
+            Case('$format ${sizeLabel(size)} ×$count', 'pingpong',
+                ['--tls', '--format=$format', '--size=$size', '--count=$count']),
+    ];
+
+/// Cases of a named suite: `default` (desktop prototypes), `mobile`,
+/// `compare`, `compare-web`, `compare-model`, `compare-model-web`, `grid`.
+List<Case> suiteCases(String suite, {bool quick = false}) => switch (suite) {
+      'mobile' => mobileCases(),
+      'compare' => compareCases(),
+      'compare-web' => compareCases(web: true),
+      'compare-model' => compareModelCases(),
+      'compare-model-web' => compareModelCases(web: true),
+      'grid' => gridCases(),
+      _ => cases(quick: quick),
+    };

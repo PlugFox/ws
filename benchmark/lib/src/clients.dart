@@ -4,11 +4,18 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
+import 'package:web_socket_channel/io.dart';
+import 'package:ws/transport.dart' show WebSocketTransport, WebSocketTransports;
+import 'package:ws_native/ws_native.dart';
+
+import 'bench_client.dart';
 import 'codec.dart';
-import 'model.dart';
 import 'library.dart';
+import 'model.dart';
 import 'native.dart';
+import 'rusage.dart';
 import 'tape.dart';
+import 'wsc.dart';
 
 /// Benchmarked client implementations.
 enum Variant {
@@ -59,7 +66,11 @@ enum Variant {
   wsDart('ws-dart', 'package:ws WebSocketClient, pure-Dart transport'),
 
   /// The library through its public API with `ws_native` installed.
-  wsNative('ws-native', 'package:ws WebSocketClient, ws_native transport');
+  wsNative('ws-native', 'package:ws WebSocketClient, ws_native transport'),
+
+  /// `package:web_socket_channel` (`IOWebSocketChannel`), JSON through
+  /// `jsonEncode` / `jsonDecode(String)`.
+  wsc('wsc', 'package:web_socket_channel');
 
   const Variant(this.id, this.description);
 
@@ -81,40 +92,55 @@ Uint8List encodeJsonBytes(Object? value) {
   return bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
 }
 
-/// A connected benchmark client. Messages are delivered on the main isolate
-/// as `Map<String, Object?>` (JSON text) or `Uint8List` (binary).
-abstract interface class BenchClient {
-  static Future<BenchClient> connect(
-    Variant variant,
-    Uri uri, {
-    required void Function(Object message) onMessage,
-    String format = 'json',
-  }) =>
-      switch (variant) {
-        Variant.wsDart => LibraryClient.connect(uri, onMessage, format, native: false),
-        Variant.wsNative => LibraryClient.connect(uri, onMessage, format, native: true),
-        Variant.a => _IoClient.connect(uri, onMessage),
-        Variant.c => _CodecClient.connect(uri, onMessage),
-        Variant.cTape => _CodecClient.connect(uri, onMessage, tape: true),
-        Variant.dBytes => NativeClient.connect(uri, NativeMode.bytes, onMessage),
-        Variant.dTape => NativeClient.connect(uri, NativeMode.tape, onMessage),
-        Variant.dCobject => NativeClient.connect(uri, NativeMode.cobject, onMessage),
-        Variant.b ||
-        Variant.cWorker ||
-        Variant.cWorkerRaw ||
-        Variant.cWorkerTape ||
-        Variant.cWorkerModel =>
-          _WorkerClient.connect(variant, uri, onMessage),
-      };
+/// Opens a client for [variant] on the Dart VM (CLI and Flutter).
+Future<BenchClient> connectVm(
+  String variant,
+  Uri uri, {
+  required void Function(Object message) onMessage,
+  required String format,
+}) =>
+    switch (Variant.parse(variant)) {
+      // Explicit: `WsNative.install()` makes the native transport the
+      // default for the rest of the process, and the mobile app runs every
+      // variant in one process.
+      Variant.wsDart =>
+        LibraryClient.connect(uri, onMessage, format, transport: WebSocketTransports.platform),
+      Variant.wsNative =>
+        LibraryClient.connect(uri, onMessage, format, transport: _nativeTransport()),
+      Variant.wsc => WscClient.connect(
+          IOWebSocketChannel.connect(uri, customClient: _insecureHttpClient()),
+          onMessage,
+        ),
+      Variant.a => _IoClient.connect(uri, onMessage),
+      Variant.c => _CodecClient.connect(uri, onMessage),
+      Variant.cTape => _CodecClient.connect(uri, onMessage, tape: true),
+      Variant.dBytes => NativeClient.connect(uri, NativeMode.bytes, onMessage),
+      Variant.dTape => NativeClient.connect(uri, NativeMode.tape, onMessage),
+      Variant.dCobject => NativeClient.connect(uri, NativeMode.cobject, onMessage),
+      final v &&
+          (Variant.b ||
+              Variant.cWorker ||
+              Variant.cWorkerRaw ||
+              Variant.cWorkerTape ||
+              Variant.cWorkerModel) =>
+        _WorkerClient.connect(v, uri, onMessage),
+    };
 
-  /// Sends a JSON map as a text message or a `Uint8List` as binary.
-  void send(Object message);
+/// The Dart VM: process CPU and peak RSS from `getrusage`.
+final BenchPlatform vmPlatform = BenchPlatform(
+  connect: connectVm,
+  cpuMicros: () => ResourceUsage.now().cpuMicros,
+  maxRssBytes: () => ResourceUsage.now().maxRssBytes,
+);
 
-  Future<void> get done;
+bool _nativeInstalled = false;
 
-  int? get closeCode;
-
-  Future<void> close();
+WebSocketTransport _nativeTransport() {
+  if (!_nativeInstalled) {
+    if (!WsNative.install()) throw StateError('ws_native is not available');
+    _nativeInstalled = true;
+  }
+  return WsNative.library!.transport();
 }
 
 HttpClient _insecureHttpClient() =>

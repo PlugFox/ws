@@ -5,6 +5,7 @@
 ///   dart run bin/matrix.dart [--bench=build/cli/bundle/bin/bench] [--server=../server/target/release/ws_bench_server]
 ///       [--variants=a,b,c,c-worker,c-worker-raw] [--filter=substring]
 ///       [--repeat=3] [--out=build/results.jsonl] [--quick]
+///       [--suite=default|compare|grid|mobile]
 ///   dart run bin/matrix.dart --from=results.jsonl [--mobile]
 ///
 /// `--from` only renders tables from earlier raw results (e.g. pulled from the
@@ -29,8 +30,13 @@ Future<void> main(List<String> arguments) async {
             a.contains('=') ? a.substring(a.indexOf('=') + 1) : 'true',
   };
   final bench = args['bench'] ?? 'build/cli/bundle/bin/bench';
+  final suite = args['suite'] ?? 'default';
   final variants = (args['variants'] ??
-          'a,b,c,c-worker,c-worker-raw,c-tape,c-worker-tape,c-worker-model,d-bytes,d-tape,d-cobject')
+          switch (suite) {
+            'compare' || 'compare-model' || 'grid' => compareVariants.join(','),
+            'mobile' => mobileVariants.join(','),
+            _ => 'a,b,c,c-worker,c-worker-raw,c-tape,c-worker-tape,c-worker-model,d-bytes,d-tape,d-cobject',
+          })
       .split(',');
   final filter = args['filter'];
   final repeat = int.parse(args['repeat'] ?? '1');
@@ -39,7 +45,7 @@ Future<void> main(List<String> arguments) async {
 
   if (args['from'] case final from?) {
     final mobile = args['mobile'] == 'true';
-    final selected = mobile ? mobileCases() : cases(quick: quick);
+    final selected = mobile ? mobileCases() : suiteCases(suite, quick: quick);
     final shown = args['variants'] == null && mobile ? mobileVariants : variants;
     final grouped = <String, Map<String, List<Map<String, Object?>>>>{};
     for (final line in File(from).readAsLinesSync()) {
@@ -64,7 +70,7 @@ Future<void> main(List<String> arguments) async {
     await _waitForPort(9090);
   }
 
-  final selected = cases(quick: quick)
+  final selected = suiteCases(suite, quick: quick)
       .where((c) => filter == null || '${c.scenario} ${c.name}'.contains(filter))
       .toList();
   final results = <String, Map<String, Map<String, Object?>>>{};
@@ -73,18 +79,23 @@ Future<void> main(List<String> arguments) async {
   try {
     for (final c in selected) {
       final key = '${c.scenario}: ${c.name}';
-      for (final v in variants) {
-        final runs = <Map<String, Object?>>[];
-        for (var i = 0; i < repeat; i++) {
+      // Variants interleave within each repeat so drift (thermal, other
+      // load) spreads evenly over them.
+      final runs = {for (final v in variants) v: <Map<String, Object?>>[]};
+      for (var i = 0; i < repeat; i++) {
+        for (final v in variants) {
           stderr.write('\r\x1B[K$key — $v (${i + 1}/$repeat)');
           final r = await _run(bench, ['--variant=$v', '--scenario=${c.scenario}', ...c.args]);
           if (r == null) continue;
           r['case'] = c.name;
+          r['run'] = i;
           sink.writeln(jsonEncode(r));
-          runs.add(r);
+          runs[v]!.add(r);
         }
-        if (runs.isEmpty) continue;
-        (results[key] ??= {})[v] = _median(runs, keyMetric(c.scenario));
+      }
+      for (final MapEntry(key: v, value: rs) in runs.entries) {
+        if (rs.isEmpty) continue;
+        (results[key] ??= {})[v] = _median(rs, keyMetric(c.scenario));
       }
     }
   } finally {

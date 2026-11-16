@@ -1,14 +1,15 @@
-/// Variants `ws-dart` and `ws-native`: the library itself through its
-/// public API, to check that it keeps the prototypes' numbers.
+/// Variants `ws-dart`, `ws-native` and `ws` (browser): the library itself
+/// through its public API. Platform-neutral: the caller passes the native
+/// transport, if any.
 library;
 
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:ws/transport.dart' show WebSocketTransport;
 import 'package:ws/ws.dart';
-import 'package:ws_native/ws_native.dart';
 
-import 'clients.dart';
+import 'bench_client.dart';
 
 final class LibraryClient implements BenchClient {
   LibraryClient._(this._send, this._close, this._state);
@@ -19,20 +20,13 @@ final class LibraryClient implements BenchClient {
   final Completer<void> _done = Completer<void>();
   int? _closeCode;
 
-  static bool _nativeInstalled = false;
-
   static Future<BenchClient> connect(
     Uri uri,
     void Function(Object message) onMessage,
     String format, {
-    required bool native,
+    WebSocketTransport? transport,
   }) async {
-    if (native && !_nativeInstalled) {
-      if (!WsNative.install()) throw StateError('ws_native is not available');
-      _nativeInstalled = true;
-    }
     const tls = WebSocketVmOptions(tls: WebSocketTls(allowInsecure: true));
-    final transport = native ? WsNative.library!.transport() : null;
     const reconnect = WebSocketReconnect.disabled();
     late final LibraryClient result;
     void onState(WebSocketState s) {

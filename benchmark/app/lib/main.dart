@@ -4,13 +4,15 @@
 // appends it to `<systemTemp>/results.jsonl`.
 //
 // Build in release mode: flutter run --release -d <device>
-// Options (--dart-define): REPEAT=3, FILTER=<substring>, VARIANTS=a,c,...
+// Options (--dart-define): SUITE=mobile|compare|grid, REPEAT=3,
+// FILTER=<substring>, VARIANTS=ws-dart,ws-native,wsc,...
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:ws_benchmark/ws_benchmark.dart';
 
+const _suite = String.fromEnvironment('SUITE', defaultValue: 'mobile');
 const _repeat = int.fromEnvironment('REPEAT', defaultValue: 3);
 const _filter = String.fromEnvironment('FILTER');
 const _variants = String.fromEnvironment('VARIANTS');
@@ -46,27 +48,34 @@ class _BenchAppState extends State<BenchApp> {
     }
     final out = File('${Directory.systemTemp.path}/results.jsonl');
     if (out.existsSync()) out.deleteSync();
-    final variants = _variants.isEmpty ? mobileVariants : _variants.split(',');
-    final selected = mobileCases()
+    final variants = _variants.isNotEmpty
+        ? _variants.split(',')
+        : _suite == 'mobile'
+            ? mobileVariants
+            : compareVariants;
+    final selected = _suite.split(',').expand(suiteCases)
         .where((c) => _filter.isEmpty || '${c.scenario} ${c.name}'.contains(_filter))
         .toList();
     final total = _repeat * selected.length * variants.length;
     var done = 0;
     var failed = 0;
     print('BENCH_START ${out.path} runs=$total');
-    // Repeat the whole matrix rather than each case so thermal throttling
-    // spreads evenly over the variants.
+    // Repeat the whole matrix rather than each case, and interleave the
+    // variants, so thermal throttling spreads evenly over them.
     for (var i = 0; i < _repeat; i++) {
       for (final c in selected) {
         for (final v in variants) {
           done++;
           _show('[$done/$total] ${c.scenario}: ${c.name} — $v');
+          print('BENCH_CASE ${c.scenario}: ${c.name} — $v');
           await Future<void>.delayed(const Duration(milliseconds: 300));
           try {
             final r = await runBenchCase(
               parseBenchArgs(['--variant=$v', '--scenario=${c.scenario}', ...c.args]),
+              vmPlatform,
             )
               ..['case'] = c.name
+              ..['run'] = i
               ..['device'] = Platform.operatingSystem;
             final line = jsonEncode(r);
             out.writeAsStringSync('$line\n', mode: FileMode.append, flush: true);

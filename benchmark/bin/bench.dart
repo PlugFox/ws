@@ -1,8 +1,8 @@
 /// Runs a single benchmark case and prints one JSON line with the results.
 ///
 /// Usage:
-///   bench --variant=a|b|c|c-worker|c-worker-raw
-///         --scenario=stream|flood|echo
+///   bench --variant=ws-dart|ws-native|wsc|a|b|c|c-worker|c-worker-raw|...
+///         --scenario=stream|flood|echo|pingpong
 ///         [--format=json|binary] [--size=1024] [--rate=1000]
 ///         [--duration=5000] [--count=N] [--tls] [--unicode]
 ///         [--consume=header|full]
@@ -24,7 +24,7 @@ import 'dart:io';
 import 'package:ws_benchmark/ws_benchmark.dart';
 
 Future<void> main(List<String> arguments) async {
-  final result = await runBenchCase(parseBenchArgs(arguments));
+  final result = await runBenchCase(parseBenchArgs(arguments), vmPlatform);
   stdout.writeln(jsonEncode(result));
   exit(0);
 }

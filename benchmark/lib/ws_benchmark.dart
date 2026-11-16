@@ -8,3 +8,6 @@ export 'src/tape.dart';
 export 'src/native.dart';
 export 'src/runner.dart';
 export 'src/cases.dart';
+export 'src/bench_client.dart';
+export 'src/library.dart';
+export 'src/wsc.dart';

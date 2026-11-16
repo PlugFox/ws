@@ -10,7 +10,8 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
-import 'clients.dart';
+import 'bench_client.dart';
+import 'clients.dart' show decodeJsonBytes, encodeJsonBytes;
 import 'runner.dart';
 import 'tape.dart';
 

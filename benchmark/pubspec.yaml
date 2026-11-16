@@ -9,6 +9,8 @@ dependencies:
   code_assets: ^2.1.0
   crypto: ^3.0.6
   hooks: ^2.2.0
+  web: ^1.1.2
+  web_socket_channel: ^3.0.3
   ws:
     path: ..
   ws_native:
