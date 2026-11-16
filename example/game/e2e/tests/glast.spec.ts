@@ -55,6 +55,9 @@ test('Glast Heim: the dead of the churchyard, the Witching Hour and the Dark Lor
     for (const m of (await probe(page)).mobs) kinds.add(m.kind);
   };
   await page.screenshot({ path: info.outputPath('glast.png') });
+  // The boss zones are meant to kill a level-30 priest who stands in
+  // them: this test is about the place, so the hero is made sturdy.
+  await say(page, '/sturdy');
   await say(page, '/event witching_hour');
   await say(page, '/spawn zombie_master');
   await say(page, '/spawn dark_lord');

@@ -1255,6 +1255,16 @@ impl HubInstance {
             }
             return;
         }
+        // Test hook (`GAME_DEV=1`): `/sturdy` gives the speaker's fighter a
+        // huge pool of HP for this run (e2e tests of a place's mechanics
+        // that a boss would otherwise cut short).
+        if self.config.missions_anywhere && text.trim() == "/sturdy" {
+            if let Some(f) = self.players[i].fighter.as_mut() {
+                f.max_hp = 1_000_000;
+                f.hp = f.max_hp;
+            }
+            return;
+        }
         // Test hook (`GAME_DEV=1`): `/event <map event id>` starts one of the
         // mission's map events now (a lava surge without waiting minutes).
         if self.config.missions_anywhere
