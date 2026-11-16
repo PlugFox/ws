@@ -8,7 +8,7 @@
 
 use super::items::{self, Bag, ItemError, Kind};
 
-/// One recipe: `needs` and `zeny` in, one `item` out.
+/// One recipe: `needs` and `zeny` in, `makes` of `item` out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Recipe {
     pub id: &'static str,
@@ -17,14 +17,22 @@ pub struct Recipe {
     pub needs: &'static [(&'static str, u32)],
     /// Pharmacy level it needs (0: a Hatter's recipe).
     pub level: u8,
+    /// How many one craft hands out (a Pharmacy's double brew doubles it).
+    pub makes: u32,
 }
 
 const fn r(item: &'static str, zeny: u32, needs: &'static [(&'static str, u32)]) -> Recipe {
-    Recipe { id: item, item, zeny, needs, level: 0 }
+    Recipe { id: item, item, zeny, needs, level: 0, makes: 1 }
 }
 
 const fn brew(item: &'static str, level: u8, zeny: u32, needs: &'static [(&'static str, u32)]) -> Recipe {
-    Recipe { id: item, item, zeny, needs, level }
+    Recipe { id: item, item, zeny, needs, level, makes: 1 }
+}
+
+/// [`brew`] that makes `makes` at once (Acid Demonstration's bottles: one
+/// pair goes with every cast).
+const fn batch(item: &'static str, level: u8, zeny: u32, makes: u32, needs: &'static [(&'static str, u32)]) -> Recipe {
+    Recipe { id: item, item, zeny, needs, level, makes }
 }
 
 /// The Pharmacy's recipes (an Alchemist's skill), by the level they need.
@@ -34,10 +42,10 @@ pub const PHARMACY: &[Recipe] = &[
     brew("red_potion", 1, 10, &[("red_herb", 2)]),
     brew("green_potion", 1, 5, &[("green_herb", 2)]),
     brew("yellow_potion", 2, 40, &[("yellow_herb", 2)]),
-    // Acid Demonstration's pair: the meadow's mushrooms and slimes, the
-    // forest's resin and Fabres' fluff.
-    brew("acid_bottle", 2, 50, &[("poison_spore", 2), ("sticky_mucus", 1)]),
-    brew("bottle_grenade", 2, 50, &[("resin", 1), ("fluff", 2)]),
+    // Acid Demonstration's pair, three a brew: spores, mucus, resin and
+    // fluff drop on every expedition (drops.toml, `# alchemy`).
+    batch("acid_bottle", 2, 50, 3, &[("poison_spore", 2), ("sticky_mucus", 1)]),
+    batch("bottle_grenade", 2, 50, 3, &[("resin", 1), ("fluff", 2)]),
     brew("white_potion", 3, 100, &[("white_herb", 2)]),
     brew("blue_potion", 3, 150, &[("blue_herb", 2)]),
     // The homunculus's evolution.
@@ -83,7 +91,8 @@ pub fn craft(bag: &mut Bag, recipe: &Recipe) -> Result<(), ItemError> {
     craft_n(bag, recipe, 1)
 }
 
-/// [`craft`] that hands out `count` of the item (a Pharmacy's double brew).
+/// [`craft`] run `count` times at once (a Pharmacy's double brew): one set
+/// of materials, `count` × [`Recipe::makes`] of the item.
 pub fn craft_n(bag: &mut Bag, recipe: &Recipe, count: u32) -> Result<(), ItemError> {
     let mut next = bag.clone();
     if next.zeny < recipe.zeny as u64 {
@@ -93,7 +102,7 @@ pub fn craft_n(bag: &mut Bag, recipe: &Recipe, count: u32) -> Result<(), ItemErr
         next.take(item, n)?;
     }
     next.zeny -= recipe.zeny as u64;
-    next.add(recipe.item, count.max(1))?;
+    next.add(recipe.item, count.max(1) * recipe.makes.max(1))?;
     *bag = next;
     Ok(())
 }
@@ -185,5 +194,20 @@ mod tests {
         craft(&mut bag, cap).unwrap();
         assert_eq!(bag.count("bandit_cap"), 1);
         assert!(bag.items.iter().all(|s| s.id == "bandit_cap"), "{:?}", bag.items);
+    }
+
+    #[test]
+    fn alchemy_bottles_brew_three_and_a_double_brew_six() {
+        let acid = find("acid_bottle").unwrap();
+        let mut bag = Bag { zeny: 500, ..Bag::default() };
+        for &(item, n) in acid.needs {
+            bag.add(item, n * 2).unwrap();
+        }
+        craft(&mut bag, acid).unwrap();
+        assert_eq!(bag.count("acid_bottle"), 3);
+        craft_n(&mut bag, acid, 2).unwrap();
+        assert_eq!(bag.count("acid_bottle"), 9, "a double brew takes one set of materials");
+        assert_eq!(find("bottle_grenade").unwrap().makes, 3);
+        assert!(HATTER.iter().all(|r| r.makes == 1), "a hat is one hat");
     }
 }

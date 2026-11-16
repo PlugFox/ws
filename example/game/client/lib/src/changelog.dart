@@ -6,7 +6,7 @@ typedef ChangelogEntry = ({String title, String date, List<String> items});
 
 const changelog = <ChangelogEntry>[
   (
-    title: 'Fixes: hats, live stats, Cart Boost, braziers and minimaps',
+    title: 'Fixes: hats, live stats, alchemy supplies, Cart Boost, braziers',
     date: '2026-11-16',
     items: [
       'Cart Boost is now the Merchant line\'s travel skill (Space on missions, from the first tier): dash behind your cart where you walk, then run faster for a few seconds.',
@@ -17,6 +17,8 @@ const changelog = <ChangelogEntry>[
       'A lit brazier in Payon Cave now burns in place with a small flare as it catches, instead of a fireball dropping onto it.',
       'Orc war horns and Glast Heim\'s Witching Hour fall silent once the poison fog stops the waves; a horn only warned of is called off.',
       'Warnings like "A column is coming from the west" no longer stay on screen after you leave the map.',
+      'Alchemy supplies drop on every expedition now: Poison Spores, Sticky Mucus, Resin and Fluff come from monsters of each place, and the Pharmacy brews Acid Bottles and Bottle Grenades three at a time.',
+      'Emperium drops far more often from bosses, and every mini-boss and boss can drop Light Granules: the Stone of Sage is in reach.',
       'Minimaps of Sograt Desert, the Geffen fields, the Prontera sewers and Izlude show the sea and rivers where they really are.',
     ],
   ),

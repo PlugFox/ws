@@ -345,8 +345,8 @@ pub const ITEMS: &[Item] = &[
     item("elunium", "Elunium", Kind::Etc, 5000, 0, Bonus::NONE, "A rare metal that refines armour from +8 to +10."),
     // Alchemy (the Pharmacy, quests.rs): Acid Demonstration throws a
     // bottle of each at full power; the Stone of Sage evolves a homunculus.
-    item("acid_bottle", "Acid Bottle", Kind::Etc, 120, 0, Bonus::NONE, "A corked flask of acid. Acid Demonstration hits at full power with one of these and a Bottle Grenade."),
-    item("bottle_grenade", "Bottle Grenade", Kind::Etc, 120, 0, Bonus::NONE, "A flask of oil with a rag for a fuse. Thrown by Acid Demonstration with an Acid Bottle."),
+    item("acid_bottle", "Acid Bottle", Kind::Etc, 120, 0, Bonus::NONE, "A corked flask of acid. Acid Demonstration hits at full power with one of these and a Bottle Grenade. The Pharmacy brews three from Poison Spores and Sticky Mucus."),
+    item("bottle_grenade", "Bottle Grenade", Kind::Etc, 120, 0, Bonus::NONE, "A flask of oil with a rag for a fuse. Thrown by Acid Demonstration with an Acid Bottle. The Pharmacy brews three from Resin and Fluff."),
     item("stone_of_sage", "Stone of Sage", Kind::Etc, 12000, 0, Bonus::NONE, "A philosopher's stone of the alchemists' guild. A bonded homunculus evolves with it."),
 ];
 
