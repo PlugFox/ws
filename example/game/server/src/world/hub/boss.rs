@@ -48,6 +48,15 @@ const BREAK_STUN_SECS: f32 = 2.5;
 /// Wind-ups shrink to this share once enraged; beats hit this much harder.
 const ENRAGE_HASTE: f32 = 0.85;
 const ENRAGE_DAMAGE: f32 = 1.5;
+/// A telegraphed zone's damage on players is its dice times this: a red
+/// circle is a mechanic to step out of, never damage to stand in, soak and
+/// out-heal. Shared blows (`Hurt::split`, stack up on purpose) and
+/// companions (they cannot read a telegraph) take the plain dice.
+pub(super) const ZONE_DAMAGE: f32 = 2.5;
+/// A damaging ability's wind-up never shrinks (phase haste, enrage) below
+/// this, or below its own base wind-up when that is shorter: the harder
+/// zones stay dodgeable.
+const MIN_ZONE_WIND_SECS: f32 = 0.8;
 /// An elite with nobody within its leash this long leaves the fight.
 const DISENGAGE_SECS: f32 = 10.0;
 /// First ability after the fight starts.
@@ -902,7 +911,9 @@ impl Bosses {
         let (mx, my) = (cx.horde.store().x[s], cx.horde.store().y[s]);
         let phase = &f.script.phases[f.phase as usize];
         let pace = phase.haste * if f.enraged { ENRAGE_HASTE } else { 1.0 };
-        let wind = cx.ticks(a.wind * pace);
+        let hurts = a.hurt.dice.0 > 0 || a.hurt.rider.is_some();
+        let floor = if hurts { a.wind.min(MIN_ZONE_WIND_SECS) } else { 0.0 };
+        let wind = cx.ticks((a.wind * pace).max(floor));
         let gap = cx.ticks(phase.gap);
         let cast = self.next_serial();
 
@@ -1370,7 +1381,7 @@ fn strike(b: &Beat, players: &mut [HubPlayer], lives: &[Live], walk: &WalkGrid, 
         safe: &b.safe[..b.n_safe as usize],
         level: b.level,
         dc: b.dc,
-        boost: b.boost,
+        boost: b.boost * if b.hurt.split == 0 { ZONE_DAMAGE } else { 1.0 },
         evil: b.evil,
         from: b.from,
     };

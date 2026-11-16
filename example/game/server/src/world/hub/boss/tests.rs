@@ -585,6 +585,11 @@ fn enrage_follows_time() {
     assert!(fight(&stage).enraged());
     assert!(msgs.iter().any(|m| matches!(m, ServerMsg::BossShout { text, .. } if text.starts_with("Too slow"))));
     assert!(msgs.iter().any(|m| matches!(m, ServerMsg::BossBar(b) if b.flags & 1 != 0)), "the bar shows it");
+    // Enraged wind-ups shrink, but a damaging one never under 0.8 s (its
+    // Bounding Run winds up 0.9 s: × 0.85 would be 0.77 s).
+    let msgs = run(&mut stage, 400);
+    let winds: Vec<u32> = msgs.iter().filter_map(|m| if let ServerMsg::BossCast { cast_ms, .. } = m { Some(*cast_ms) } else { None }).collect();
+    assert!(winds.len() >= 3 && winds.iter().all(|&w| w >= 800), "wind-ups stay dodgeable: {winds:?}");
 }
 
 #[test]
@@ -741,4 +746,48 @@ fn a_split_blow_shares_one_roll_and_caps_a_lone_victim() {
         let a: Vec<u32> = [101, 102].iter().map(|id| hits.iter().filter(|h| h.target == *id).map(|h| h.amount).sum()).collect();
         assert!(a[0] > 0 && a[0] == a[1], "one roll shared: {a:?}");
     }
+}
+
+#[test]
+fn boss_zones_hit_two_and_a_half_times_their_dice_but_shares_stay_plain() {
+    let mut stage = arena(11);
+    stand(&mut stage, 30.0, 20.0);
+    let map = stage.players[0].map;
+    let walk = open(60, 40);
+    // 4d1: always 4 before the multiplier.
+    let hurt = Hurt { save: false, ..scripts::hurt(4, 1, DamageType::Force) };
+    let beat = |hurt: Hurt, boost: f32| Beat {
+        fight: 1,
+        cast: 1,
+        map,
+        next: 0,
+        until: 0,
+        pulse: 0,
+        zone: circle(30.0, 20.0, 3.0),
+        zone_id: 0,
+        safe: [(0.0, 0.0, 0.0); MAX_SAFE],
+        n_safe: 0,
+        hurt,
+        level: 0,
+        dc: 10,
+        boost,
+        evil: false,
+        from: (30.0, 20.0),
+        follow: 0,
+        follow_mob: None,
+        pull: 0.0,
+        live: 0,
+    };
+    let taken = |stage: &mut HubInstance, b: Beat| -> u32 {
+        let mut hits = Vec::new();
+        strike(&b, &mut stage.players, &stage.lives, &walk, &mut stage.dice, 20.0, &mut hits);
+        hits.iter().filter(|h| h.target == 101).map(|h| h.amount).sum()
+    };
+    assert_eq!(taken(&mut stage, beat(hurt, 1.0)), 10, "4 × 2.5");
+    assert_eq!(taken(&mut stage, beat(hurt, ENRAGE_DAMAGE)), 15, "enraged: × 1.5 on top");
+    // A shared blow (stack up on purpose) keeps its plain roll.
+    assert_eq!(taken(&mut stage, beat(Hurt { split: 4, ..hurt }, 1.0)), 4);
+    // The event strikes and the plain blow (`land`) are untouched.
+    let (_, _, hits) = blow_on(&mut stage, circle(30.0, 20.0, 3.0), hurt, 30.0, 20.0);
+    assert_eq!(hits.iter().filter(|h| h.target == 101).map(|h| h.amount).sum::<u32>(), 4);
 }
