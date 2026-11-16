@@ -54,12 +54,15 @@ Things the task list does not show:
      workflow publishes the release and `ws`, then `ws_native` and
      `ws_flutter` (approve those two jobs as well).
 
-  One-time setup before the first tag:
-  - Publish `ws_native` and `ws_flutter` once by hand. OIDC cannot create
-    a package. Use `release:notices` and `native:stage <dir> <version>
-    --release <notices>` on libraries from `ci:prebuilt`, and
-    `tool/stage_flutter.sh <dir> <version>`; or download the `ws_native`
-    and `ws_flutter` artifacts of a dry run of `release.yml`.
+  One-time setup for the first release of `ws_native` and `ws_flutter`:
+  OIDC cannot create a package, and the staged packages depend on
+  `ws: ^<version>` from pub.dev, so they cannot be published before `ws`.
+  On the first tag approve only the `publish` job (GitHub release, then
+  `ws`), leave `publish-native` and `publish-flutter` unapproved, and
+  publish the staged packages of the same run by hand:
+  `gh run download <run-id> -n ws_native -n ws_flutter`, then
+  `dart pub publish` in `ws_native` and `flutter pub publish` in
+  `ws_flutter`. Then enable automated publishing for them (below).
   - On pub.dev, for the three packages: Admin → Automated publishing → GitHub
     Actions, repository `PlugFox/ws`, tag pattern `{{version}}`, require
     environment `pub.dev`.
