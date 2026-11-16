@@ -214,4 +214,24 @@ fn the_toy_mission_has_its_shift_crates_and_switches_on_walkable_ground() {
     }
     let belts = crate::world::environment::load_hazards(&dist.join("server/locations/xmas_dun02")).unwrap();
     assert!(belts.iter().filter(|h| h.id.starts_with(BELT_PREFIX) && h.drifts()).count() >= 15, "the baked lanes");
+    // Nothing on a lane stops a rider: the bake opens the cells under the
+    // boxes and toys RO set down on the belts (`belts.cargo`) and leaves
+    // them out of the props. Along each lane's centre line the walkable
+    // cells run unbroken; only a lane's end may sit in a wall (a block
+    // castle it runs into).
+    for b in belts.iter().filter(|h| h.id.starts_with(BELT_PREFIX) && h.drifts()) {
+        let HazardShape::Rect { x, y, w, h } = b.shape else { continue };
+        let along_x = w > h;
+        let len = if along_x { w } else { h };
+        let cells: Vec<bool> = (0..len.floor() as i32)
+            .map(|i| {
+                let t = i as f32 + 0.5 - len / 2.0;
+                if along_x { map.walk.is_walkable(x + t, y) } else { map.walk.is_walkable(x, y + t) }
+            })
+            .collect();
+        let first = cells.iter().position(|&c| c).unwrap_or(0);
+        let last = cells.iter().rposition(|&c| c).unwrap_or(0);
+        assert!(cells[first..=last].iter().all(|&c| c), "{}: a blocked cell mid-lane: {cells:?}", b.id);
+        assert!(last + 1 - first >= cells.len() * 3 / 4, "{}: the lane runs clear for most of its length", b.id);
+    }
 }
