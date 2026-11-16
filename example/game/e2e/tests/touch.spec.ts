@@ -102,9 +102,14 @@ test('touch: joystick, skill buttons, auto-cast and the page swipe', async ({ pa
   }
   await t.press(s1.x, s1.y, 900);
   await expect.poll(auto).toBe(true);
+  // Kept by the character (the server's loadout), shown on the hotbar too.
   await expect(page.locator('.u-hk.auto')).toHaveCount(1);
-  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('game.settings') ?? '{}').autoCast);
-  expect(saved).toBe(1);
+  // The AI button turns it all off and on.
+  await page.locator('.ge-touch .hudb button.ai').tap();
+  await expect(page.locator('.ge-touch .hudb button.ai')).toHaveClass(/\boff\b/);
+  await expect.poll(auto).toBe(false);
+  await page.locator('.ge-touch .hudb button.ai').tap();
+  await expect.poll(auto).toBe(true);
 
   // Swipe along the arc ring: the second page (Fire Bolt in slot 6).
   const pivot = await center(page, '.ge-touch .tb.big');

@@ -18,7 +18,6 @@ import 'package:game_client/src/engine.dart';
 import 'package:game_client/src/env_events.dart';
 import 'package:game_client/src/feedback.dart';
 import 'package:game_client/src/guide.dart';
-import 'package:game_client/src/input.dart';
 import 'package:game_client/src/input_devices.dart';
 import 'package:game_client/src/interpolation.dart';
 import 'package:game_client/src/key_bindings.dart';
@@ -440,25 +439,29 @@ final class HubSession {
     ..onSettings = _toggleMenu
     ..onInteract = _interactNearest
     ..onPlayerMenu = _nearestPlayerMenu
-    ..onAutoToggle = _toggleAutoCast;
-  int _autoCast = 0;
+    ..onAutoToggle = _toggleSlotAuto
+    ..onAiToggle = _toggleAi;
+
+  /// The AI casts the auto skills (Settings, the button left of the hotbar,
+  /// the AI key); the skills themselves are the loadout's (server).
+  bool _aiOn = true;
   int _stopSends = 0;
 
   /// Settings → Manual aiming: the mouse picks the monster and places
   /// ground skills (a gamepad or touch keeps automatic targeting).
   bool _manualAim = false;
 
-  /// `CAST_PREFS` as last sent on this connection (`(manual, auto)`).
-  (bool, int)? _sentCastPrefs;
+  /// `CAST_PREFS` as last sent on this connection (`(manual, ai)`).
+  (bool, bool)? _sentCastPrefs;
 
   /// Sends `CAST_PREFS` when it changed: manual aiming counts only while
   /// the aim comes from the mouse.
   void _syncCastPrefs() {
     final input = _input.state;
-    final prefs = (_manualAim && !input.hasAim && !_input.touchOn, _autoCast);
+    final prefs = (_manualAim && !input.hasAim && !_input.touchOn, _aiOn);
     if (prefs == _sentCastPrefs) return;
     _sentCastPrefs = prefs;
-    _ws.push(ClientMsg.castPrefs(manualAim: prefs.$1, auto: prefs.$2)).ignore();
+    _ws.push(ClientMsg.castPrefs(manualAim: prefs.$1, ai: prefs.$2)).ignore();
   }
 
   /// `USE_PREFS` as last sent on this connection (`(hp, sp)` percent).
@@ -849,8 +852,17 @@ final class HubSession {
         _onCombat(c);
       case final Skills s:
         _skills = s;
+        _migrateAutoCast(s);
         _renderSkills();
         _syncCart();
+      case final Storage s:
+        view.setStorage(
+          jsonEncode({
+            'zeny': s.zeny,
+            'cap': s.cap,
+            'items': [for (final i in s.items) [i.id, i.count]],
+          }),
+        );
       case final Cast c:
         _onCast(c);
       case ZoneEnd(:final id):
@@ -2315,6 +2327,18 @@ final class HubSession {
       e.preventDefault();
       view.toggleWindow('items');
     }
+    if (b.ai?.matches(e) ?? false) {
+      e.preventDefault();
+      _toggleAi();
+    }
+    if (b.storage?.matches(e) ?? false) {
+      e.preventDefault();
+      if (_inStage) {
+        view.toast('The storage is reached from town.');
+      } else {
+        view.toggleWindow('storage');
+      }
+    }
     if ((b.sit?.matches(e) ?? false) && !_inStage && _myState == 0) {
       final me = _me;
       if (me != null) _send(ClientMsg.pose(sitting: !_sitting.contains(me)));
@@ -3686,7 +3710,34 @@ final class HubSession {
       case 'skill_town':
         _useTownSkill('${e['skill'] ?? ''}');
       case 'skill_auto':
-        _toggleAutoCast((e['slot']! as num).toInt());
+        final skill = e['skill'];
+        if (skill is String) {
+          _toggleSkillAuto(skill);
+        } else if (e['slot'] case final num slot) {
+          _toggleSlotAuto(slot.toInt());
+        }
+      case 'skill_auto_order':
+        _send(ClientMsg.skillAuto([for (final s in e['skills']! as List) '$s']));
+      case 'skill_chain':
+        _send(ClientMsg.skillChain((e['slot']! as num).toInt(), [for (final s in e['skills']! as List) '$s']));
+      case 'ai_toggle':
+        _toggleAi();
+      case 'storage_open':
+        if (_inStage) {
+          view.toast('The storage is reached from town.');
+        } else {
+          _send(ClientMsg.storageOpen());
+        }
+      case 'storage_move':
+        _send(
+          ClientMsg.storageMove(
+            take: e['take'] == true,
+            items: [
+              for (final i in (e['items'] as List?) ?? const []) (id: '${(i as List)[0]}', count: (i[1] as num).toInt()),
+            ],
+            zeny: (e['zeny'] as num?)?.toInt() ?? 0,
+          ),
+        );
       case 'open_settings':
         _toggleSettings();
       case 'open_menu':
@@ -3875,6 +3926,10 @@ final class HubSession {
         'points': s.points,
         'levels': s.levels,
         'hotbar': s.hotbar,
+        'chains': s.chains,
+        'auto': s.auto,
+        'ai': _aiOn,
+        'aiKey': _binds.ai?.caption ?? '',
         'level': s.level,
         'cls': _myArchetype,
         'keys': _binds.slotCaptions,
@@ -4019,7 +4074,7 @@ final class HubSession {
     // Gamepad / touch presses, and auto-cast slots every tick (the server
     // ignores what it cannot honour: cooldown, SP, no target). The mount
     // slot is no cast ([_mountPress]).
-    return (bits | _input.state.slots | autoCastSlots(_autoCast, _skills?.hotbar ?? const [])) & ~_mountMask();
+    return (bits | _input.state.slots) & ~_mountMask();
   }
 
   /// Hotbar slots whose keys are held (bit i = slot i), in town too.
@@ -4109,13 +4164,53 @@ final class HubSession {
     _predictor?.pace = _statusPace * (_riding ? 1 + _rideSpeed / 100 : 1);
   }
 
-  void _toggleAutoCast(int slot) {
-    final skill = _skills?.hotbar.elementAtOrNull(slot) ?? '';
-    if (skill.isEmpty) return;
-    _autoCast ^= 1 << slot;
-    view.setAutoCast(_autoCast);
-    _applySetting('autoCast', _autoCast);
-    view.toast('Auto-cast ${_autoCast & (1 << slot) != 0 ? 'on' : 'off'}: slot ${slot + 1}');
+  /// The AI on / off (button, key, gamepad): auto skills stop or go on;
+  /// auto-use potions are their own setting.
+  void _toggleAi() {
+    _aiOn = !_aiOn;
+    _applySetting('aiOn', _aiOn);
+    _syncCastPrefs();
+    view.setAi(_aiOn);
+    final n = _skills?.auto.length ?? 0;
+    view.toast(_aiOn ? 'AI on${n == 0 ? ': mark skills Auto in the skill tree (K)' : ': $n auto skill${n == 1 ? '' : 's'}'}' : 'AI off: only what you press');
+  }
+
+  /// The auto list with [skill] toggled (the skill tree's Auto badge).
+  void _toggleSkillAuto(String skill) {
+    final auto = [...?_skills?.auto];
+    final on = !auto.remove(skill);
+    if (on) auto.add(skill);
+    _send(ClientMsg.skillAuto(auto));
+    view.toast('Auto-cast ${on ? 'on' : 'off'}: ${view.skillName(skill)}');
+  }
+
+  /// A slot's skills all on auto, or all off when they all were (long
+  /// press on a touch button, LB + RT + a slot button).
+  void _toggleSlotAuto(int slot) {
+    final chain = _skills?.chains.elementAtOrNull(slot) ?? const <String>[];
+    if (chain.isEmpty) return;
+    final auto = [...?_skills?.auto];
+    final on = !chain.every(auto.contains);
+    for (final s in chain) {
+      auto.remove(s);
+      if (on) auto.add(s);
+    }
+    _send(ClientMsg.skillAuto(auto));
+    view.toast('Auto-cast ${on ? 'on' : 'off'}: slot ${slot + 1}');
+  }
+
+  /// Auto-cast used to be per hotbar slot, kept in the settings: its slots'
+  /// skills become the character's auto skills once (when it has none).
+  void _migrateAutoCast(Skills s) {
+    final mask = (_settings['autoCast'] as num?)?.toInt() ?? 0;
+    if (mask == 0) return;
+    _applySetting('autoCast', 0);
+    if (s.auto.isNotEmpty) return;
+    final auto = <String>[
+      for (var i = 0; i < s.chains.length; i++)
+        if (mask & (1 << i) != 0) ...s.chains[i],
+    ];
+    if (auto.isNotEmpty) _send(ClientMsg.skillAuto(auto));
   }
 
   /// Pointer on the ground relative to the player, in 1/8 m (0,0 = none).
@@ -4223,13 +4318,13 @@ final class HubSession {
     view.configure(jsonEncode(_settings));
     _frameCap = (_settings['frameCap'] as num?)?.toInt() ?? 0;
     _clock.bias = ((_settings['interpBiasMs'] as num?) ?? 0) / 1000;
-    _autoCast = (_settings['autoCast'] as num?)?.toInt() ?? 0;
+    _aiOn = _settings['aiOn'] != false;
     _manualAim = _settings['manualAim'] == true;
     _clickMove = _settings['clickMove'] != false;
     _tapMove = _settings['tapMove'] == true;
     _binds = Bindings(_settings);
     view
-      ..setAutoCast(_autoCast)
+      ..setAi(_aiOn)
       ..setTouchControls((_settings['touchControls'] as num?)?.toInt() ?? -1);
   }
 
@@ -4375,7 +4470,9 @@ final class HubSession {
             'title': 'Skills',
             'items': [
               '${b.slotCaptions.where((c) => c.isNotEmpty).join(' ')}: hotbar slots (aim with the pointer)',
-              'K: skill tree · right click a slot: auto-cast',
+              'K: skill tree (the A badge: auto-cast) · ${k(b.ai, '`')}: the AI on / off',
+              'Chains: drop skills on a slot\'s + in the tree; each press casts the next ready one, hold to rotate',
+              '${k(b.storage, 'Alt+B')}: the account storage (in town)',
               '${k(b.potion, 'R')} / ${k(b.potion2, 'T')}: drink a healing / SP potion (Auto-use potions in the settings drinks them for you)',
             ],
           },
@@ -4735,6 +4832,8 @@ final class HubSession {
       key('bind.leaderboard', 'Ranking', 'Opens the leaderboard of the top adventurers.'),
       key('bind.info', 'Fold Basic Info', 'Folds the status window (name, HP, SP) to a thin strip.'),
       key('bind.debug', 'Debug overlay', 'Steps through the debug overlay modes.'),
+      key('bind.ai', 'AI on / off', 'Turns auto-cast of the skills marked Auto in the skill tree on or off.'),
+      key('bind.storage', 'Storage window', 'In town: opens the account storage shared by your characters.'),
       {'id': 'h.slots', 'label': 'Hotbar', 'type': 'heading'},
       for (var i = 0; i < Bindings.count; i++)
         key('bind.slot.$i', 'Slot ${i + 1}', 'Uses the skill in hotbar slot ${i + 1} (aimed at the pointer).'),
@@ -4816,7 +4915,7 @@ final class HubSession {
     // rooted): a one-off walk ends, a held button walks on after it. Auto-
     // cast slots and the travel key (it goes where the hero walks) do not.
     if (_walker.active) {
-      final cast = slots & ~(autoCastSlots(_autoCast, _skills?.hotbar ?? const []) | 1 << travelSlot);
+      final cast = slots & ~(1 << travelSlot);
       if (dx != 0 || dy != 0 || _myState != 0) {
         _cancelWalk();
       } else if (cast != 0) {

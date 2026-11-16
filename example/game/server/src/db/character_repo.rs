@@ -33,13 +33,15 @@ pub struct CharacterRecord {
     pub zeny: i64,
     /// The Merchant line's homunculus (`hub::HomSave`); `None` = never chosen.
     pub homunculus: Option<Json<crate::world::hub::HomSave>>,
+    /// The row's revision (`migrations/0005_storage.sql`): writers fence on it.
+    pub rev: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 /// Columns of [`CharacterRecord`].
 const COLUMNS: &str = "id, user_id, name, archetype, level, base_exp, stats, unlocked_skills, inventory, last_location_id, \
-     gender, hair_style, hair_color, body_color, weapon, loadout, equipment, zeny, homunculus, created_at, updated_at";
+     gender, hair_style, hair_color, body_color, weapon, loadout, equipment, zeny, homunculus, rev, created_at, updated_at";
 
 impl CharacterRecord {
     /// Stored appearance; out-of-range values (hand-edited rows) fall back
@@ -139,7 +141,7 @@ impl CharacterRepo {
 
     /// Replaces a character's belongings.
     pub async fn set_bag(pool: &Db, character_id: u32, bag: &Bag) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE characters SET inventory = $1, equipment = $2, zeny = $3, weapon = $4, updated_at = now() WHERE id = $5")
+        sqlx::query("UPDATE characters SET inventory = $1, equipment = $2, zeny = $3, weapon = $4, rev = rev + 1, updated_at = now() WHERE id = $5")
             .bind(Json(&bag.items))
             .bind(Json(&bag.equip))
             .bind(bag.zeny as i64)
@@ -154,30 +156,29 @@ impl CharacterRepo {
     /// transaction, so either both rows change or neither does. The rows
     /// are locked lower id first, so two trades sharing a character can
     /// never deadlock in the database either (`session::trade` already
-    /// serializes them on the characters' locks).
-    pub async fn store_trade(pool: &Db, a: (u32, &Bag), b: (u32, &Bag)) -> Result<(), sqlx::Error> {
-        let mut sides = [a, b];
-        sides.sort_by_key(|(id, _)| *id);
+    /// serializes them on the characters' locks). Each side is
+    /// `(id, rev, bag)`: a row whose revision moved on (another session
+    /// wrote it) fails the whole trade with [`sqlx::Error::RowNotFound`].
+    /// The new revisions, in the order given.
+    pub async fn store_trade(pool: &Db, a: (u32, i64, &Bag), b: (u32, i64, &Bag)) -> Result<[i64; 2], sqlx::Error> {
+        let mut sides = [(0usize, a), (1usize, b)];
+        sides.sort_by_key(|(_, (id, _, _))| *id);
         let mut tx = pool.begin().await?;
-        let ids = [i64::from(sides[0].0), i64::from(sides[1].0)];
-        let locked: Vec<i64> = sqlx::query_scalar("SELECT id FROM characters WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+        let ids = [i64::from(sides[0].1 .0), i64::from(sides[1].1 .0)];
+        let locked: Vec<(i64, i64)> = sqlx::query_as("SELECT id, rev FROM characters WHERE id = ANY($1) ORDER BY id FOR UPDATE")
             .bind(&ids[..])
             .fetch_all(&mut *tx)
             .await?;
-        if locked.len() != 2 {
+        if locked.len() != 2 || locked.iter().zip(&sides).any(|((id, rev), (_, (want, mem, _)))| *id != i64::from(*want) || rev != mem) {
             return Err(sqlx::Error::RowNotFound);
         }
-        for (id, bag) in sides {
-            sqlx::query("UPDATE characters SET inventory = $1, equipment = $2, zeny = $3, weapon = $4, updated_at = now() WHERE id = $5")
-                .bind(Json(&bag.items))
-                .bind(Json(&bag.equip))
-                .bind(bag.zeny as i64)
-                .bind(bag.weapon())
-                .bind(i64::from(id))
-                .execute(&mut *tx)
-                .await?;
+        let mut revs = [0; 2];
+        for (at, (id, rev, bag)) in sides {
+            write_bag(&mut tx, id, bag).await?;
+            revs[at] = rev + 1;
         }
-        tx.commit().await
+        tx.commit().await?;
+        Ok(revs)
     }
 
     /// Writes a session's changed character (`session::flusher`).
@@ -193,12 +194,14 @@ impl CharacterRepo {
         loadout: &Loadout,
         bag: &Bag,
         homunculus: Option<&crate::world::hub::HomSave>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+        rev: i64,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        sqlx::query_scalar(
             "UPDATE characters SET level = $1, base_exp = $2, stats = $3, unlocked_skills = $4, inventory = $5, \
                  last_location_id = $6, gender = $7, hair_style = $8, hair_color = $9, body_color = $10, \
-                 loadout = $11, equipment = $12, zeny = $13, weapon = $14, homunculus = $15, updated_at = now() \
-             WHERE id = $16",
+                 loadout = $11, equipment = $12, zeny = $13, weapon = $14, homunculus = $15, updated_at = now(), \
+                 rev = rev + 1 \
+             WHERE id = $16 AND rev = $17 RETURNING rev",
         )
         .bind(level.min(i32::MAX as u32) as i32)
         .bind(base_exp.min(i64::MAX as u64) as i64)
@@ -216,8 +219,22 @@ impl CharacterRepo {
         .bind(bag.weapon())
         .bind(homunculus.map(Json))
         .bind(i64::from(character_id))
-        .execute(pool)
+        .bind(rev)
+        .fetch_optional(pool)
+        .await
+    }
+}
+
+/// A character's belongings columns inside a transaction (the row is
+/// locked by the caller), moving its revision on.
+pub(crate) async fn write_bag(tx: &mut sqlx::PgConnection, id: u32, bag: &Bag) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE characters SET inventory = $1, equipment = $2, zeny = $3, weapon = $4, rev = rev + 1, updated_at = now() WHERE id = $5")
+        .bind(Json(&bag.items))
+        .bind(Json(&bag.equip))
+        .bind(bag.zeny as i64)
+        .bind(bag.weapon())
+        .bind(i64::from(id))
+        .execute(tx)
         .await
         .map(|_| ())
-    }
 }

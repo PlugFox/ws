@@ -54,7 +54,7 @@ fn open_rows() -> Vec<String> {
 
 fn merchant(t: HomType, hom_level: u8) -> PlayerProfile {
     let mut loadout = Loadout::default();
-    loadout.hotbar.resize(combat::skills::SLOTS, String::new());
+    loadout.hotbar.resize(combat::skills::SLOTS, Default::default());
     loadout.skills.insert(CALL_SKILL.into(), 1);
     loadout.skills.insert("nova".into(), 1);
     loadout.hotbar[0] = "nova".into();
@@ -806,7 +806,7 @@ fn mend_stage() -> HubInstance {
     m.loadout.hotbar[0] = "potion_pitcher".into();
     stage.join(m, Uuid::nil(), None, 0, &mut out);
     let mut loadout = Loadout::default();
-    loadout.hotbar.resize(combat::skills::SLOTS, String::new());
+    loadout.hotbar.resize(combat::skills::SLOTS, Default::default());
     for (i, id) in ["heal", "mend"].into_iter().enumerate() {
         loadout.skills.insert(id.into(), 10);
         loadout.hotbar[i] = id.into();
@@ -883,14 +883,14 @@ fn potion_pitcher_throws_at_the_most_wounded_homunculus() {
 fn auto_pitch_on_a_homunculus_waits_for_the_potion_threshold() {
     let mut stage = mend_stage();
     let i = stage.find(1).unwrap();
-    stage.players[i].prefs.auto = 1;
+    stage.auto_slots(1, 1);
     stage.players[i].uses.hp = 50;
     let hom_max = hom(&stage).max_hp;
     hom_mut(&mut stage).hp = hom_max * 7 / 10;
-    // The client holds an auto-cast slot down by itself.
-    assert!(used_items(&press(&mut stage, 1, 1)).is_empty(), "70 % is above the 50 % threshold");
+    assert!(used_items(&press(&mut stage, 1, 0)).is_empty(), "70 % is above the 50 % threshold");
     hom_mut(&mut stage).hp = hom_max * 3 / 10;
-    assert_eq!(used_items(&press(&mut stage, 1, 1)), vec!["red_potion".to_string()]);
+    // The AI throws by itself (again once its pace allows, while still low).
+    assert_eq!(used_items(&press(&mut stage, 1, 0)).first().map(String::as_str), Some("red_potion"));
 }
 
 #[test]

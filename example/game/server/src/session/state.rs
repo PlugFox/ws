@@ -28,6 +28,12 @@ pub struct CharacterState {
     pub record: Record,
     /// The Merchant line's homunculus (`characters.homunculus`).
     pub homunculus: Option<crate::world::hub::HomSave>,
+    /// The stored row's revision this memory stands on (`characters.rev`):
+    /// every write fences on it and moves it on.
+    pub rev: i64,
+    /// A write found the row moved on (another session stored it): this
+    /// memory is stale and is never written again.
+    pub fenced: bool,
 
     pub is_dirty: bool,
     pub last_modified: Instant,
@@ -63,6 +69,8 @@ impl CharacterState {
             loadout: Loadout::default(),
             record: Record::default(),
             homunculus: None,
+            rev: 0,
+            fenced: false,
             is_dirty: false,
             last_modified: Instant::now(),
         }

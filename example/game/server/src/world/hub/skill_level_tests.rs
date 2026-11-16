@@ -290,10 +290,10 @@ fn mystical_amplification_empowers_the_next_spell_once() {
         .with_skills(Arc::new(book));
     stage.dice = combat::Rng::new(5);
     let mut loadout = Loadout::default();
-    loadout.hotbar.resize(combat::skills::SLOTS, String::new());
+    loadout.hotbar.resize(combat::skills::SLOTS, Default::default());
     for (i, (id, lvl)) in [("amp", 10u8), ("bolt", 1)].iter().enumerate() {
         loadout.skills.insert(id.to_string(), *lvl);
-        loadout.hotbar[i] = id.to_string();
+        loadout.hotbar[i] = id.to_string().into();
     }
     stage.join(PlayerProfile { archetype: "mage".into(), level: 30, loadout, ..profile(1) }, Uuid::nil(), None, 0, &mut Vec::new());
     (stage.players[0].x, stage.players[0].y) = (30.0, 20.0);

@@ -271,7 +271,7 @@ pub async fn register(
     // Register active session in registry (enforcing single active session)
     let (active_session, _) = ActiveSession::new(session_id, user_id, ip_str, country);
     if let Some(old) = state.session_registry.register_or_displace(active_session) {
-        let _ = StateFlusher::flush_session(&state.pool, &old).await;
+        StateFlusher::retire(&state.pool, &old).await;
         let _ = SessionRepo::revoke_session(&state.pool, &old.session_id, "session_displaced").await;
     }
 
@@ -372,7 +372,7 @@ pub async fn login(
 
     let (active_session, _) = ActiveSession::new(session_id, user_id, ip_str, country);
     if let Some(old) = state.session_registry.register_or_displace(active_session) {
-        let _ = StateFlusher::flush_session(&state.pool, &old).await;
+        StateFlusher::retire(&state.pool, &old).await;
     }
 
     let response = AuthResponse {
@@ -499,7 +499,7 @@ pub async fn refresh(
         let user_id = session_record.user_id as u32;
         if let Some(active) = state.session_registry.remove_if_match(user_id, &session_id) {
             active.displace("Refresh token reuse detected; session revoked for security");
-            let _ = StateFlusher::flush_session(&state.pool, &active).await;
+            StateFlusher::retire(&state.pool, &active).await;
         }
 
         return Err((
@@ -531,7 +531,8 @@ pub async fn logout(
     let _ = SessionRepo::revoke_session(&state.pool, &auth.session_id, "sign_out").await;
 
     if let Some(active) = state.session_registry.remove_if_match(auth.user_id, &auth.session_id) {
-        let _ = StateFlusher::flush_session(&state.pool, &active).await;
+        active.displace("Signed out");
+        StateFlusher::retire(&state.pool, &active).await;
     }
 
     Ok((StatusCode::OK, Json(json!({ "status": "ok" }))).into_response())

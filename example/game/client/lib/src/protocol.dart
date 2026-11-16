@@ -173,6 +173,11 @@ abstract final class Kind {
   static const missionStart = 0x63;
   static const castPrefs = 0x85;
   static const usePrefs = 0xA7;
+  static const skillChain = 0xAE;
+  static const skillAuto = 0xAF;
+  static const storageOpen = 0xAB;
+  static const storageMove = 0xAC;
+  static const storage = 0xAD;
   static const companionCmd = 0xA8;
   static const questReq = 0x98;
   static const partiesReq = 0x9A;
@@ -365,15 +370,50 @@ abstract final class ClientMsg {
   static Uint8List lobbyStart() => _bare(Kind.lobbyStart);
 
   /// How the player casts (server `CastPrefs`): [manualAim] lets the
-  /// pointer pick the monster and place ground skills; [auto] are the
-  /// auto-cast slots (bit i = slot i), which only fire at a target that
-  /// needs them. The connection keeps it: send on connect and on change.
-  static Uint8List castPrefs({required bool manualAim, required int auto}) =>
-      (WireWriter(Kind.castPrefs)
-            ..u8(manualAim ? 1 : 0)
-            ..u8(auto & 0xFF)
-            ..u8((auto >> 8) & 0xFF))
-          .done();
+  /// pointer pick the monster and place ground skills; [ai] lets the
+  /// server cast the loadout's auto skills at targets that need them. The
+  /// connection keeps it: send on connect and on change.
+  static Uint8List castPrefs({required bool manualAim, required bool ai}) =>
+      (WireWriter(Kind.castPrefs)..u8((manualAim ? 1 : 0) | (ai ? 2 : 0))).done();
+
+  /// A hotbar slot's whole chain ([] clears it, one skill = a plain slot,
+  /// at most 5: each press casts the next ready one).
+  static Uint8List skillChain(int slot, List<String> skills) {
+    final w = WireWriter(Kind.skillChain)
+      ..u8(slot)
+      ..varint(skills.length);
+    for (final s in skills) {
+      w.str(s);
+    }
+    return w.done();
+  }
+
+  /// The auto-cast skills, in order.
+  static Uint8List skillAuto(List<String> skills) {
+    final w = WireWriter(Kind.skillAuto)..varint(skills.length);
+    for (final s in skills) {
+      w.str(s);
+    }
+    return w.done();
+  }
+
+  /// Show the account storage (in town; answered by [Storage]).
+  static Uint8List storageOpen() => _bare(Kind.storageOpen);
+
+  /// Move stacks ([items]: instance keys and counts) and [zeny] from the
+  /// bag to the account storage ([take] false) or back, all or nothing.
+  static Uint8List storageMove({required bool take, List<({String id, int count})> items = const [], int zeny = 0}) {
+    final w = WireWriter(Kind.storageMove)
+      ..u8(take ? 1 : 0)
+      ..varint(items.length);
+    for (final i in items) {
+      w
+        ..str(i.id)
+        ..varint(i.count);
+    }
+    w.varint(zeny);
+    return w.done();
+  }
 
   /// Auto-use of consumables (server `UsePrefs`): on a mission the server
   /// drinks the best HP / SP one once HP / SP falls below [hp] / [sp]
@@ -1161,9 +1201,16 @@ sealed class ServerMsg {
         r.list((r) => Hit._(r.varint(), r.varint(), r.u8())),
       ),
       Kind.progress => Progress(r.varint(), r.varint(), r.varint(), r.varint()),
-      Kind.skills => Skills(r.varint(), r.varint(), {
-        for (final (id, lvl) in r.list((r) => (r.str(), r.u8()))) id: lvl,
-      }, r.list((r) => r.str())),
+      Kind.skills => Skills(
+        r.varint(),
+        r.varint(),
+        {for (final (id, lvl) in r.list((r) => (r.str(), r.u8()))) id: lvl},
+        r.list((r) => r.list((r) => r.str())),
+        r.list((r) => r.str()),
+      ),
+      Kind.storage => Storage(r.varint(), r.varint(), [
+        for (final (id, n) in r.list((r) => (r.str(), r.varint()))) (id: id, count: n),
+      ]),
       Kind.cast => Cast(r.varint(), r.str(), r.pos(), r.pos(), r.varint(), r.varint(), r.list(Telegraph._read), r.u8()),
       Kind.zoneEnd => ZoneEnd(r.varint()),
       Kind.skillStrikes => SkillStrikes(
@@ -1529,15 +1576,30 @@ final class Progress extends ServerMsg {
 
 /// The local character's learned skills, unspent points and hotbar.
 final class Skills extends ServerMsg {
-  const Skills(this.level, this.points, this.levels, this.hotbar);
+  const Skills(this.level, this.points, this.levels, this.chains, [this.auto = const []]);
 
   /// Character level (gates of the tree).
   final int level;
   final int points;
   final Map<String, int> levels;
 
-  /// Skill id per slot; '' = free.
-  final List<String> hotbar;
+  /// Skill ids per slot, in chain order ([] = free, one = a plain slot).
+  final List<List<String>> chains;
+
+  /// The auto-cast skills, in the player's order.
+  final List<String> auto;
+
+  /// The first skill per slot ('' = free).
+  List<String> get hotbar => [for (final c in chains) c.isEmpty ? '' : c.first];
+}
+
+/// The account storage (every character of the account shares it):
+/// zeny, capacity in stacks, the stacks (instance keys).
+final class Storage extends ServerMsg {
+  const Storage(this.zeny, this.cap, this.items);
+  final int zeny;
+  final int cap;
+  final List<({String id, int count})> items;
 }
 
 /// A player starts a skill aimed at [x], [y] (cells): wind-up [castMs], then

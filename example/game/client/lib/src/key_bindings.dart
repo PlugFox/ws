@@ -49,6 +49,8 @@ final class KeyBinding {
         ? 'Num${code.substring(6)}'
         : code == 'Space'
         ? '␣'
+        : code == 'Backquote'
+        ? '`'
         : code.replaceFirst('Arrow', '');
     return '${ctrl ? 'Ctrl+' : ''}${alt ? 'Alt+' : ''}${shift ? '⇧' : ''}$key';
   }
@@ -77,6 +79,8 @@ final class Bindings {
     friends = KeyBinding.parse(get('bind.friends'));
     leaderboard = KeyBinding.parse(get('bind.leaderboard'));
     debug = KeyBinding.parse(get('bind.debug'));
+    ai = KeyBinding.parse(get('bind.ai'));
+    storage = KeyBinding.parse(get('bind.storage'));
   }
 
   /// Ten of each: hotbar slots, emote keys and flag kinds.
@@ -111,6 +115,9 @@ final class Bindings {
     // L for ladder: the Social window's Ranking tab.
     'bind.leaderboard': 'Alt+KeyL',
     'bind.debug': 'F1',
+    // Left of 1, like the AI button left of the hotbar.
+    'bind.ai': 'Backquote',
+    'bind.storage': 'Alt+KeyB',
   };
 
   final slots = List<KeyBinding?>.filled(count, null);
@@ -140,6 +147,12 @@ final class Bindings {
   /// The leaderboard (Social window, Ranking tab).
   KeyBinding? leaderboard;
   KeyBinding? debug;
+
+  /// The AI (auto-cast) on / off.
+  KeyBinding? ai;
+
+  /// The account storage window (town).
+  KeyBinding? storage;
 
   List<String> get slotCaptions => [for (final b in slots) b?.caption ?? ''];
 

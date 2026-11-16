@@ -47,10 +47,10 @@ fn stage(skills: &[(&str, u8)]) -> HubInstance {
     let mut stage = HubInstance::stage(1, "m1", world, HubSimConfig::default()).with_horde(horde).with_skills(Arc::new(book));
     stage.dice = combat::Rng::new(7);
     let mut loadout = Loadout::default();
-    loadout.hotbar.resize(combat::skills::SLOTS, String::new());
+    loadout.hotbar.resize(combat::skills::SLOTS, Default::default());
     for (i, (id, lvl)) in skills.iter().enumerate() {
         loadout.skills.insert(id.to_string(), *lvl);
-        loadout.hotbar[i] = id.to_string();
+        loadout.hotbar[i] = id.to_string().into();
     }
     let mut out = Vec::new();
     stage.join(PlayerProfile { archetype: "archer".into(), level: 20, loadout, ..profile(1) }, Uuid::nil(), None, 0, &mut out);
@@ -134,11 +134,10 @@ fn arrow_change_nocks_the_arrows_its_level_opens_in_turn() {
 #[test]
 fn arrow_change_is_never_auto_cast() {
     let mut stage = stage(&[("arrow_change", 5)]);
-    let i = stage.find(1).unwrap();
-    stage.players[i].prefs.auto = 1;
+    stage.auto_slots(1, 1);
     let hz = stage.tick_hz();
-    run(&mut stage, hz, 1);
-    assert_eq!(fighter(&stage).arrow, DamageType::Physical, "an auto slot would only spin the quiver");
+    run(&mut stage, hz, 0);
+    assert_eq!(fighter(&stage).arrow, DamageType::Physical, "the AI would only spin the quiver");
 }
 
 #[test]

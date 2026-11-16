@@ -73,15 +73,6 @@ abstract final class Nav {
 /// Wire aim of an offset in cells (0.5 m: 4 aim units per cell).
 (int, int) cellsToAim(double x, double y) => ((x * 4).round().clamp(-127, 127), (y * 4).round().clamp(-127, 127));
 
-/// Auto-cast slots that hold a skill (bit i = slot i).
-int autoCastSlots(int mask, List<String> hotbar) {
-  var bits = 0;
-  for (var i = 0; i < hotbar.length && i < 16; i++) {
-    if (mask & (1 << i) != 0 && hotbar[i].isNotEmpty) bits |= 1 << i;
-  }
-  return bits;
-}
-
 /// What a gamepad asked for in one poll.
 final class PadFrame {
   /// Left stick after the dead zone, screen space (x right, y up).
@@ -98,8 +89,11 @@ final class PadFrame {
   /// RT held: stand still (keep attacking while aiming).
   bool hold = false;
 
-  /// LB + RT + a slot button: slots whose auto-cast toggles now.
+  /// LB + RT + a slot button: slots whose skills' auto-cast toggles now.
   int autoToggles = 0;
+
+  /// The left stick clicked (outside a menu): the AI on / off.
+  bool ai = false;
 
   /// Navigation actions ([Nav]) this poll: D-pad (left stick in a menu)
   /// with key repeat, and A / B while a menu has the controller.
@@ -118,7 +112,7 @@ final class PadFrame {
   void _clear() {
     moveX = moveY = aimX = aimY = 0;
     slots = autoToggles = 0;
-    hold = confirm = people = tree = settings = false;
+    hold = confirm = people = tree = settings = ai = false;
     nav.clear();
   }
 }
@@ -196,7 +190,8 @@ final class PadMapper {
         ..aimX = rx
         ..aimY = ry
         ..confirm = edge(Pad.a)
-        ..people = edge(Pad.y);
+        ..people = edge(Pad.y)
+        ..ai = edge(Pad.leftStick);
       final lb = down(Pad.lb), rt = down(Pad.rt);
       if (lb && rt) {
         f.people = false;

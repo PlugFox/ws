@@ -88,6 +88,6 @@ export async function slot(page: Page, name: string, slot: number): Promise<void
 
 /** Cooldown sweep of the hotbar slot holding `name` (0 = ready, percent covered). */
 export async function cooldown(page: Page, name: string): Promise<number> {
-  const p = await hotkey(page, name).locator('.cd').evaluate((el) => (el as HTMLElement).style.getPropertyValue('--p'));
+  const p = await hotkey(page, name).locator(':scope > .cd').evaluate((el) => (el as HTMLElement).style.getPropertyValue('--p'));
   return parseFloat(p) || 0;
 }

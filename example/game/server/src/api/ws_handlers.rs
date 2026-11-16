@@ -4,7 +4,9 @@ use crate::session::registry::TownSpot;
 use crate::world::stage::Resumable;
 use crate::world::combat::items::{ItemError, Slot};
 use crate::world::combat::{Bag, Class, Loadout};
-use crate::world::protocol::{CastPrefs, ItemDef, UsePrefs};
+use crate::world::protocol::{CastPrefs, ItemDef, StorageDir, UsePrefs};
+use crate::world::combat::vault::Dir;
+use crate::db::StorageFail;
 use crate::world::trade::{ShopOrder, MAX_ORDER_COUNT};
 use crate::world::map::LocationKind;
 use crate::world::protocol::ClientDecodeError;
@@ -114,7 +116,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
             // Register or replace active session
             let (new_active, rx) = ActiveSession::new(session_id, user_id, None, None);
             if let Some(old) = state.session_registry.register_or_displace(new_active.clone()) {
-                let _ = StateFlusher::flush_session(&state.pool, &old).await;
+                StateFlusher::retire(&state.pool, &old).await;
             }
             (new_active, rx)
         }
@@ -138,6 +140,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: u32, session
         superseded: false,
         cast_prefs: CastPrefs::default(),
         use_prefs: UsePrefs::default(),
+        storage_at: None,
     };
     let mut conn = guarded(conn);
 
@@ -328,6 +331,9 @@ struct Conn {
     cast_prefs: CastPrefs,
     /// Auto-use thresholds (`USE_PREFS`), handed over with every input.
     use_prefs: UsePrefs,
+    /// The last account storage move (a small rate limit: each is a
+    /// database transaction).
+    storage_at: Option<Instant>,
 }
 
 /// A remembered town spot is used by a reconnect within this long.
@@ -352,7 +358,14 @@ impl Conn {
         }
         self.drop_link().await;
         self.state.friends.gone(user_id, self.conn_id).await;
-        let _ = StateFlusher::flush_session(&self.state.pool, &self.session).await;
+        // A session no longer registered (displaced, signed out) is
+        // retired; a registered one stays live for a reconnect.
+        let current = self.state.session_registry.get(user_id).is_some_and(|r| Arc::ptr_eq(&r, &self.session));
+        if current {
+            let _ = StateFlusher::flush_session(&self.state.pool, &self.session).await;
+        } else {
+            StateFlusher::retire(&self.state.pool, &self.session).await;
+        }
     }
 
     fn user_id(&self) -> u32 {
@@ -889,6 +902,10 @@ impl Conn {
             }
             ClientMsg::SkillLearn { skill } => self.change_loadout(SkillChange::Learn(skill)).await,
             ClientMsg::SkillSlot { slot, skill } => self.change_loadout(SkillChange::Slot(slot, skill)).await,
+            ClientMsg::SkillChain { slot, skills } => self.change_loadout(SkillChange::Chain(slot, skills)).await,
+            ClientMsg::SkillAuto { skills } => self.change_loadout(SkillChange::Auto(skills)).await,
+            ClientMsg::StorageOpen => self.storage_open().await,
+            ClientMsg::StorageMove { dir, items, zeny } => self.storage_move(dir, items, zeny).await,
             // Riding is part of the loadout: the hub re-equips the fighter
             // and shows the map its new appearance (`player_appearance`).
             ClientMsg::Mount { on } => self.change_loadout(SkillChange::Mount(on)).await,
@@ -1128,6 +1145,8 @@ impl Conn {
 enum SkillChange {
     Learn(String),
     Slot(u8, String),
+    Chain(u8, Vec<String>),
+    Auto(Vec<String>),
     Reset,
     /// Mount (true) or get off: needs a learned mount skill.
     Mount(bool),
@@ -1175,6 +1194,8 @@ impl Conn {
             let result = match change {
                 SkillChange::Learn(id) => book.learn(class, ch.level, &mut l, &id).map(|_| ()),
                 SkillChange::Slot(slot, id) => book.set_slot(&mut l, slot as usize, &id),
+                SkillChange::Chain(slot, ids) => book.set_chain(&mut l, slot as usize, &ids),
+                SkillChange::Auto(ids) => book.set_auto(&mut l, &ids),
                 SkillChange::Reset => {
                     l = Loadout::default();
                     Ok(())
@@ -1202,6 +1223,98 @@ impl Conn {
             None => Vec::new(),
         }
     }
+}
+
+/// Account storage moves at most this often per socket.
+const STORAGE_GAP: Duration = Duration::from_millis(60);
+
+impl Conn {
+    /// `STORAGE_OPEN`: the account storage, in town.
+    async fn storage_open(&self) -> Vec<Out> {
+        if !self.in_hub() {
+            return vec![hub_error("not_in_hub", "The storage is reached from town.")];
+        }
+        match crate::db::StorageRepo::load(&self.state.pool, self.user_id()).await {
+            Ok(v) => vec![storage_msg(&v)],
+            Err(e) => {
+                warn!("Storage of account {} not loaded: {e}", self.user_id());
+                vec![hub_error("storage_unavailable", "The storage is not available right now.")]
+            }
+        }
+    }
+
+    /// `STORAGE_MOVE`: stacks and zeny between the bag and the account
+    /// storage, in town. Under the character's write lock (the flusher,
+    /// trades and a character select wait), the move is stored in one
+    /// transaction with the bag (`StorageRepo::transfer`, fenced on the
+    /// row's revision), and only then does the memory change: an item is
+    /// in exactly one place, in memory and on disk.
+    async fn storage_move(&mut self, dir: StorageDir, items: Vec<(String, u32)>, zeny: u64) -> Vec<Out> {
+        if !self.in_hub() {
+            return vec![hub_error("not_in_hub", "The storage is reached from town.")];
+        }
+        // A character still holding a stage slot (another socket fighting,
+        // a link-dead run) spends from its stage's bag copy: no storage
+        // until that run is over.
+        if let (Some(lobbies), Some(character_id)) = (self.state.lobbies.as_ref(), self.character_id().await)
+            && lobbies.stages().resumable(self.user_id(), character_id).is_some()
+        {
+            return vec![hub_error("in_stage", "Finish or leave your mission first.")];
+        }
+        // Paced, not refused: a burst of clicks waits its turn.
+        if let Some(t) = self.storage_at {
+            tokio::time::sleep_until((t + STORAGE_GAP).into()).await;
+        }
+        self.storage_at = Some(Instant::now());
+        let user_id = self.user_id();
+        let dir = match dir {
+            StorageDir::Put => Dir::Put,
+            StorageDir::Take => Dir::Take,
+        };
+        let vault = {
+            let mut guard = self.session.character.write().await;
+            // Still the account's registered session (a displaced one is
+            // being torn down).
+            let current = self.state.session_registry.get(user_id).is_some_and(|r| Arc::ptr_eq(&r, &self.session));
+            let Some(ch) = guard.as_mut().filter(|c| current && !c.fenced) else {
+                return vec![hub_error("no_character", "select a character first")];
+            };
+            let mut bag = ch.bag.clone();
+            // The cart's stacks (Pushcart) count as room in the bag.
+            bag.cart = self.state.skills.cart_stacks(&ch.loadout) as u16;
+            match crate::db::StorageRepo::transfer(&self.state.pool, user_id, ch.id, ch.rev, &bag, dir, &items, zeny).await {
+                Ok(moved) => {
+                    ch.rev = moved.rev;
+                    ch.set_bag(moved.bag);
+                    moved.vault
+                }
+                Err(StorageFail::Rule(e)) => return vec![hub_error(e.code(), e.message())],
+                Err(StorageFail::Stale) => {
+                    warn!("Storage move refused: character {} moved on in the database (account {user_id})", ch.id);
+                    ch.fenced = true;
+                    self.session.displace("This session is out of date; reconnecting");
+                    return vec![hub_error("stale_session", "This session is out of date. Reload the game.")];
+                }
+                Err(StorageFail::Db(e)) => {
+                    warn!("Storage move of account {user_id} not stored: {e}");
+                    return vec![hub_error("storage_unavailable", "The storage is not available right now.")];
+                }
+            }
+        };
+        let mut out = vec![storage_msg(&vault)];
+        out.extend(self.inventory().await);
+        out.extend(self.share_bag().await);
+        out
+    }
+}
+
+/// `STORAGE` for a vault.
+fn storage_msg(v: &crate::world::combat::vault::Vault) -> Out {
+    Out::Msg(ServerMsg::Storage {
+        zeny: v.zeny,
+        cap: crate::world::combat::vault::VAULT_STACKS as u32,
+        items: v.items.iter().map(|s| (s.key(), s.count)).collect(),
+    })
 }
 
 impl Conn {
@@ -1288,6 +1401,7 @@ mod tests {
             superseded: false,
             cast_prefs: CastPrefs::default(),
             use_prefs: UsePrefs::default(),
+        storage_at: None,
         }
     }
 

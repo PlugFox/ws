@@ -220,7 +220,7 @@ impl Field<'_> {
 
 /// It mends whom it reaches (a heal, a thrown potion): companions count
 /// as allies for it.
-fn mends(def: &SkillDef) -> bool {
+pub(super) fn mends(def: &SkillDef) -> bool {
     def.effects.iter().filter_map(Effect::act).any(|a| matches!(a.payload, Payload::Heal(_) | Payload::Pitch { .. }))
 }
 

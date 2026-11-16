@@ -704,14 +704,83 @@ impl SkillDef {
     }
 }
 
-/// Learned levels and the hotbar of one character (stored as JSON).
+/// Skills one hotbar slot can chain (cast in turn, COMBAT.md §4.2).
+pub const CHAIN_MAX: usize = 5;
+/// Skills a character can mark for auto-cast.
+pub const AUTO_MAX: usize = 32;
+
+/// One hotbar slot: its skills in chain order. Empty = a free slot, one
+/// skill = a plain slot, more = a chain (each press casts the next ready
+/// one). Stored as a plain string for up to one skill (the older rows'
+/// form), as an array for a chain.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Chain(pub Vec<String>);
+
+impl Chain {
+    /// The first skill ('' for a free slot).
+    pub fn head(&self) -> &str {
+        self.0.first().map_or("", String::as_str)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.0.iter().any(|s| s == id)
+    }
+}
+
+impl From<&str> for Chain {
+    fn from(id: &str) -> Self {
+        Chain(if id.is_empty() { Vec::new() } else { vec![id.to_string()] })
+    }
+}
+
+impl From<String> for Chain {
+    fn from(id: String) -> Self {
+        Chain::from(id.as_str())
+    }
+}
+
+impl Serialize for Chain {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.0.len() {
+            0 => s.serialize_str(""),
+            1 => s.serialize_str(&self.0[0]),
+            _ => self.0.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Chain {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            One(String),
+            Many(Vec<String>),
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::One(id) => Chain::from(id),
+            Raw::Many(ids) => Chain(ids.into_iter().filter(|s| !s.is_empty()).collect()),
+        })
+    }
+}
+
+/// Learned levels, the hotbar and the auto-cast skills of one character
+/// (stored as JSON).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Loadout {
     #[serde(default)]
     pub skills: BTreeMap<String, u8>,
-    /// Skill id per slot; empty = free.
+    /// The skills per slot ([`Chain`]).
     #[serde(default)]
-    pub hotbar: Vec<String>,
+    pub hotbar: Vec<Chain>,
+    /// Skills the AI casts by itself while it is on (`CAST_PREFS`), in the
+    /// player's order: on the hotbar or not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto: Vec<String>,
     /// Riding a Peco Peco (asked for; it holds while a mount skill is
     /// learned, [`SkillBook::rides`]). Kept between sessions.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -727,8 +796,14 @@ impl Loadout {
         self.skills.get(id).copied().unwrap_or(0)
     }
 
+    /// The first skill of slot `i` ('' when free).
     pub fn slot(&self, i: usize) -> &str {
-        self.hotbar.get(i).map_or("", String::as_str)
+        self.hotbar.get(i).map_or("", Chain::head)
+    }
+
+    /// The skills of slot `i` in chain order.
+    pub fn chain(&self, i: usize) -> &[String] {
+        self.hotbar.get(i).map_or(&[], |c| c.0.as_slice())
     }
 }
 
@@ -752,6 +827,10 @@ pub enum LearnError {
     Passive,
     #[error("not learned yet")]
     NotLearned,
+    #[error("a chain holds at most 5 skills, each once")]
+    BadChain,
+    #[error("this skill is never cast by the AI")]
+    NeverAuto,
 }
 
 impl LearnError {
@@ -766,6 +845,8 @@ impl LearnError {
             LearnError::BadSlot => "bad_slot",
             LearnError::Passive => "passive_skill",
             LearnError::NotLearned => "not_learned",
+            LearnError::BadChain => "bad_chain",
+            LearnError::NeverAuto => "never_auto",
         }
     }
 }
@@ -981,23 +1062,62 @@ impl SkillBook {
     /// Puts a learned active skill in a slot (empty `id` clears it). The
     /// same skill moves rather than appearing twice.
     pub fn set_slot(&self, loadout: &mut Loadout, slot: usize, id: &str) -> Result<(), LearnError> {
+        let ids: Vec<String> = if id.is_empty() { Vec::new() } else { vec![id.to_string()] };
+        self.set_chain(loadout, slot, &ids)
+    }
+
+    /// A learned active skill a slot can hold: in a chain of more than
+    /// one, not the mount (a press of it is the rider's, not a cast).
+    fn slottable(&self, loadout: &Loadout, id: &str, chained: bool) -> Result<(), LearnError> {
+        let (_, s) = self.find(id).ok_or(LearnError::Unknown)?;
+        if s.passive {
+            return Err(LearnError::Passive);
+        }
+        if loadout.level(id) == 0 {
+            return Err(LearnError::NotLearned);
+        }
+        if chained && s.mounts() {
+            return Err(LearnError::BadChain);
+        }
+        Ok(())
+    }
+
+    /// Sets the whole chain of a slot (empty clears it, one skill makes a
+    /// plain slot): at most [`CHAIN_MAX`] learned active skills, each once.
+    /// A skill moves here from any other slot rather than appearing twice.
+    pub fn set_chain(&self, loadout: &mut Loadout, slot: usize, ids: &[String]) -> Result<(), LearnError> {
         if slot >= SLOTS {
             return Err(LearnError::BadSlot);
         }
-        if !id.is_empty() {
+        if ids.len() > CHAIN_MAX || ids.iter().enumerate().any(|(i, id)| id.is_empty() || ids[..i].contains(id)) {
+            return Err(LearnError::BadChain);
+        }
+        for id in ids {
+            self.slottable(loadout, id, ids.len() > 1)?;
+        }
+        loadout.hotbar.resize(SLOTS, Chain::default());
+        for c in loadout.hotbar.iter_mut() {
+            c.0.retain(|s| !ids.contains(s));
+        }
+        loadout.hotbar[slot] = Chain(ids.to_vec());
+        Ok(())
+    }
+
+    /// Sets the auto-cast skills, in the player's order: learned active
+    /// skills the AI may cast ([`SkillDef::never_auto`]), each once, at
+    /// most [`AUTO_MAX`].
+    pub fn set_auto(&self, loadout: &mut Loadout, ids: &[String]) -> Result<(), LearnError> {
+        if ids.len() > AUTO_MAX || ids.iter().enumerate().any(|(i, id)| ids[..i].contains(id)) {
+            return Err(LearnError::BadChain);
+        }
+        for id in ids {
+            self.slottable(loadout, id, false)?;
             let (_, s) = self.find(id).ok_or(LearnError::Unknown)?;
-            if s.passive {
-                return Err(LearnError::Passive);
-            }
-            if loadout.level(id) == 0 {
-                return Err(LearnError::NotLearned);
+            if s.never_auto() || s.mounts() || !s.ready() {
+                return Err(LearnError::NeverAuto);
             }
         }
-        loadout.hotbar.resize(SLOTS, String::new());
-        for s in loadout.hotbar.iter_mut().filter(|s| s.as_str() == id) {
-            s.clear();
-        }
-        loadout.hotbar[slot] = id.to_string();
+        loadout.auto = ids.to_vec();
         Ok(())
     }
 
@@ -1011,13 +1131,29 @@ impl SkillBook {
             }
             _ => false,
         });
-        loadout.hotbar.resize(SLOTS, String::new());
-        for slot in loadout.hotbar.iter_mut() {
-            let keep = self.find(slot).is_some_and(|(_, s)| !s.passive) && loadout.skills.contains_key(slot.as_str());
-            if !keep {
-                slot.clear();
+        loadout.hotbar.resize(SLOTS, Chain::default());
+        let mut seen: Vec<String> = Vec::new();
+        for chain in loadout.hotbar.iter_mut() {
+            let chained = chain.0.len() > 1;
+            chain.0.retain(|id| {
+                let keep = self.find(id).is_some_and(|(_, s)| !s.passive && !(chained && s.mounts()))
+                    && loadout.skills.contains_key(id.as_str())
+                    && !seen.contains(id);
+                if keep {
+                    seen.push(id.clone());
+                }
+                keep
+            });
+            chain.0.truncate(CHAIN_MAX);
+        }
+        let mut auto: Vec<String> = Vec::new();
+        for id in std::mem::take(&mut loadout.auto) {
+            let ok = self.find(&id).is_some_and(|(_, s)| !s.passive && s.ready() && !s.never_auto() && !s.mounts());
+            if ok && loadout.skills.contains_key(id.as_str()) && !auto.contains(&id) && auto.len() < AUTO_MAX {
+                auto.push(id);
             }
         }
+        loadout.auto = auto;
         loadout.mounted = self.rides(loadout);
     }
 
@@ -1794,6 +1930,48 @@ pub(crate) mod tests {
         assert_eq!(b.set_slot(&mut l, SLOTS, "bolt"), Err(LearnError::BadSlot));
         assert_eq!(b.set_slot(&mut l, 3, ""), Ok(()));
         assert_eq!(l.slot(3), "");
+    }
+
+    #[test]
+    fn chains_hold_up_to_five_learned_actives_each_once() {
+        let b = book();
+        let mut l = Loadout::default();
+        l.skills.insert("bolt".into(), 1);
+        l.skills.insert("slide".into(), 1);
+        l.skills.insert("focus".into(), 1);
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(b.set_slot(&mut l, 4, "bolt"), Ok(()));
+        assert_eq!(b.set_chain(&mut l, 0, &ids(&["bolt", "slide"])), Ok(()));
+        assert_eq!(l.chain(0), ids(&["bolt", "slide"]).as_slice());
+        assert!(l.chain(4).is_empty(), "bolt moved into the chain");
+        assert_eq!(b.set_chain(&mut l, 1, &ids(&["slide", "slide"])), Err(LearnError::BadChain));
+        assert_eq!(b.set_chain(&mut l, 1, &ids(&["bolt"; 6])), Err(LearnError::BadChain));
+        assert_eq!(b.set_chain(&mut l, 1, &ids(&["slide", "focus"])), Err(LearnError::Passive));
+        // Stored: a plain slot as a string, a chain as an array.
+        let json = serde_json::to_value(&l).unwrap();
+        assert_eq!(json["hotbar"][0], serde_json::json!(["bolt", "slide"]));
+        assert_eq!(json["hotbar"][4], serde_json::json!(""));
+        let back: Loadout = serde_json::from_value(json).unwrap();
+        assert_eq!(back, l);
+        let old: Loadout = serde_json::from_value(serde_json::json!({"hotbar": ["bolt", ""]})).unwrap();
+        assert_eq!((old.slot(0), old.chain(1).len()), ("bolt", 0));
+    }
+
+    #[test]
+    fn auto_holds_learned_actives_the_ai_may_cast() {
+        let b = book();
+        let mut l = Loadout::default();
+        l.skills.insert("bolt".into(), 1);
+        l.skills.insert("focus".into(), 1);
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(b.set_auto(&mut l, &ids(&["bolt"])), Ok(()));
+        assert_eq!(l.auto, ids(&["bolt"]));
+        assert_eq!(b.set_auto(&mut l, &ids(&["focus"])), Err(LearnError::Passive));
+        assert_eq!(b.set_auto(&mut l, &ids(&["burst"])), Err(LearnError::NotLearned));
+        assert_eq!(b.set_auto(&mut l, &ids(&["bolt", "bolt"])), Err(LearnError::BadChain));
+        l.auto = ids(&["bolt", "gone", "bolt"]);
+        b.sanitize(Class::Mage, &mut l);
+        assert_eq!(l.auto, ids(&["bolt"]));
     }
 
     #[test]

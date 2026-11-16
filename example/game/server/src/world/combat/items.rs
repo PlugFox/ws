@@ -698,7 +698,7 @@ impl Stack {
         key(&self.id, &self.attrs)
     }
 
-    fn is(&self, id: &str, attrs: &Attrs) -> bool {
+    pub(crate) fn is(&self, id: &str, attrs: &Attrs) -> bool {
         self.id == id && self.attrs == *attrs
     }
 }

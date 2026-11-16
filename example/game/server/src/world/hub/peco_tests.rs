@@ -217,9 +217,9 @@ fn stage(who: PlayerProfile) -> HubInstance {
     stage.dice = combat::Rng::new(5);
     let mut who = who;
     let l = &mut who.loadout;
-    l.hotbar = vec![String::new(); combat::skills::SLOTS];
+    l.hotbar = vec![Default::default(); combat::skills::SLOTS];
     for (i, id) in l.skills.keys().filter(|id| !matches!(id.as_str(), "spear_mastery")).enumerate() {
-        l.hotbar[i] = id.clone();
+        l.hotbar[i] = id.to_string().into();
     }
     stage.join(who, Uuid::nil(), None, 0, &mut Vec::new());
     put(&mut stage, 1, 2.5, 5.5);
@@ -228,7 +228,7 @@ fn stage(who: PlayerProfile) -> HubInstance {
 
 fn slot_of(stage: &HubInstance, id: &str) -> u16 {
     let l = &stage.players[stage.find(1).unwrap()].profile.loadout;
-    1 << l.hotbar.iter().position(|s| s == id).unwrap()
+    1 << l.hotbar.iter().position(|s| s.head() == id).unwrap()
 }
 
 fn tough(stage: &mut HubInstance, x: f32, y: f32) -> u16 {

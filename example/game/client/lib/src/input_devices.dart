@@ -35,8 +35,11 @@ final class GameInput {
   /// Gamepad Y in town (outside a menu): the nearest player's context menu.
   void Function()? onPlayerMenu;
 
-  /// LB + RT + slot button: toggle auto-cast of a slot.
+  /// LB + RT + slot button: toggle auto-cast of a slot's skills.
   void Function(int slot)? onAutoToggle;
+
+  /// The left stick clicked: the AI on / off.
+  void Function()? onAiToggle;
 
   static double _now() => web.window.performance.now() / 1000;
 
@@ -109,6 +112,7 @@ final class GameInput {
     for (var i = 0; i < 5; i++) {
       if (f.autoToggles & (1 << i) != 0) onAutoToggle?.call(i);
     }
+    if (f.ai) onAiToggle?.call();
     state
       ..addMove(f.moveX, f.moveY)
       ..slots |= f.slots

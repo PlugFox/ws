@@ -894,7 +894,8 @@ impl HubInstance {
             level,
             points: self.skills.points_left(level, l),
             skills: l.skills.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-            hotbar: (0..combat::skills::SLOTS).map(|i| l.slot(i).to_string()).collect(),
+            hotbar: (0..combat::skills::SLOTS).map(|i| l.chain(i).to_vec()).collect(),
+            auto: l.auto.clone(),
         }
     }
 
@@ -933,6 +934,21 @@ impl HubInstance {
     pub fn cast_prefs(&mut self, user_id: u32, prefs: CastPrefs) {
         if let Some(i) = self.find(user_id) {
             self.players[i].prefs = prefs;
+        }
+    }
+
+    /// Tests: the skills of the hotbar slots in `mask` (bit i = slot i)
+    /// become the auto skills, and the AI is on while any are.
+    #[cfg(test)]
+    pub(crate) fn auto_slots(&mut self, user_id: u32, mask: u16) {
+        let Some(i) = self.find(user_id) else { return };
+        let p = &mut self.players[i];
+        let l = &mut p.profile.loadout;
+        l.auto = (0..combat::skills::SLOTS).filter(|s| mask & (1 << s) != 0).map(|s| l.slot(s).to_string()).filter(|s| !s.is_empty()).collect();
+        p.prefs.ai = mask != 0;
+        if let Some(f) = p.fighter.as_mut() {
+            cast::equip(f, &self.skills, &p.profile.loadout);
+            f.ai_wait = 0;
         }
     }
 
@@ -2468,8 +2484,8 @@ mod tests {
         let mut loadout = Loadout::default();
         for (i, (id, lvl)) in skills.iter().enumerate() {
             loadout.skills.insert(id.to_string(), *lvl);
-            loadout.hotbar.resize(combat::skills::SLOTS, String::new());
-            loadout.hotbar[i] = id.to_string();
+            loadout.hotbar.resize(combat::skills::SLOTS, Default::default());
+            loadout.hotbar[i] = id.to_string().into();
         }
         let mut out = Vec::new();
         stage.join(PlayerProfile { archetype: archetype.into(), level, loadout, ..profile(1) }, Uuid::nil(), None, 0, &mut out);
@@ -2617,11 +2633,11 @@ mod tests {
         let mut loadout = Loadout::default();
         loadout.skills.insert("bolt".into(), 2);
         loadout.skills.insert("focus".into(), 5);
-        loadout.hotbar = vec![String::new(), "bolt".into()];
+        loadout.hotbar = vec![Default::default(), "bolt".into()];
         let mut out = Vec::new();
         stage.set_loadout(1, loadout, &mut out);
         let f = fighter(&stage, 1);
-        assert_eq!(f.hotbar[1], stage.skills.find("bolt").map(|(i, _)| i));
+        assert_eq!(f.hotbar[1].first(), stage.skills.find("bolt").map(|(i, _)| i));
         assert!((f.mods.sp_regen - 0.01).abs() < 1e-6, "Focus 5 = +1% SP/s");
         assert!(controls_for(&out, 1).iter().any(|m| matches!(m, ServerMsg::Skills { points, .. } if *points == 9 - 7)));
     }

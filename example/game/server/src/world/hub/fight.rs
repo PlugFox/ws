@@ -118,8 +118,18 @@ pub struct Fighter {
     pub state: Vital,
     /// Learned level per skill of the instance's book (0 = not learned).
     pub skills: Vec<u8>,
-    /// Skill (book index) per hotbar slot.
-    pub hotbar: [Option<u16>; SLOTS],
+    /// Skills (book indices) per hotbar slot, in chain order, and where
+    /// each chain stands.
+    pub hotbar: [super::cast::Chained; SLOTS],
+    /// The auto-cast skills (book indices): mending, buffs, then the rest,
+    /// the player's order within each (`cast::auto_tier`).
+    pub auto: Vec<u16>,
+    /// Slots held last tick (a chain casts on a new press).
+    pub(super) held: u16,
+    /// Slots held the tick before (a one-tick gap is no release).
+    pub(super) held_before: u16,
+    /// Ticks before the AI may cast again.
+    pub(super) ai_wait: u32,
     /// The travel skill on the travel key (Space on missions): the learned
     /// movement skill (Back Slide, Blink, Charge, ...), if any.
     pub travel: Option<u16>,
@@ -259,7 +269,11 @@ impl Fighter {
             ac: gear.ac_at(level),
             state: Vital::Up,
             skills: Vec::new(),
-            hotbar: [None; SLOTS],
+            hotbar: [super::cast::Chained::default(); SLOTS],
+            auto: Vec::new(),
+            held: 0,
+            held_before: 0,
+            ai_wait: 0,
             travel: None,
             cooldowns: Vec::new(),
             casting: None,

@@ -68,10 +68,10 @@ fn stage_with(book: &str, skills: &[(&str, u8)]) -> HubInstance {
     let mut stage = HubInstance::stage(1, "m1", world, HubSimConfig::default()).with_horde(horde).with_skills(Arc::new(book));
     stage.dice = combat::Rng::new(5);
     let mut loadout = Loadout::default();
-    loadout.hotbar.resize(combat::skills::SLOTS, String::new());
+    loadout.hotbar.resize(combat::skills::SLOTS, Default::default());
     for (i, (id, lvl)) in skills.iter().enumerate() {
         loadout.skills.insert(id.to_string(), *lvl);
-        loadout.hotbar[i] = id.to_string();
+        loadout.hotbar[i] = id.to_string().into();
     }
     let mut out = Vec::new();
     stage.join(PlayerProfile { archetype: "thief".into(), level: 10, loadout, ..profile(1) }, Uuid::nil(), None, 0, &mut out);
@@ -199,8 +199,8 @@ fn hidden_auto_cast_slots_wait_and_buffs_keep_the_hiding() {
     let s = tough(&mut stage, 9.5, 5.5);
     // Venom Dust on auto-cast: it would give the thief away, so it waits.
     let i = stage.find(1).unwrap();
-    stage.players[i].prefs.auto = 0b10;
-    run(&mut stage, 10, 0b10, 0);
+    stage.auto_slots(1, 0b10);
+    run(&mut stage, 10, 0, 0);
     assert!(!poisoned(&stage, s) && fighter(&stage).mods.hidden, "no auto-cast out of hiding");
     // A buff by hand keeps the thief under the ground.
     let f = stage.players[i].fighter.as_mut().unwrap();
@@ -208,7 +208,7 @@ fn hidden_auto_cast_slots_wait_and_buffs_keep_the_hiding() {
     run(&mut stage, 1, 0b100, 0);
     assert!(fighter(&stage).mods.venom > 0 && fighter(&stage).mods.hidden, "Enchant Poison keeps the hiding");
     // The same attack skill pressed by hand strikes out of it.
-    stage.players[i].prefs.auto = 0;
+    stage.auto_slots(1, 0);
     let f = stage.players[i].fighter.as_mut().unwrap();
     f.sp = f.max_sp;
     run(&mut stage, 10, 0b10, 0);

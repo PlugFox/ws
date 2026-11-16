@@ -78,10 +78,10 @@ fn stage(skills: &[(&str, u8)], level: u32, bag: Bag) -> HubInstance {
 
 fn loadout(skills: &[(&str, u8)]) -> Loadout {
     let mut l = Loadout::default();
-    l.hotbar.resize(combat::skills::SLOTS, String::new());
+    l.hotbar.resize(combat::skills::SLOTS, Default::default());
     for (i, (id, lvl)) in skills.iter().enumerate() {
         l.skills.insert(id.to_string(), *lvl);
-        l.hotbar[i] = id.to_string();
+        l.hotbar[i] = id.to_string().into();
     }
     l
 }
@@ -235,7 +235,7 @@ fn acid_demonstration_spends_its_bottles_or_lands_weaker() {
     // Auto-cast: never.
     let mut st = stage(&[("acid_demonstration", 1)], 60, bag(0, &[("acid_bottle", 3), ("bottle_grenade", 3)]));
     let s = blob(&mut st, 14.5, 5.5, 10_000);
-    st.players[0].prefs.auto = 1;
+    { let u = st.players[0].profile.user_id; st.auto_slots(u, 1); }
     let out = run(&mut st, 30, 0);
     assert!(hits_on(&out, s).iter().all(|h| h.flags & hit::MISS != 0 || h.amount < 1000) && used(&out).is_empty(), "nothing thrown by itself");
     assert_eq!(me(&st).profile.bag.count("acid_bottle"), 3);
@@ -322,14 +322,14 @@ fn potion_pitcher_throws_a_real_potion() {
 fn auto_pitch_respects_the_potion_threshold() {
     let mut st = stage(&[("potion_pitcher", 1)], 10, bag(0, &[]));
     fighter(&mut st).potions = vec![("red_potion".into(), 5)];
-    st.players[0].prefs.auto = 1;
+    { let u = st.players[0].profile.user_id; st.auto_slots(u, 1); }
     let max = fighter(&mut st).max_hp;
     fighter(&mut st).hp = max * 7 / 10;
     assert!(used(&run(&mut st, 10, 0)).is_empty(), "no threshold set: never by itself");
     st.players[0].uses.hp = 50;
     assert!(used(&run(&mut st, 10, 0)).is_empty(), "70% is above 50%");
     fighter(&mut st).hp = max * 4 / 10;
-    assert_eq!(used(&run(&mut st, 10, 0)).len(), 1);
+    assert!(!used(&run(&mut st, 10, 0)).is_empty(), "below the threshold: thrown (and drunk)");
 }
 
 /// Summon Flora reaches the companions pool; Plant Cultivation grows a

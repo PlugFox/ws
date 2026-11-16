@@ -56,10 +56,10 @@ fn stage(class: &str, level: u32, weapon: &str, skills: &[(&str, u8)]) -> HubIns
     let mut stage = HubInstance::stage(1, "m1", world, HubSimConfig::default()).with_horde(horde).with_skills(Arc::new(book));
     stage.dice = combat::Rng::new(5);
     let mut loadout = Loadout::default();
-    loadout.hotbar.resize(combat::skills::SLOTS, String::new());
+    loadout.hotbar.resize(combat::skills::SLOTS, Default::default());
     for (i, (id, lvl)) in skills.iter().enumerate() {
         loadout.skills.insert(id.to_string(), *lvl);
-        loadout.hotbar[i] = id.to_string();
+        loadout.hotbar[i] = id.to_string().into();
     }
     let mut out = Vec::new();
     let who = PlayerProfile { archetype: class.into(), level, weapon: weapon.into(), loadout, ..profile(1) };

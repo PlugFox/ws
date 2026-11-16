@@ -8,6 +8,7 @@ pub mod leaderboard_repo;
 pub mod migrations;
 pub mod party_repo;
 pub mod session_repo;
+pub mod storage_repo;
 pub mod testing;
 pub mod user_repo;
 
@@ -24,6 +25,7 @@ pub use leaderboard_repo::LeaderboardRepo;
 pub use migrations::run_migrations;
 pub use party_repo::{PartyRepo, PartyWriter};
 pub use session_repo::{SessionRecord, SessionRepo};
+pub use storage_repo::{StorageFail, StorageRepo};
 pub use user_repo::{ContactsUpdate, UserRecord, UserRepo};
 
 /// The connection pool every repository takes.

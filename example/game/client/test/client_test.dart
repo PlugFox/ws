@@ -83,8 +83,27 @@ void main() {
     });
 
     test('cast prefs golden (protocol.rs `cast_prefs_match_the_dart_golden`)', () {
-      expect(toHex(ClientMsg.castPrefs(manualAim: true, auto: 0x8009)), '85010980');
-      expect(toHex(ClientMsg.castPrefs(manualAim: false, auto: 0)), '85000000');
+      expect(toHex(ClientMsg.castPrefs(manualAim: true, ai: true)), '8503');
+      expect(toHex(ClientMsg.castPrefs(manualAim: false, ai: false)), '8500');
+    });
+
+    test('chain and storage goldens (protocol.rs `chains_and_storage_match_the_dart_goldens`)', () {
+      expect(toHex(ClientMsg.skillChain(2, ['bolt', 'slide'])), 'ae020204626f6c7405736c696465');
+      expect(toHex(ClientMsg.skillAuto(['heal'])), 'af01046865616c');
+      expect(toHex(ClientMsg.storageOpen()), 'ab');
+      expect(
+        toHex(ClientMsg.storageMove(take: true, items: [(id: 'sword+7', count: 1), (id: 'jellopy', count: 300)], zeny: 1000)),
+        'ac01020773776f72642b3701076a656c6c6f7079ac02e807',
+      );
+      final st = ServerMsg.decode(hex('ade807d804010773776f72642b3701'))! as Storage;
+      expect((st.zeny, st.cap, st.items.single.id, st.items.single.count), (1000, 600, 'sword+7', 1));
+      final sk = ServerMsg.decode(hex('2d0c030104626f6c7404020204626f6c7405736c696465000104626f6c74'))! as Skills;
+      expect(sk.chains, [
+        ['bolt', 'slide'],
+        <String>[],
+      ]);
+      expect(sk.auto, ['bolt']);
+      expect(sk.hotbar, ['bolt', '']);
     });
 
     test('use prefs golden (protocol.rs `use_prefs_match_the_dart_golden`)', () {
@@ -744,7 +763,7 @@ void main() {
       expect((miss.target, miss.isMiss, miss.amount), (300, true, 0));
       final pr = ServerMsg.decode(hex('2c1fd8a705e8f505e102'))! as Progress;
       expect((pr.level, pr.exp, pr.expToNext, pr.gained), (31, 87000, 97000, 353));
-      final sk = ServerMsg.decode(hex('2d0c030104626f6c74040204626f6c7400'))! as Skills;
+      final sk = ServerMsg.decode(hex('2d0c030104626f6c7404020204626f6c7405736c696465000104626f6c74'))! as Skills;
       expect((sk.level, sk.points), (12, 3));
       expect(sk.levels, {'bolt': 4});
       expect(sk.hotbar, ['bolt', '']);

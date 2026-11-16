@@ -81,7 +81,8 @@ List<Map<String, Object?>> guideTopics(Bindings binds, List<MissionCard> ladder,
         ['W A S D', 'walk (the arrow keys too); **Q** / **E** turn the camera'],
         ['Left click', 'walk there around obstacles, hold to steer; a monster: walk into reach'],
         [talk, 'talk to the nearest person (also Space in town)'],
-        [slotKeys, 'hotbar skills; **right click** a slot toggles its auto-cast'],
+        [slotKeys, 'hotbar skills (a chained slot casts its next skill per press; hold to rotate)'],
+        [_k(binds.ai, '`'), 'the **AI** on / off: auto-cast of the skills marked **A** in the tree'],
         [_k(binds.travel, 'Space'), 'on expeditions: your travel skill (Back Slide, Blink, …)'],
         ['${_k(binds.potion, 'R')} / ${_k(binds.potion2, 'T')}', 'drink a healing / SP potion'],
         ['K', 'skill tree'],
@@ -207,15 +208,18 @@ List<Map<String, Object?>> guideTopics(Bindings binds, List<MissionCard> ladder,
       ]),
     ]),
     _topic('skills', 'Skills and auto-cast', 'The hotbar, aiming and auto-cast', 'skill:mg_firebolt', [
-      _fig(diagram: 'hotbar', caption: 'A green frame: the slot casts itself'),
+      _fig(diagram: 'hotbar', caption: 'A green frame: the AI casts that skill by itself'),
       _p(
         'Learn skills in the tree (**K**) and drag them onto the hotbar. Skills cost **SP** and have a cooldown; '
         'casting holds you in place, and walking away cancels it (the SP comes back).',
       ),
       _list([
-        '**Auto-cast**: right click a slot. It casts whenever the skill is ready and finds its own target: '
+        '**Auto-cast**: click the **A** badge of a skill in the tree (or right click a slot). No hotbar slot needed: '
+            'while the **AI** is on (the button left of the hotbar, or ${_k(binds.ai, '`')}) it casts the skill whenever it is ready and finds its own target: '
             'the nearest monster or the best line, the party member missing a buff, the most hurt for Heal. '
-            'With nobody to help it waits and spends nothing.',
+            'Heals go first, then buffs, then attacks. With nobody to help it waits and spends nothing; whatever you press goes first.',
+        '**Chains**: drop up to five skills on one slot (onto its **+** while the tree is open). Each press casts the next one that is ready, '
+            'skipping what is cooling, short of SP or without a target; **hold** the key and the rotation goes on. After 3 s it starts over.',
         'Skills you press yourself aim at the **mouse**; with **Manual aiming** (Settings) they pick the monster nearest the pointer and lay ground spells right on it.',
         'Travel skills go where you walk, or toward the mouse when you stand still.',
         'Standing still you **attack on your own**; walking stops it.',

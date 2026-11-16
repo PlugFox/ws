@@ -22,6 +22,7 @@ pub mod profile;
 pub mod quests;
 pub mod rules;
 pub mod skills;
+pub mod vault;
 pub mod weapon;
 
 pub use buffs::Mods;

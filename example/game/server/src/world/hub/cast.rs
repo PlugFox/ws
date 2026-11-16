@@ -14,7 +14,7 @@
 //! the caster's DC), so bolts and storms never whiff; skills that swing the
 //! weapon roll to hit like the basic attack.
 
-use super::aim::{aim_press, norm, Aimed, Field, Press, BODY, REFRESH_SECS};
+use super::aim::{aim_press, mends, norm, Aimed, Field, Press, BODY, REFRESH_SECS};
 use super::area::Area;
 use super::companion::{Companions, Owner, Summon, Summoned};
 use super::fight::{Fighter, Vital};
@@ -22,7 +22,8 @@ use super::{facing_of, HubEvent, HubInstance, HubPlayer, MapIdx, Outgoing};
 use crate::world::combat::rules::{attack_roll, saving_throw, AttackOutcome};
 use crate::world::combat::items::{self, Kind as ItemKind};
 use crate::world::combat::skills::{
-    Act, DamageFx, Effect, EffectDice, Follow as FollowFx, HealFx, MoveMode, Payload, Shape, SkillBook, SkillDef, Target, TOUGH_CAP,
+    Act, DamageFx, Effect, EffectDice, Follow as FollowFx, HealFx, MoveMode, Payload, Shape, SkillBook, SkillDef, Target, TargetKind, AUTO_MAX, CHAIN_MAX,
+    SLOTS, TOUGH_CAP,
 };
 use crate::world::combat::{cantrip_k, save_dc, Condition, Damage, DamageType, Dice, Mods, Rng};
 use crate::world::horde::storage::{FLAG_BOSS, FLAG_REFLECT};
@@ -34,6 +35,124 @@ use crate::world::protocol::{hit, look, HitEvent, ServerMsg, Telegraph, MONSTER_
 const RECOVERY_SECS: f32 = 0.15;
 /// A channel ends this many ticks after its slot is let go (input jitter).
 const CHANNEL_GRACE: u8 = 4;
+/// [`Channel::slot`] / [`Casting::slot`] of a cast the AI started: it
+/// holds while the AI is on and the skill stays an auto skill.
+pub(super) const AUTO_SLOT: u8 = 0xFE;
+/// A chain goes back to its first skill after this long without a cast
+/// from it (COMBAT.md §4.2).
+const CHAIN_RESET_SECS: f32 = 3.0;
+/// A chain held down casts its next skill at most this often.
+const CHAIN_REPEAT_SECS: f32 = 0.3;
+/// A press of a chain that found nothing ready waits this long for one.
+const CHAIN_QUEUE_SECS: f32 = 0.3;
+/// A cast by hand keeps the AI quiet this long (the player's turn).
+const AI_YIELD_SECS: f32 = 0.5;
+/// The AI casts at most this often.
+const AI_GAP_SECS: f32 = 0.3;
+
+/// One hotbar slot of a fighter: its skills (book indices) in chain
+/// order and where the chain stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Chained {
+    skills: [u16; CHAIN_MAX],
+    len: u8,
+    /// The skill the next press tries first.
+    pub cursor: u8,
+    /// Ticks since the chain last cast.
+    idle: u32,
+    /// Ticks before a held chain casts again.
+    wait: u32,
+    /// Ticks a press still waits for a ready skill.
+    queued: u32,
+}
+
+impl Chained {
+    pub fn new(skills: impl IntoIterator<Item = u16>) -> Self {
+        let mut c = Chained::default();
+        for s in skills.into_iter().take(CHAIN_MAX) {
+            c.skills[c.len as usize] = s;
+            c.len += 1;
+        }
+        c
+    }
+
+    /// The skills in chain order.
+    pub fn skills(&self) -> &[u16] {
+        &self.skills[..self.len as usize]
+    }
+
+    /// The first skill (a plain slot's only one).
+    pub fn first(&self) -> Option<u16> {
+        self.skills().first().copied()
+    }
+
+    /// More than one skill: presses step through them.
+    pub fn is_chain(&self) -> bool {
+        self.len > 1
+    }
+
+    /// One tick: `held` this tick, `edge` pressed anew. True when the
+    /// chain wants to cast now (a fresh or queued press, or held past the
+    /// repeat gap).
+    fn step(&mut self, held: bool, edge: bool, t: &ChainTicks) -> bool {
+        self.idle = self.idle.saturating_add(1);
+        if self.idle >= t.reset {
+            self.cursor = 0;
+        }
+        self.wait = self.wait.saturating_sub(1);
+        self.queued = if edge { t.queue } else { self.queued.saturating_sub(1) };
+        self.is_chain() && (self.queued > 0 || (held && self.wait == 0))
+    }
+
+    /// A wind-up of `skill` from this chain was cancelled: the next press
+    /// tries it again.
+    fn unfire(&mut self, skill: u16) {
+        if let Some(pos) = self.skills().iter().position(|&s| s == skill).filter(|_| self.is_chain()) {
+            self.cursor = pos as u8;
+        }
+    }
+
+    /// The skill at chain place `pos` cast: the next press starts after it.
+    fn fired(&mut self, pos: u8, t: &ChainTicks) {
+        self.cursor = (pos + 1) % self.len.max(1);
+        self.idle = 0;
+        self.queued = 0;
+        self.wait = t.repeat;
+    }
+}
+
+/// The chain timings in ticks.
+struct ChainTicks {
+    reset: u32,
+    repeat: u32,
+    queue: u32,
+}
+
+/// A skill a tick may cast: from a slot (its chain place), the travel
+/// key, or the AI.
+#[derive(Clone, Copy, Debug, Default)]
+struct Offer {
+    skill: u16,
+    slot: u8,
+    /// Place in the slot's chain, when it is one.
+    pos: Option<u8>,
+    auto: bool,
+}
+
+/// Most offers in one tick: every chain place, the travel key, the AI's.
+const MAX_OFFERS: usize = SLOTS * CHAIN_MAX + 1 + AUTO_MAX;
+
+/// Auto-cast order class: mending first, then buffs, then the rest
+/// (each in the player's order).
+pub(super) fn auto_tier(def: &SkillDef, slv: u8) -> u8 {
+    if mends(def) || def.pitches() {
+        0
+    } else if def.timed_buff(slv) || def.target.kind() == TargetKind::Ally {
+        1
+    } else {
+        2
+    }
+}
 /// Step of a slide, a blink or a push when checking the ground (cells).
 const MOVE_STEP: f32 = 0.25;
 /// A trap checks for monsters this often (ticks).
@@ -77,6 +196,7 @@ pub(super) struct Casting {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Channel {
     pub skill: u16,
+    /// The slot that holds it ([`AUTO_SLOT`]: the AI cast it).
     pub slot: u8,
     /// Ticks since the slot was last seen held.
     pub idle: u8,
@@ -808,6 +928,7 @@ impl HubInstance {
             let moving = self.players[idx].dir != (0.0, 0.0);
             let entity = self.players[idx].profile.character_id;
             let uid = self.players[idx].profile.user_id;
+            let ai_on = self.players[idx].prefs.ai;
             let Some(f) = self.players[idx].fighter.as_mut() else { continue };
             f.refresh(now);
             // A draining toggle (Maximize Power) takes its SP once a
@@ -827,9 +948,30 @@ impl HubInstance {
                 *cd -= 1;
             }
             f.recovery = f.recovery.saturating_sub(1);
-            // A channel holds while its slot is held and the caster stands.
+            // Keys arrive as levels, one input frame at a time: a tick that
+            // got no frame is not a release (else a held chain would see a
+            // fresh press after every gap). Kept every tick, stunned or
+            // channelling too, so a key held through it makes no new press.
+            let ticks = ChainTicks { reset: ticks_of(CHAIN_RESET_SECS, hz), repeat: ticks_of(CHAIN_REPEAT_SECS, hz), queue: ticks_of(CHAIN_QUEUE_SECS, hz) };
+            let recent = f.held | f.held_before;
+            let edge = pressed & !recent;
+            let down = pressed | f.held;
+            f.held_before = f.held;
+            f.held = pressed;
+            f.ai_wait = f.ai_wait.saturating_sub(1);
+            let mut wants = 0u16;
+            for (slot, c) in f.hotbar.iter_mut().enumerate() {
+                let bit = 1u16 << slot;
+                if c.step(down & bit != 0, edge & bit != 0, &ticks) {
+                    wants |= bit;
+                }
+            }
+            // A channel holds while its slot is held (an AI channel: while
+            // the AI is on with it among the auto skills) and the caster stands.
             if let Some(mut ch) = f.channel {
-                ch.idle = if pressed & (1 << ch.slot) != 0 { 0 } else { ch.idle.saturating_add(1) };
+                // An AI channel yields to any key the player presses.
+                let held = if ch.slot == AUTO_SLOT { ai_on && f.auto.contains(&ch.skill) && pressed == 0 } else { pressed & (1 << ch.slot) != 0 };
+                ch.idle = if held { 0 } else { ch.idle.saturating_add(1) };
                 let lasting = self.lives.iter().any(|l| l.caster == uid && l.skill == ch.skill);
                 if moving || ch.idle > CHANNEL_GRACE || !f.is_up() || f.status.held() || f.status.silenced() || !lasting {
                     f.channel = None;
@@ -852,6 +994,7 @@ impl HubInstance {
             if let Some(mut c) = f.casting {
                 if moving {
                     f.casting = None;
+                    f.rewind(c.slot, c.skill);
                     casts.push(cancel(entity));
                 } else if c.ticks > 1 {
                     c.ticks -= 1;
@@ -878,21 +1021,56 @@ impl HubInstance {
                             f.channel = Some(Channel { skill: c.skill, slot: c.slot, idle: 0 });
                         }
                     } else {
+                        if let Some(f) = self.players[idx].fighter.as_mut() {
+                            f.rewind(c.slot, c.skill);
+                        }
                         casts.push(cancel(entity));
                     }
                 }
             }
 
-            // New presses, lowest slot first; one skill per tick. Playing
-            // dead allows nothing; a thief's hiding allows a strike out of it
-            // (`land` ends the hiding).
+            // What may cast this tick, one skill at most: the pressed slots
+            // lowest first (a plain slot while held; a chain on a press,
+            // then every repeat gap while held, from its cursor on), the
+            // travel key, then the AI's auto skills (mending, buffs, the
+            // rest; the player's order within each) when it has the turn.
+            // Playing dead allows nothing; a thief's hiding allows a strike
+            // out of it (`land` ends the hiding).
+            let Some(f) = self.players[idx].fighter.as_mut() else { continue };
+            let mut offers = [Offer::default(); MAX_OFFERS];
+            let mut n = 0;
+            for (slot, c) in f.hotbar.iter().enumerate() {
+                let bit = 1u16 << slot;
+                if c.is_chain() {
+                    if wants & bit != 0 {
+                        let len = c.skills().len();
+                        for k in 0..len {
+                            let pos = (c.cursor as usize + k) % len;
+                            offers[n] = Offer { skill: c.skills()[pos], slot: slot as u8, pos: Some(pos as u8), auto: false };
+                            n += 1;
+                        }
+                    }
+                } else if let Some(skill) = c.first().filter(|_| pressed & bit != 0) {
+                    offers[n] = Offer { skill, slot: slot as u8, pos: None, auto: false };
+                    n += 1;
+                }
+            }
+            if let Some(skill) = f.travel.filter(|_| pressed & (1 << TRAVEL_SLOT) != 0) {
+                offers[n] = Offer { skill, slot: TRAVEL_SLOT as u8, pos: None, auto: false };
+                n += 1;
+            }
+            if ai_on && f.ai_wait == 0 {
+                for &skill in f.auto.iter().take(AUTO_MAX) {
+                    offers[n] = Offer { skill, slot: AUTO_SLOT, pos: None, auto: true };
+                    n += 1;
+                }
+            }
             let Some(f) = self.players[idx].fighter.as_ref() else { continue };
             if f.mods.hidden && !f.mods.ambush {
                 continue;
             }
-            for slot in (0..16).filter(|s| pressed & (1 << s) != 0) {
-                let pick = if slot == TRAVEL_SLOT { f.travel } else { f.hotbar.get(slot).copied().flatten() };
-                let Some(skill) = pick else { continue };
+            for offer in &offers[..n] {
+                let (skill, slot, auto) = (offer.skill, offer.slot as usize, offer.auto);
                 let def = book.get(skill);
                 let level = f.skills.get(skill as usize).copied().unwrap_or(0);
                 let busy = f.casting.is_some() && !def.mobile;
@@ -912,11 +1090,10 @@ impl HubInstance {
                     continue;
                 }
                 let field = Field { horde, players: &self.players, companions: &self.companions, map };
-                // An auto-cast slot fires only at a target that needs it and
-                // aims itself; a press by hand follows the pointer when the
+                // An auto-cast fires only at a target that needs it and aims
+                // itself; a press by hand follows the pointer when the
                 // player aims manually.
                 let prefs = self.players[idx].prefs;
-                let auto = prefs.auto & (1 << slot) != 0;
                 // Hidden, nothing fires by itself (it would give the thief
                 // away); nor does Arrow Change, which only cycles.
                 if auto && (f.mods.hidden || def.never_auto()) {
@@ -1005,6 +1182,14 @@ impl HubInstance {
                     }
                 } else {
                     f.casting = Some(Casting { skill, level, ticks: cast_ticks, aimed, zone, slot: slot as u8 });
+                }
+                // The chain moves on; a cast by hand gives the player the
+                // turn, an AI cast keeps the AI's pace.
+                if let Some(f) = self.players[idx].fighter.as_mut() {
+                    if let Some(pos) = offer.pos {
+                        f.hotbar[slot].fired(pos, &ticks);
+                    }
+                    f.ai_wait = ticks_of(if auto { AI_GAP_SECS } else { AI_YIELD_SECS }, hz);
                 }
                 break;
             }
@@ -1733,9 +1918,17 @@ pub(super) fn equip(f: &mut Fighter, book: &SkillBook, loadout: &crate::world::c
     // Riding passives count while mounted, weapon ones with that weapon.
     f.riding = book.rides(loadout);
     f.set_passive(book.passives(f.class, loadout, f.weapon.kind));
+    let learned = |id: &String| book.find(id).map(|(i, _)| i).filter(|&i| f.skills[i as usize] > 0);
     for (slot, h) in f.hotbar.iter_mut().enumerate() {
-        *h = book.find(loadout.slot(slot)).map(|(i, _)| i).filter(|&i| f.skills[i as usize] > 0);
+        let skills: Vec<u16> = loadout.chain(slot).iter().filter_map(learned).collect();
+        // A new loadout keeps where an unchanged chain stood.
+        if h.skills() != skills.as_slice() {
+            *h = Chained::new(skills);
+        }
     }
+    let mut auto: Vec<u16> = loadout.auto.iter().filter_map(learned).filter(|&i| !book.get(i).never_auto()).collect();
+    auto.sort_by_key(|&i| auto_tier(book.get(i), f.skills[i as usize]));
+    f.auto = auto;
     // The travel key: the learned movement skill, the higher tier first
     // (later in the book), then the higher level.
     f.travel = book
@@ -1747,3 +1940,13 @@ pub(super) fn equip(f: &mut Fighter, book: &SkillBook, loadout: &crate::world::c
 
 /// Bit of `Input::slots` for the travel key (past the hotbar's slots).
 pub const TRAVEL_SLOT: usize = 15;
+
+impl Fighter {
+    /// A wind-up from hotbar slot `slot` came to nothing: its chain steps
+    /// back to the skill.
+    pub(super) fn rewind(&mut self, slot: u8, skill: u16) {
+        if let Some(c) = self.hotbar.get_mut(slot as usize) {
+            c.unfire(skill);
+        }
+    }
+}

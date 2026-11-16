@@ -138,11 +138,6 @@ void main() {
     });
   });
 
-  test('auto-cast only presses slots that hold a skill', () {
-    expect(autoCastSlots(0x3FF, ['bash', '', 'provoke', '', '', '', '', '', '', 'endure']), 1 | 4 | 1 << 9);
-    expect(autoCastSlots(0, ['bash']), 0);
-  });
-
   test('the larger of two move vectors wins', () {
     final s = InputState()
       ..addMove(0.2, 0)

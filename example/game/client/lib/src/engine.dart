@@ -440,7 +440,8 @@ extension type GameView._(JSObject _) implements JSObject {
   external bool toggleSkillTree(int mode);
 
   /// Touch controls: -1 auto (touch devices), 0 off, 1 on. Events:
-  /// `skill_auto {slot}` (long press), `open_settings`.
+  /// `skill_auto {slot}` (long press: the slot's skills on / off auto),
+  /// `open_settings`.
   external void setTouchControls(int mode);
 
   /// Touch state for this tick into [out] (6 floats: move x, y; aim x, y in
@@ -449,8 +450,18 @@ extension type GameView._(JSObject _) implements JSObject {
   /// or dart2wasm). False (zeroed) when the touch controls are off.
   external bool readTouch(JSFloat32Array out);
 
-  /// Auto-cast slots (bit i = slot i), marked on the hotbar and touch buttons.
-  external void setAutoCast(int mask);
+  /// The AI on / off: the button left of the hotbar (event `ai_toggle`),
+  /// the auto marks on the hotbar, the tree and the touch buttons.
+  external void setAi(bool on);
+
+  /// Display name of a skill ('' when unknown).
+  external String skillName(String id);
+
+  /// The account storage (`{zeny, cap, items: [[key, count]]}`): shows it
+  /// in the storage window (opened by `toggleWindow('storage')` or its
+  /// button in the Inventory window; it asks with `storage_open`). Events:
+  /// `storage_move {take, items: [[key, count]], zeny}`.
+  external void setStorage(String json);
 
   /// Metres a manual aim reaches for [skill] (its range, or a short default).
   external double skillReach(String skill);

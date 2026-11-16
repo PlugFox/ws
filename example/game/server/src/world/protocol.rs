@@ -58,6 +58,9 @@
 //!                      sitting there)
 //! 0x39 FLAG            var entity_id, u8 flag (0..=9), pos x, pos y
 //!                      (a ping marker; everyone on the map, the sender too)
+//! 0xAD STORAGE         var zeny, var cap (stacks), list<(str item, var
+//!                      count)>: the account storage (STORAGE_OPEN, after
+//!                      every STORAGE_MOVE)
 //! 0x3A INVENTORY       var zeny, var n, n × {str item, var count},
 //!                      10 × str equipped (slot order of `items::Slot`;
 //!                      empty = nothing), str stats (JSON: armour class,
@@ -251,10 +254,20 @@
 //!                      u16 slots (skill slots pressed; bit i = slot i)
 //!                      (the 9-byte form without aim and slots is accepted)
 //! 0x85 CAST_PREFS      u8 flags (bit 0: manual aiming, the pointer picks
-//!                      the monster and places ground skills), u16 auto
-//!                      (auto-cast slots, bit i = slot i: they only fire at
-//!                      a target that needs them). Kept by the connection,
-//!                      sent again on change
+//!                      the monster and places ground skills; bit 1: the
+//!                      AI is on, it casts the loadout's auto skills at
+//!                      targets that need them). Kept by the connection,
+//!                      sent again on change (an older trailing u16 is
+//!                      accepted and ignored)
+//! 0xAE SKILL_CHAIN     u8 slot, list<str> skills: the slot's whole chain
+//!                      (empty clears it, one skill = a plain slot, at most
+//!                      5; each press casts the next ready one)
+//! 0xAF SKILL_AUTO      list<str> skills: the auto-cast skills in order
+//! 0xAB STORAGE_OPEN    (town) answered by STORAGE
+//! 0xAC STORAGE_MOVE    u8 dir (0 bag → storage, 1 storage → bag),
+//!                      list<(str key, var count)>, var zeny: one
+//!                      transaction, all or nothing; answered by STORAGE
+//!                      and INVENTORY
 //! 0x9C QUIVER_REQ     u8 element (as QUIVER; 0xFF = the next one): nock
 //!                      that arrow (Arrow Change learned, the element open
 //!                      at its level; on a stage), answered by QUIVER
@@ -420,6 +433,7 @@ pub mod kind {
     pub const POSE: u8 = 0x38;
     pub const FLAG: u8 = 0x39;
     pub const INVENTORY: u8 = 0x3A;
+    pub const STORAGE: u8 = 0xAD;
     pub const ITEM_DEFS: u8 = 0x3B;
     pub const SHOP: u8 = 0x3C;
     pub const ITEM_USED: u8 = 0x3D;
@@ -513,6 +527,10 @@ pub mod kind {
     pub const MISSION_START: u8 = 0x63;
     pub const CAST_PREFS: u8 = 0x85;
     pub const USE_PREFS: u8 = 0xA7;
+    pub const SKILL_CHAIN: u8 = 0xAE;
+    pub const SKILL_AUTO: u8 = 0xAF;
+    pub const STORAGE_OPEN: u8 = 0xAB;
+    pub const STORAGE_MOVE: u8 = 0xAC;
     /// The owner's homunculus commands (`protocol/companion.rs`).
     pub const COMPANION_CMD: u8 = 0xA8;
     /// Town services (`protocol/town.rs`): a craft, the party list.
@@ -1100,7 +1118,9 @@ pub enum ServerMsg {
     Progress { level: u32, exp: u64, exp_to_next: u64, gained: u64 },
     /// The recipient's learned skills, unspent points and hotbar (on join
     /// and after every change).
-    Skills { level: u32, points: u32, skills: Vec<(String, u8)>, hotbar: Vec<String> },
+    /// `hotbar`: each slot's chain (empty = free); `auto`: the auto-cast
+    /// skills in order.
+    Skills { level: u32, points: u32, skills: Vec<(String, u8)>, hotbar: Vec<Vec<String>>, auto: Vec<String> },
     /// A player starts a skill aimed at `x, y`: wind-up `cast_ms`, then
     /// `cooldown_ms`; `areas` are where its effects will land, as the server
     /// resolved them. An empty `skill` cancels the caster's wind-up.
@@ -1156,6 +1176,8 @@ pub enum ServerMsg {
     /// The recipient's belongings: zeny, bag stacks and the ten equipment
     /// slots (item ids, empty = nothing). On join and after every change.
     Inventory { zeny: u64, items: Vec<(String, u32)>, equip: Vec<String>, stats: String },
+    /// The account storage: zeny, capacity in stacks, the stacks.
+    Storage { zeny: u64, cap: u32, items: Vec<(String, u32)> },
     /// The item catalogue (on join).
     ItemDefs { items: Vec<ItemDef> },
     /// A merchant's goods (answer to `npc_interact` at a `shop` NPC), and
@@ -1417,7 +1439,7 @@ impl ServerMsg {
                 b.put_var(*exp_to_next);
                 b.put_var(*gained);
             }
-            ServerMsg::Skills { level, points, skills, hotbar } => {
+            ServerMsg::Skills { level, points, skills, hotbar, auto } => {
                 b.put_u8(kind::SKILLS);
                 b.put_var((*level).into());
                 b.put_var((*points).into());
@@ -1425,7 +1447,8 @@ impl ServerMsg {
                     b.put_str(id);
                     b.put_u8(*lvl);
                 });
-                put_list(&mut b, hotbar, |b, id| b.put_str(id));
+                put_list(&mut b, hotbar, |b, chain| put_list(b, chain, |b, id| b.put_str(id)));
+                put_list(&mut b, auto, |b, id| b.put_str(id));
             }
             ServerMsg::Cast { caster, skill, x, y, cast_ms, cooldown_ms, areas, level } => {
                 b.put_u8(kind::CAST);
@@ -1571,6 +1594,15 @@ impl ServerMsg {
                     b.put_str(equip.get(i).map_or("", String::as_str));
                 }
                 b.put_str(stats);
+            }
+            ServerMsg::Storage { zeny, cap, items } => {
+                b.put_u8(kind::STORAGE);
+                b.put_var(*zeny);
+                b.put_var((*cap).into());
+                put_list(&mut b, items, |b, (id, n)| {
+                    b.put_str(id);
+                    b.put_var((*n).into());
+                });
             }
             ServerMsg::ItemDefs { items } => {
                 b.put_u8(kind::ITEM_DEFS);
@@ -1837,7 +1869,8 @@ impl ServerMsg {
                 level: r.var32()?,
                 points: r.var32()?,
                 skills: read_list(&mut r, |r| Some((r.str()?, r.u8()?)))?,
-                hotbar: read_list(&mut r, |r| r.str())?,
+                hotbar: read_list(&mut r, |r| read_list(r, |r| r.str()))?,
+                auto: read_list(&mut r, |r| r.str())?,
             },
             kind::CAST => ServerMsg::Cast {
                 caster: r.var32()?,
@@ -1923,6 +1956,7 @@ impl ServerMsg {
                 stats: r.str()?,
             },
             kind::ITEM_DEFS => ServerMsg::ItemDefs { items: read_list(&mut r, ItemDef::read)? },
+            kind::STORAGE => ServerMsg::Storage { zeny: r.var()?, cap: r.var32()?, items: read_list(&mut r, |r| Some((r.str()?, r.var32()?)))? },
             kind::SHOP => ServerMsg::Shop { npc: r.str()?, name: r.str()?, items: read_list(&mut r, |r| r.str())?, buy_pct: r.u8()?, sell_pct: r.u8()? },
             kind::SHOP_DONE => ServerMsg::ShopDone { spent: r.var()?, earned: r.var()? },
             kind::REFINED => ServerMsg::Refined { item: r.str()?, ok: r.u8()? != 0, refine: r.u8()?, slip: r.u8()? },
@@ -2005,8 +2039,17 @@ impl ServerMsg {
 pub struct CastPrefs {
     /// The pointer picks the monster and places ground skills.
     pub manual_aim: bool,
-    /// Auto-cast slots (bit i = slot i).
-    pub auto: u16,
+    /// The AI casts the loadout's auto skills by itself.
+    pub ai: bool,
+}
+
+/// Which way a `STORAGE_MOVE` goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageDir {
+    /// Bag → account storage.
+    Put,
+    /// Account storage → bag.
+    Take,
 }
 
 /// Auto-use of consumables (`USE_PREFS`): the percent of HP and SP below
@@ -2075,6 +2118,15 @@ pub enum ClientMsg {
     SkillReset,
     /// Put a learned active skill in a hotbar slot (empty = clear).
     SkillSlot { slot: u8, skill: String },
+    /// A hotbar slot's whole chain (empty = clear).
+    SkillChain { slot: u8, skills: Vec<String> },
+    /// The auto-cast skills, in order.
+    SkillAuto { skills: Vec<String> },
+    /// Show the account storage (town).
+    StorageOpen,
+    /// Move stacks (instance keys, counts) and zeny between the bag and
+    /// the account storage, all or nothing.
+    StorageMove { dir: StorageDir, items: Vec<(String, u32)>, zeny: u64 },
     /// Play an emote (`0..=MAX_EMOTE`; others are ignored).
     Emote { emote: u8 },
     /// Sit down (1, hubs only) or stand up (0).
@@ -2172,8 +2224,26 @@ impl ClientMsg {
             }
             ClientMsg::CastPrefs(p) => {
                 b.put_u8(kind::CAST_PREFS);
-                b.put_u8(u8::from(p.manual_aim));
-                b.put_u16_le(p.auto);
+                b.put_u8(u8::from(p.manual_aim) | u8::from(p.ai) << 1);
+            }
+            ClientMsg::SkillChain { slot, skills } => {
+                b.put_u8(kind::SKILL_CHAIN);
+                b.put_u8(*slot);
+                put_list(&mut b, skills, |b, id| b.put_str(id));
+            }
+            ClientMsg::SkillAuto { skills } => {
+                b.put_u8(kind::SKILL_AUTO);
+                put_list(&mut b, skills, |b, id| b.put_str(id));
+            }
+            ClientMsg::StorageOpen => b.put_u8(kind::STORAGE_OPEN),
+            ClientMsg::StorageMove { dir, items, zeny } => {
+                b.put_u8(kind::STORAGE_MOVE);
+                b.put_u8(u8::from(*dir == StorageDir::Take));
+                put_list(&mut b, items, |b, (key, n)| {
+                    b.put_str(key);
+                    b.put_var((*n).into());
+                });
+                b.put_var(*zeny);
             }
             ClientMsg::UsePrefs(p) => {
                 b.put_u8(kind::USE_PREFS);
@@ -2353,7 +2423,21 @@ impl ClientMsg {
                     let (aim, slots) = if r.is_empty() { ([0, 0], 0) } else { ([r.i8()?, r.i8()?], r.u16()?) };
                     ClientMsg::Input { seq, dx, dy, aim, slots }
                 }
-                kind::CAST_PREFS => ClientMsg::CastPrefs(CastPrefs { manual_aim: r.u8()? & 1 != 0, auto: r.u16()? }),
+                kind::CAST_PREFS => {
+                    let flags = r.u8()?;
+                    if !r.is_empty() {
+                        r.u16()?;
+                    }
+                    ClientMsg::CastPrefs(CastPrefs { manual_aim: flags & 1 != 0, ai: flags & 2 != 0 })
+                }
+                kind::SKILL_CHAIN => ClientMsg::SkillChain { slot: r.u8()?, skills: read_list(r, |r| r.str())? },
+                kind::SKILL_AUTO => ClientMsg::SkillAuto { skills: read_list(r, |r| r.str())? },
+                kind::STORAGE_OPEN => ClientMsg::StorageOpen,
+                kind::STORAGE_MOVE => ClientMsg::StorageMove {
+                    dir: if r.u8()? == 1 { StorageDir::Take } else { StorageDir::Put },
+                    items: read_list(r, |r| Some((r.str()?, r.var32()?)))?,
+                    zeny: r.var()?,
+                },
                 kind::USE_PREFS => ClientMsg::UsePrefs(UsePrefs { hp: r.u8()?.min(UsePrefs::MAX), sp: r.u8()?.min(UsePrefs::MAX) }),
                 kind::NPC_INTERACT => ClientMsg::NpcInteract { npc: r.str()? },
                 kind::MISSION_SELECT => ClientMsg::MissionSelect { mission: r.str()?, public: r.bool()? },
@@ -2409,7 +2493,7 @@ impl ClientMsg {
             })
         };
         // The retired ready flag (`LOBBY_READY`) is unknown now: ignored.
-        let known = k != kind::LOBBY_READY && matches!(k, INPUT_KIND | kind::PING..=kind::ITEM_USE | kind::CHAT_REQ | kind::PARTY_REQ | kind::INSPECT_REQ | kind::FRIEND_REQ | kind::TRADE_REQ | kind::FEEDBACK_REQ | kind::STAGE_RESUME | kind::LOBBY_MODIFIERS | kind::MISSION_START | kind::CAST_PREFS | kind::SHOP_DEAL | kind::REFINE | kind::CARD | kind::MOUNT_REQ | kind::USE_PREFS | kind::QUIVER_REQ | kind::QUEST_REQ | kind::PARTIES_REQ | kind::COMPANION_CMD | kind::TOWN_SKILL);
+        let known = k != kind::LOBBY_READY && matches!(k, INPUT_KIND | kind::PING..=kind::ITEM_USE | kind::CHAT_REQ | kind::PARTY_REQ | kind::INSPECT_REQ | kind::FRIEND_REQ | kind::TRADE_REQ | kind::FEEDBACK_REQ | kind::STAGE_RESUME | kind::LOBBY_MODIFIERS | kind::MISSION_START | kind::CAST_PREFS | kind::SHOP_DEAL | kind::REFINE | kind::CARD | kind::MOUNT_REQ | kind::USE_PREFS | kind::QUIVER_REQ | kind::QUEST_REQ | kind::PARTIES_REQ | kind::COMPANION_CMD | kind::TOWN_SKILL | kind::SKILL_CHAIN | kind::SKILL_AUTO | kind::STORAGE_OPEN | kind::STORAGE_MOVE);
         if !known {
             return Err(Unknown);
         }
@@ -2568,7 +2652,11 @@ mod tests {
             ClientMsg::HubLeave,
             ClientMsg::HubChannels,
             ClientMsg::Input { seq: 7, dx: 1.0, dy: -0.5, aim: [-12, 100], slots: 0b10_0000_0101 },
-            ClientMsg::CastPrefs(CastPrefs { manual_aim: true, auto: 0b1001 }),
+            ClientMsg::CastPrefs(CastPrefs { manual_aim: true, ai: true }),
+            ClientMsg::SkillChain { slot: 2, skills: vec!["bolt".into(), "slide".into()] },
+            ClientMsg::SkillAuto { skills: vec!["heal".into()] },
+            ClientMsg::StorageOpen,
+            ClientMsg::StorageMove { dir: StorageDir::Take, items: vec![("sword+7".into(), 1), ("jellopy".into(), 300)], zeny: 1000 },
             ClientMsg::CastPrefs(CastPrefs::default()),
             ClientMsg::UsePrefs(UsePrefs { hp: 40, sp: 0 }),
             ClientMsg::ItemUse { item: "@hp".into() },
@@ -2702,7 +2790,7 @@ mod tests {
                 hits: vec![HitEvent { target: MONSTER_ENTITY_BASE + 7, amount: 13, flags: hit::CRITICAL | hit::KILL | 0x30 }],
             },
             ServerMsg::Progress { level: 31, exp: 87_000, exp_to_next: 97_000, gained: 353 },
-            ServerMsg::Skills { level: 12, points: 3, skills: vec![("bolt".into(), 4), ("slide".into(), 1)], hotbar: vec!["bolt".into(), String::new()] },
+            ServerMsg::Skills { level: 12, points: 3, skills: vec![("bolt".into(), 4), ("slide".into(), 1)], hotbar: vec![vec!["bolt".into(), "slide".into()], Vec::new()], auto: vec!["bolt".into()] },
             ServerMsg::Cast {
                 caster: 300,
                 skill: "bolt".into(),
@@ -2913,7 +3001,7 @@ pub(crate) mod golden {
             ("progress", ServerMsg::Progress { level: 31, exp: 87_000, exp_to_next: 97_000, gained: 353 }.encode()),
             (
                 "skills",
-                ServerMsg::Skills { level: 12, points: 3, skills: vec![("bolt".into(), 4)], hotbar: vec!["bolt".into(), String::new()] }.encode(),
+                ServerMsg::Skills { level: 12, points: 3, skills: vec![("bolt".into(), 4)], hotbar: vec![vec!["bolt".into(), "slide".into()], Vec::new()], auto: vec!["bolt".into()] }.encode(),
             ),
             (
                 "cast",
@@ -3083,7 +3171,7 @@ pub(crate) mod golden {
         ("player_vitals", "2aac02287a07830101800503041f"),
         ("combat", "2b01ac0206878080040287808004c80115ac020002"),
         ("progress", "2c1fd8a705e8f505e102"),
-        ("skills", "2d0c030104626f6c74040204626f6c7400"),
+        ("skills", "2d0c030104626f6c7404020204626f6c7405736c696465000104626f6c74"),
         ("cast", "2eac0204626f6c74a002d0009c04e80701090102a002d0004000024000f02eac0203"),
         ("zone_end", "2f09"),
         ("stage_end", "3401a503d209cd8306904e"),
@@ -3142,10 +3230,33 @@ pub(crate) mod golden {
     /// (`cast prefs golden`).
     #[test]
     fn cast_prefs_match_the_dart_golden() {
-        let prefs = CastPrefs { manual_aim: true, auto: 0x8009 };
+        let prefs = CastPrefs { manual_aim: true, ai: true };
         let b = ClientMsg::CastPrefs(prefs).encode();
-        assert_eq!(hex(&b), "85010980");
+        assert_eq!(hex(&b), "8503");
         assert_eq!(ClientMsg::decode(&b), Ok(ClientMsg::CastPrefs(prefs)));
+        // The older form with a trailing u16 (per-slot auto) still parses.
+        assert_eq!(ClientMsg::decode(&[0x85, 0x01, 0x09, 0x80]), Ok(ClientMsg::CastPrefs(CastPrefs { manual_aim: true, ai: false })));
+    }
+
+    /// Hotbar chains, auto skills and the account storage (0xAE, 0xAF,
+    /// 0xAB, 0xAC, 0xAD). Change only together with `client_test.dart`
+    /// (`chain and storage goldens`).
+    #[test]
+    fn chains_and_storage_match_the_dart_goldens() {
+        let chain = ClientMsg::SkillChain { slot: 2, skills: vec!["bolt".into(), "slide".into()] }.encode();
+        assert_eq!(hex(&chain), "ae020204626f6c7405736c696465");
+        let auto = ClientMsg::SkillAuto { skills: vec!["heal".into()] }.encode();
+        assert_eq!(hex(&auto), "af01046865616c");
+        assert_eq!(hex(&ClientMsg::StorageOpen.encode()), "ab");
+        let mv = ClientMsg::StorageMove { dir: StorageDir::Take, items: vec![("sword+7".into(), 1), ("jellopy".into(), 300)], zeny: 1000 }.encode();
+        assert_eq!(hex(&mv), "ac01020773776f72642b3701076a656c6c6f7079ac02e807");
+        let st = ServerMsg::Storage { zeny: 1000, cap: 600, items: vec![("sword+7".into(), 1)] };
+        let b = st.encode();
+        assert_eq!(hex(&b), "ade807d8040107 73776f72642b3701".replace(' ', ""));
+        assert_eq!(ServerMsg::decode(&b), Some(st));
+        for m in [chain, auto, mv] {
+            assert!(ClientMsg::decode(&m).is_ok());
+        }
     }
 
     /// Auto-use thresholds (0xA7). Change only together with

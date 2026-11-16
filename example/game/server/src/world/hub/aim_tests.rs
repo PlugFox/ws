@@ -33,10 +33,10 @@ fn stage(archetype: &str, skills: &[(&str, u8)], allies: u32) -> HubInstance {
     let mut stage = HubInstance::stage(1, "m1", world, HubSimConfig::default()).with_horde(horde).with_skills(Arc::new(book()));
     stage.dice = combat::Rng::new(5);
     let mut loadout = Loadout::default();
-    loadout.hotbar.resize(combat::skills::SLOTS, String::new());
+    loadout.hotbar.resize(combat::skills::SLOTS, Default::default());
     for (i, (id, lvl)) in skills.iter().enumerate() {
         loadout.skills.insert(id.to_string(), *lvl);
-        loadout.hotbar[i] = id.to_string();
+        loadout.hotbar[i] = id.to_string().into();
     }
     let mut out = Vec::new();
     stage.join(PlayerProfile { archetype: archetype.into(), level: 10, loadout, ..profile(1) }, Uuid::nil(), None, 0, &mut out);
@@ -91,13 +91,12 @@ fn press(stage: &mut HubInstance, aim: [i8; 2], slots: u16) -> Vec<(String, f32,
 }
 
 fn auto(stage: &mut HubInstance, mask: u16) {
-    let manual = stage.players[0].prefs.manual_aim;
-    stage.cast_prefs(1, CastPrefs { manual_aim: manual, auto: mask });
+    stage.auto_slots(1, mask);
 }
 
 fn manual(stage: &mut HubInstance, on: bool) {
-    let auto = stage.players[0].prefs.auto;
-    stage.cast_prefs(1, CastPrefs { manual_aim: on, auto });
+    let ai = stage.players[0].prefs.ai;
+    stage.cast_prefs(1, CastPrefs { manual_aim: on, ai });
 }
 
 #[test]
@@ -133,7 +132,7 @@ fn auto_cast_waits_while_everyone_has_the_buff_and_renews_it_before_it_ends() {
     auto(&mut stage, 1);
     give(&mut stage, 1, "haste", 10.0);
     give(&mut stage, 2, "haste", 10.0);
-    assert!(press(&mut stage, [0, 0], 1).is_empty(), "everyone has it: no auto-cast");
+    assert!(press(&mut stage, [0, 0], 0).is_empty(), "everyone has it: no auto-cast");
     // Member 2's runs out within the refresh window: renewed on them.
     give(&mut stage, 1, "haste", 30.0);
     let i2 = stage.find(2).unwrap();
@@ -141,7 +140,7 @@ fn auto_cast_waits_while_everyone_has_the_buff_and_renews_it_before_it_ends() {
     f2.refresh(u32::MAX); // drop the 10 s buff
     stage.players[i2].fighter = Some(f2);
     give(&mut stage, 2, "haste", 2.0);
-    let casts = press(&mut stage, [0, 0], 1);
+    let casts = press(&mut stage, [0, 0], 0);
     assert_eq!(casts.len(), 1, "about to expire counts as missing");
     assert!((casts[0].1 - 7.5).abs() < 1e-3, "renewed on member 2: {casts:?}");
     assert!(buff_left(&stage, 2, "haste") > 5 * stage.config.tick_hz);
@@ -163,8 +162,10 @@ fn a_press_by_hand_renews_a_party_buff_everyone_has() {
 fn auto_cast_keeps_a_self_buff_up_without_recasting_it_early() {
     let mut stage = stage("swordsman", &[("endure", 1)], 0);
     auto(&mut stage, 1);
-    assert_eq!(press(&mut stage, [0, 0], 1).len(), 1, "not up yet: cast");
-    assert!(press(&mut stage, [0, 0], 1).is_empty(), "up: auto-cast waits");
+    assert_eq!(press(&mut stage, [0, 0], 0).len(), 1, "not up yet: the AI casts it");
+    for _ in 0..40 {
+        assert!(press(&mut stage, [0, 0], 0).is_empty(), "up: auto-cast waits");
+    }
     auto(&mut stage, 0);
     assert_eq!(press(&mut stage, [0, 0], 1).len(), 1, "a press by hand recasts it");
 }
@@ -180,10 +181,10 @@ fn heal_takes_the_lowest_hp_share_and_auto_cast_leaves_scratches() {
     fighter_mut(&mut stage, 2).hp = max2 - 1;
     fighter_mut(&mut stage, 3).hp = max3 - 1;
     auto(&mut stage, 1);
-    assert!(press(&mut stage, [0, 0], 1).is_empty(), "a scratch is no reason to auto-heal");
+    assert!(press(&mut stage, [0, 0], 0).is_empty(), "a scratch is no reason to auto-heal");
     fighter_mut(&mut stage, 3).hp = max3 / 3;
     fighter_mut(&mut stage, 2).hp = max2 / 2;
-    let casts = press(&mut stage, [0, 0], 1);
+    let casts = press(&mut stage, [0, 0], 0);
     assert!((casts[0].1 - 12.5).abs() < 1e-3, "the lowest share first: {casts:?}");
 }
 
@@ -203,7 +204,8 @@ fn manual_aiming_picks_the_monster_nearest_the_pointer() {
     assert!(casts[0].1 > 9.5, "manual: the nearest to the pointer, {casts:?}");
     // An auto-cast slot still aims itself.
     auto(&mut stage, 1);
-    let casts = press(&mut stage, pointer, 1);
+    fighter_mut(&mut stage, 1).cooldowns.fill(0);
+    let casts = press(&mut stage, pointer, 0);
     assert!(casts[0].1 < 9.5, "auto-cast: automatic, {casts:?}");
 }
 
@@ -265,7 +267,167 @@ fn auto_cast_aims_itself_while_a_press_by_hand_follows_the_pointer() {
     fighter_mut(&mut stage, 1).cooldowns.fill(0);
     manual(&mut stage, true);
     auto(&mut stage, 1);
-    stage.tick(&mut Vec::new());
-    let casts = press(&mut stage, west, 1);
+    fighter_mut(&mut stage, 1).cooldowns.fill(0);
+    let casts = press(&mut stage, west, 0);
     assert!(casts[0].1 > 10.5, "auto-cast: toward the monster, wherever the mouse is, {casts:?}");
+}
+
+/// Player 1, a mage with Chill and Homing chained on slot 1 (the hotbar's
+/// first), a tough monster in reach.
+fn chained() -> HubInstance {
+    let mut stage = stage("mage", &[("chill", 1), ("homing", 1)], 0);
+    put(&mut stage, 1, 4.5, 5.5);
+    let h = stage.horde_mut().unwrap();
+    let m = h.spawn(0, 7.5, 5.5).unwrap();
+    h.store_mut().hp[m as usize] = 1_000_000;
+    let mut l = stage.players[0].profile.loadout.clone();
+    stage.skills.set_chain(&mut l, 0, &["chill".into(), "homing".into()]).unwrap();
+    stage.set_loadout(1, l, &mut Vec::new());
+    stage
+}
+
+/// Ready to cast again at once: no cooldowns, no wind-up, full SP.
+fn rested(stage: &mut HubInstance) {
+    let f = fighter_mut(stage, 1);
+    f.cooldowns.fill(0);
+    f.casting = None;
+    f.sp = f.max_sp;
+}
+
+/// Keys up long enough to count as released (a one-tick gap is not).
+fn release(stage: &mut HubInstance) {
+    press(stage, [0, 0], 0);
+    press(stage, [0, 0], 0);
+}
+
+fn names(casts: &[(String, f32, f32)]) -> Vec<&str> {
+    casts.iter().map(|c| c.0.as_str()).collect()
+}
+
+#[test]
+fn a_chain_casts_its_next_skill_on_each_press() {
+    let mut stage = chained();
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        rested(&mut stage);
+        seen.extend(press(&mut stage, [0, 0], 1).into_iter().map(|c| c.0));
+        release(&mut stage);
+    }
+    assert_eq!(seen, ["chill", "homing", "chill"], "1 → 2 → back to 1");
+}
+
+#[test]
+fn a_chain_skips_what_cannot_be_cast() {
+    let mut stage = chained();
+    rested(&mut stage);
+    let chill = skill(&stage, "chill");
+    fighter_mut(&mut stage, 1).cooldowns[chill as usize] = 1000;
+    assert_eq!(names(&press(&mut stage, [0, 0], 1)), ["homing"], "Chill cooling: Homing instead");
+    release(&mut stage);
+    rested(&mut stage);
+    assert_eq!(names(&press(&mut stage, [0, 0], 1)), ["chill"], "the cursor went past Homing");
+}
+
+#[test]
+fn a_held_chain_rotates_at_its_own_pace_and_a_pause_starts_it_over() {
+    let mut stage = chained();
+    let hz = stage.tick_hz();
+    let mut seen = Vec::new();
+    // Held for one second: a cast on the press, then one per repeat gap.
+    for _ in 0..hz {
+        rested(&mut stage);
+        seen.extend(press(&mut stage, [0, 0], 1).into_iter().map(|c| c.0));
+    }
+    let repeat = (0.3 * hz as f32).round() as usize;
+    assert_eq!(seen.len(), (hz as usize - 1) / repeat + 1, "{seen:?}");
+    assert!(seen.windows(2).all(|w| w[0] != w[1]), "it alternates: {seen:?}");
+    // Released after Chill: three seconds later the chain starts at Chill again.
+    while seen.last().map(String::as_str) != Some("chill") {
+        rested(&mut stage);
+        seen.extend(press(&mut stage, [0, 0], 1).into_iter().map(|c| c.0));
+    }
+    for _ in 0..3 * hz + 1 {
+        press(&mut stage, [0, 0], 0);
+    }
+    rested(&mut stage);
+    assert_eq!(names(&press(&mut stage, [0, 0], 1)), ["chill"]);
+}
+
+#[test]
+fn the_ai_casts_auto_skills_off_the_hotbar_only_while_it_is_on() {
+    let mut stage = stage("mage", &[("chill", 1)], 0);
+    put(&mut stage, 1, 4.5, 5.5);
+    let h = stage.horde_mut().unwrap();
+    let m = h.spawn(0, 7.5, 5.5).unwrap();
+    h.store_mut().hp[m as usize] = 1_000_000;
+    // Chill auto-cast but on no slot.
+    let mut l = stage.players[0].profile.loadout.clone();
+    stage.skills.set_slot(&mut l, 0, "").unwrap();
+    stage.skills.set_auto(&mut l, &["chill".into()]).unwrap();
+    stage.set_loadout(1, l, &mut Vec::new());
+    for _ in 0..10 {
+        assert!(press(&mut stage, [0, 0], 0).is_empty(), "the AI is off");
+    }
+    stage.cast_prefs(1, CastPrefs { manual_aim: false, ai: true });
+    assert_eq!(names(&press(&mut stage, [0, 0], 0)), ["chill"], "on: it casts by itself");
+    // Its pace: not again at once, even when ready.
+    rested(&mut stage);
+    assert!(press(&mut stage, [0, 0], 0).is_empty(), "the AI keeps a gap between casts");
+}
+
+#[test]
+fn a_cast_by_hand_gives_the_player_the_turn() {
+    let mut stage = stage("mage", &[("chill", 1), ("homing", 1)], 0);
+    put(&mut stage, 1, 4.5, 5.5);
+    let h = stage.horde_mut().unwrap();
+    let m = h.spawn(0, 7.5, 5.5).unwrap();
+    h.store_mut().hp[m as usize] = 1_000_000;
+    let mut l = stage.players[0].profile.loadout.clone();
+    stage.skills.set_auto(&mut l, &["chill".into()]).unwrap();
+    stage.set_loadout(1, l, &mut Vec::new());
+    stage.cast_prefs(1, CastPrefs { manual_aim: false, ai: true });
+    rested(&mut stage);
+    assert_eq!(names(&press(&mut stage, [0, 0], 0b10)), ["homing"], "the press goes first");
+    let hz = stage.tick_hz();
+    let mut quiet = 0;
+    loop {
+        rested(&mut stage);
+        if !press(&mut stage, [0, 0], 0).is_empty() {
+            break;
+        }
+        quiet += 1;
+        assert!(quiet < hz, "the AI comes back");
+    }
+    assert!(quiet as f32 >= 0.4 * hz as f32, "quiet for about half a second: {quiet} ticks");
+}
+
+#[test]
+fn a_held_chain_keeps_its_pace_when_input_frames_skip_ticks() {
+    let mut stage = chained();
+    let hz = stage.tick_hz();
+    let mut seen = Vec::new();
+    // Held for a second, but every third tick gets no input frame.
+    for t in 0..hz {
+        rested(&mut stage);
+        let slots = if t % 3 == 2 { 0 } else { 1 };
+        seen.extend(press(&mut stage, [0, 0], slots).into_iter().map(|c| c.0));
+    }
+    let repeat = (0.3 * hz as f32).round() as usize;
+    assert!(seen.len() <= (hz as usize - 1) / repeat + 1, "no extra presses from gaps: {seen:?}");
+}
+
+#[test]
+fn a_cancelled_wind_up_gives_the_chain_step_back() {
+    let mut stage = chained();
+    rested(&mut stage);
+    let casts = press(&mut stage, [0, 0], 1);
+    assert_eq!(names(&casts), ["chill"]);
+    if fighter(&stage, 1).casting.is_some() {
+        // Walking cancels the wind-up: Chill is next again.
+        let i = stage.find(1).unwrap();
+        stage.players[i].dir = (1.0, 0.0);
+        stage.tick(&mut Vec::new());
+        stage.players[i].dir = (0.0, 0.0);
+        assert_eq!(fighter(&stage, 1).hotbar[0].cursor, 0);
+    }
 }

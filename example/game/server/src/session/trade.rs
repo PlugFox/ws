@@ -51,11 +51,18 @@ impl SessionVault {
         if ca.id != a.character_id || cb.id != b.character_id {
             return Err(TradeError::Gone);
         }
-        let (na, nb) = exchange(&ca.bag, &cb.bag, &a.offer, &b.offer)?;
-        if let Err(e) = CharacterRepo::store_trade(&self.pool, (ca.id, &na), (cb.id, &nb)).await {
-            warn!("Trade {} between characters {} and {} not stored: {e}", deal.id, ca.id, cb.id);
-            return Err(TradeError::Storage);
+        if ca.fenced || cb.fenced {
+            return Err(TradeError::Gone);
         }
+        let (na, nb) = exchange(&ca.bag, &cb.bag, &a.offer, &b.offer)?;
+        let revs = match CharacterRepo::store_trade(&self.pool, (ca.id, ca.rev, &na), (cb.id, cb.rev, &nb)).await {
+            Ok(revs) => revs,
+            Err(e) => {
+                warn!("Trade {} between characters {} and {} not stored: {e}", deal.id, ca.id, cb.id);
+                return Err(TradeError::Storage);
+            }
+        };
+        [ca.rev, cb.rev] = revs;
         ca.set_bag(na.clone());
         cb.set_bag(nb.clone());
         info!("Trade {}: characters {} and {} exchanged", deal.id, ca.id, cb.id);

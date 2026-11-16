@@ -6,6 +6,16 @@ typedef ChangelogEntry = ({String title, String date, List<String> items});
 
 const changelog = <ChangelogEntry>[
   (
+    title: 'Skill chains, an AI switch and a shared storage',
+    date: '2026-11-16',
+    items: [
+      'Auto-cast no longer needs a hotbar slot: click the A badge of a skill in the skill tree (K) and the AI casts it by itself whenever a target needs it: heals and pitches first, then buffs, then attacks. The strip at the top of the tree shows your auto skills in order; drag to reorder.',
+      'The AI button left of the hotbar (or the ` key, the left stick click on a gamepad, the AI button on touch) turns all auto-cast off and on at once, for when you want to do it all by hand. Whatever you press always goes first.',
+      'Skill chains: drop up to five skills on one hotbar slot (onto its + while the skill tree is open). Each press casts the next one that is ready, skipping what is cooling, short of SP or without a target; hold the key and the rotation goes on. Pips on the slot show the chain, hovering fans it out.',
+      'Account storage (Alt+B in town, or Storage in the Inventory window): 600 stacks and zeny shared by all your characters, with search, category tabs, sorting, quantities, Deposit materials and Stack into storage. Every move is stored at once together with your bag.',
+    ],
+  ),
+  (
     title: 'A bigger bag, live stats, alchemy supplies and fixes',
     date: '2026-11-16',
     items: [

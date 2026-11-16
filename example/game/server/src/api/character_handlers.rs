@@ -294,6 +294,13 @@ pub async fn select_character(
         Some(s) => Some(s.character.write().await),
         None => None,
     };
+    // The character this replaces is stored first: dropping its unsaved
+    // changes would roll them back (a failed refine undone by a re-select).
+    if let Some(Some(current)) = char_lock.as_deref_mut()
+        && let Err(err) = crate::session::flusher::StateFlusher::flush_character(&state.pool, auth.user_id, current).await
+    {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": err.to_string() }))));
+    }
     let record = CharacterRepo::find_by_user_and_id(&state.pool, auth.user_id, id)
         .await
         .map_err(|err| {
@@ -333,6 +340,7 @@ pub async fn select_character(
     }
     char_state.loadout = loadout;
     char_state.homunculus = record.homunculus.as_ref().map(|h| h.0.clone());
+    char_state.rev = record.rev;
     // The leaderboard counters (a read failure starts them from zero only
     // in memory; the stored ones are overwritten on the next save, so
     // refuse instead).
