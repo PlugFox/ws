@@ -6,7 +6,9 @@ description: >
 version: 2.0.0-dev.1
 repository: https://github.com/plugfox/ws/tree/master/flutter
 issue_tracker: https://github.com/plugfox/ws/issues
-publish_to: none # until the first release
+# Not published: the name is taken on pub.dev, and the class is a README
+# recipe (docs/DECISIONS.md D58). This package keeps it tested.
+publish_to: none
 
 topics:
   - websocket

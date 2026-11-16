@@ -1,3 +1,8 @@
+## 2.0.0-dev.2
+
+- Released with `ws` 2.0.0-dev.2, which it requires exactly. No changes to
+  the library.
+
 ## 2.0.0-dev.1
 
 - First release: the Rust transport for `ws` 2.0, with prebuilt libraries

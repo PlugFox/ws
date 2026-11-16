@@ -1,5 +1,5 @@
 name: ws_device_test
-description: Checks of ws, ws_native and ws_flutter on real devices.
+description: Checks of ws, ws_native and the Flutter lifecycle recipe on real devices.
 publish_to: none
 
 environment:

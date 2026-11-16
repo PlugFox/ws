@@ -1,4 +1,10 @@
-# ws_flutter
+# ws_flutter (not published)
+
+> This package is not on pub.dev: the name `ws_flutter` belongs to another
+> package there. `WebSocketLifecycle` is a recipe in the
+> [`ws` README](../README.md#flutter-app-lifecycle); copy
+> `lib/src/lifecycle.dart` into your app. This directory keeps the recipe
+> tested.
 
 App lifecycle for the [`ws`](https://pub.dev/packages/ws) WebSocket client
 in Flutter apps.

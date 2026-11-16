@@ -1209,8 +1209,8 @@ From `docs/review/future_risks.md` 2.1, 2.3, 2.5, 3.2, 3.3 and 5.1
 - **`connect()` and `reconnect()` end the suspension.** An explicit request
   to be connected wins, for example a push message that wakes the app to
   sync. `connect()` to the same URL while suspended is `resume()`.
-- **`ws_flutter`** (`flutter/`, published with the same version and tag
-  as `ws`, D43): `WebSocketLifecycle(client, {disconnectInBackground,
+- **`ws_flutter`** (`flutter/`; not published after all, it became a
+  README recipe, D58): `WebSocketLifecycle(client, {disconnectInBackground,
   networkChanges, binding})` on `AppLifecycleListener`:
   - `paused` → `suspend()`. Only Android and iOS report `paused`; a
     minimized desktop window or a background tab is never suspended;
@@ -1903,3 +1903,35 @@ Flutter and in browsers.
   GC, unverified.
 
 - Status: **measured**; the RSS item and the encoding follow-up are open.
+
+### D58. No `ws_flutter` package: the app lifecycle is a README recipe
+
+`ws_flutter` (D44) was to be published with `ws` 2.0.0-dev.1, but the name
+belongs to an unrelated package on pub.dev, and `ws` 2.0.0-dev.1 had
+already gone out with a README that told users to add it (they would get
+a version-solving failure, not the other package: it has no 2.0 versions).
+
+The package is one class, `WebSocketLifecycle`, about 40 lines of logic
+over `AppLifecycleListener`, `suspend()` and `resume()`. A renamed package
+(`ws_flutter_lifecycle` and `ws_lifecycle` were free) would keep fixes
+flowing to users, but adds a fourth release artifact, a staging script, a
+publish job and docs for very little code, while `suspend()`/`resume()`
+can still change during the dev releases. Decided:
+
+- The class is a recipe in the `ws` README ("Flutter app lifecycle"), with
+  the cases that are easy to get wrong spelled out in comments (`paused`
+  vs `inactive`, `hidden` on desktop and web, network events in the
+  background).
+- `flutter/` stays as an unpublished package (`publish_to: none`) so the
+  class keeps its tests and the CI job on Flutter 3.38.1 and 3.50.0;
+  `device_test` still uses it.
+- The release publishes `ws` and `ws_native` only: `stage_flutter.sh`, the
+  `ws_flutter` dry run, artifact and publish job, and its checks in
+  `release_check.dart` are gone. 2.0.0-dev.2 corrects the README.
+- `ws_native` pins the exact `ws` version (`stage_native.sh`), so every
+  `ws` release needs a `ws_native` release of the same version; its
+  automated publishing on pub.dev is required from 2.0.0-dev.2 on.
+
+A package can come back under a free name if users ask for one.
+
+- Status: **adopted**.

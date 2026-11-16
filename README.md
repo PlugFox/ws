@@ -6,7 +6,7 @@
 > shipping it to production:
 >
 > - **The API may still change** before `2.0.0`, including breaking changes
->   without a deprecation period. Pin an exact version (`ws: 2.0.0-dev.1`)
+>   without a deprecation period. Pin an exact version (`ws: 2.0.0-dev.2`)
 >   and read the [CHANGELOG](https://github.com/plugfox/ws/blob/master/CHANGELOG.md)
 >   before every upgrade.
 > - **Not yet proven in the field**: no long soak tests (hours of traffic,
@@ -46,20 +46,16 @@ Requirements: Dart 3.10+ (Flutter 3.38+).
 |---|---|---|
 | [`ws`](https://pub.dev/packages/ws) | The client, with a pure-Dart transport on native platforms and the browser's `WebSocket` on the web | Always |
 | [`ws_native`](https://pub.dev/packages/ws_native) | The Rust transport: TLS, framing and JSON parsing off the Dart thread | Android, iOS, macOS, Windows, Linux apps; recommended on mobile |
-| [`ws_flutter`](https://pub.dev/packages/ws_flutter) | Suspends the client in the background, checks and reconnects on resume and on network changes | Flutter apps on Android and iOS |
 
 Pub picks pre-releases only when asked, so give the version explicitly.
+`ws_native` requires exactly the same version as `ws`.
 
-**Flutter app:**
-
-```sh
-flutter pub add ws:2.0.0-dev.1 ws_native:2.0.0-dev.1 ws_flutter:2.0.0-dev.1
-```
-
-**Dart (CLI, server, `dart build cli`):**
+**Flutter app, Dart CLI or server (`dart build cli`):**
 
 ```sh
-dart pub add ws:2.0.0-dev.1 ws_native:2.0.0-dev.1
+flutter pub add ws:2.0.0-dev.2 ws_native:2.0.0-dev.2
+# or
+dart pub add ws:2.0.0-dev.2 ws_native:2.0.0-dev.2
 ```
 
 **Web only:** `ws` alone; `ws_native` does nothing in the browser.
@@ -68,10 +64,12 @@ Or in `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  ws: 2.0.0-dev.1
-  ws_native: 2.0.0-dev.1   # optional: the Rust transport
-  ws_flutter: 2.0.0-dev.1  # optional: Flutter app lifecycle
+  ws: 2.0.0-dev.2
+  ws_native: 2.0.0-dev.2 # optional: the Rust transport, same version as ws
 ```
+
+Flutter apps on Android and iOS should also tie the client to the app
+lifecycle: copy the [Flutter app lifecycle](#flutter-app-lifecycle) recipe.
 
 Then install the native transport once at startup (it becomes the default
 for every client created afterwards):
@@ -161,7 +159,8 @@ the background: the heartbeat and reconnects stop, and an open connection
 stays open (`suspend(disconnect: true)` closes it). Call `client.resume()`
 when it returns, and when the network changes: one ping checks the
 connection, and a dead one is replaced at once, without the backoff. In
-Flutter, [`ws_flutter`](https://pub.dev/packages/ws_flutter) does both.
+Flutter, the [Flutter app lifecycle](#flutter-app-lifecycle) recipe does
+both.
 
 No platform lets a socket live in the background for long: iOS gives
 seconds, Android cuts the network in Doze. Wake the app with a push message
@@ -290,6 +289,206 @@ print(server.last.received);    // from the client
 server.last.drop();             // simulate a lost connection
 ```
 
+## Recipes
+
+### Flutter app lifecycle
+
+Suspends the client when the app goes to the background and checks the
+connection when it comes back or the network changes. Copy it into your
+app; it is kept tested in
+[`flutter/`](https://github.com/plugfox/ws/tree/master/flutter) of this
+repository.
+
+```dart
+import 'dart:async';
+
+import 'package:flutter/widgets.dart';
+import 'package:ws/ws.dart';
+
+/// Ties a [WebSocketClient] to the app lifecycle and, optionally, to
+/// network changes. Call [dispose] when done; it does not close the client.
+final class WebSocketLifecycle {
+  WebSocketLifecycle(
+    this.client, {
+    this.disconnectInBackground = false,
+    Stream<Object?>? networkChanges,
+  }) {
+    _listener = AppLifecycleListener(onStateChange: _onStateChange);
+    _network = networkChanges?.listen(
+      (_) => _onNetworkChange(),
+      onError: (Object _, StackTrace _) {}, // a failing source only stops checks
+    );
+  }
+
+  final WebSocketClient<Object?> client;
+
+  /// Also close the connection in the background: frees the server sooner,
+  /// costs a full reconnect after every trip to another app.
+  final bool disconnectInBackground;
+
+  late final AppLifecycleListener _listener;
+  StreamSubscription<Object?>? _network;
+  bool _suspended = false; // in the background, client suspended
+  bool _away = false; // hidden or paused since the last resume
+
+  void _onStateChange(AppLifecycleState state) {
+    switch (state) {
+      // Android and iOS only. Not on `inactive`: a system dialog, the
+      // control center or a call make the app inactive for a moment.
+      case AppLifecycleState.paused:
+        _away = true;
+        if (_suspended) return;
+        _suspended = true;
+        client.suspend(disconnect: disconnectInBackground);
+      // Desktop and web: a minimized window or a background tab. Not
+      // suspended, only checked on return.
+      case AppLifecycleState.hidden:
+        _away = true;
+      case AppLifecycleState.resumed:
+        if (!_away) return;
+        _away = false;
+        _suspended = false;
+        client.resume().ignore(); // one ping; a dead connection is replaced
+      case AppLifecycleState.inactive || AppLifecycleState.detached:
+        break;
+    }
+  }
+
+  void _onNetworkChange() {
+    // A Wi-Fi to cellular switch leaves the old socket on an address that
+    // no longer works. In the background the check waits for the return.
+    if (!_suspended) client.resume().ignore();
+  }
+
+  void dispose() {
+    _listener.dispose();
+    unawaited(_network?.cancel());
+    _network = null;
+  }
+}
+```
+
+```dart
+final client = WebSocketClient.json();
+final lifecycle = WebSocketLifecycle(
+  client,
+  networkChanges: Connectivity().onConnectivityChanged, // connectivity_plus
+);
+await client.connect('wss://example.com/ws');
+// ...
+lifecycle.dispose();
+await client.close();
+```
+
+### Tokens and authentication
+
+`request` runs before every connection attempt, so a reconnect after an
+hour uses a fresh token, not the one from the first `connect()`. `onOpen`
+runs after the handshake and before the client reports `open`: messages
+sent there go first, and if it throws, the attempt counts as failed and the
+reconnect policy takes over.
+
+```dart
+final client = WebSocketClient.json(
+  options: WebSocketOptions(
+    rpc: const WebSocketJsonRpc(),
+    // In the handshake (native platforms; browsers cannot send headers).
+    request: (url, attempt) async => WebSocketRequest(
+      url,
+      headers: {'Authorization': 'Bearer ${await auth.freshToken()}'},
+    ),
+    // Or in the first message, on every platform.
+    onOpen: (client) async {
+      final reply = await client.rpc({
+        'method': 'auth',
+        'token': await auth.freshToken(),
+      });
+      if (reply['ok'] != true) throw StateError('auth rejected');
+    },
+  ),
+);
+```
+
+In the browser, put the token in the URL instead (`url.replace(queryParameters:
+...)` in `request`) or send it from `onOpen`.
+
+### Resubscribing after a reconnect
+
+Nothing is replayed after a reconnect: the server forgot the old
+connection's subscriptions. Keep them in the app and send them again from
+`onOpen`, so they are in place before anything else is sent.
+
+```dart
+final channels = <String>{};
+
+final client = WebSocketClient.json(
+  options: WebSocketOptions(
+    onOpen: (client) async {
+      for (final channel in channels) {
+        await client.push({'type': 'subscribe', 'channel': channel});
+      }
+    },
+  ),
+);
+
+Future<void> subscribe(String channel) async {
+  channels.add(channel);
+  // When offline, onOpen sends it on the next connection.
+  if (client.state.isOpen) {
+    await client.push({'type': 'subscribe', 'channel': channel});
+  }
+}
+```
+
+### Connection status in the UI
+
+`states` is a stream of a sealed class, so a `switch` covers every case.
+
+```dart
+StreamBuilder<WebSocketState>(
+  stream: client.states,
+  initialData: client.state,
+  builder: (context, snapshot) => Text(switch (snapshot.requireData) {
+    WebSocketState$Open() => 'Online',
+    WebSocketState$Connecting() => 'Connecting…',
+    WebSocketState$Reconnecting(:final delay) =>
+      'Offline, retrying in ${delay.inSeconds} s',
+    WebSocketState$Suspended() => 'Paused',
+    WebSocketState$Disconnected(:final error) =>
+      error == null ? 'Disconnected' : 'Disconnected: $error',
+    WebSocketState$Disconnecting() || WebSocketState$Closed() => 'Closed',
+  }),
+);
+```
+
+### Binary messages
+
+For heavy traffic, a binary protocol (Protocol Buffers, FlatBuffers,
+MessagePack or your own layout) avoids JSON encoding and decoding on the
+main isolate, and with `ws_native` it is where the client gains most (see
+[Performance](#performance)).
+
+```dart
+final client = WebSocketClient.binary(
+  options: WebSocketOptions(
+    // Called for every message, before the `messages` stream: the
+    // cheapest path.
+    onMessage: (Uint8List bytes) {
+      final data = ByteData.sublistView(bytes);
+      final type = data.getUint8(0);
+      final payload = Uint8List.sublistView(bytes, 1);
+      handle(type, payload);
+    },
+  ),
+);
+await client.connect('wss://example.com/ws');
+
+final message = Uint8List(1 + body.length)
+  ..[0] = 0x01 // message type
+  ..setRange(1, 1 + body.length, body);
+await client.push(message);
+```
+
 ## Performance
 
 `ws` against [`web_socket_channel`](https://pub.dev/packages/web_socket_channel),
@@ -301,7 +500,7 @@ how it was measured: [benchmark/METHODOLOGY.md](https://github.com/plugfox/ws/bl
 | | |
 |---|---|
 | Date | 2026-11-16 / 17 |
-| Packages | `ws` 2.0.0-dev.1, `ws_native` 2.0.0-dev.1, `web_socket_channel` 3.0.3 |
+| Packages | `ws` 2.0.0-dev.1, `ws_native` 2.0.0-dev.1 (the client and transport code is the same in 2.0.0-dev.2), `web_socket_channel` 3.0.3 |
 | Toolchain | Dart 3.14.0 (AOT), Flutter 3.47.9 (release), Rust 1.100.0 |
 | macOS | MacBook Pro, Apple M3 Max (14 cores, 36 GB), macOS 27.0.1 |
 | iPad | iPad Pro 11" (4th gen), Apple M2, iPadOS 26.6.1 |

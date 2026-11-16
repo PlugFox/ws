@@ -4,7 +4,7 @@
 
 /// Version of this package; `dart run ws:install` downloads the library of
 /// the same release.
-const String wsVersion = '2.0.0-dev.1';
+const String wsVersion = '2.0.0-dev.2';
 
 /// GitHub release that holds the native libraries of this version.
 const String nativeReleaseTag = wsVersion;

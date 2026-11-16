@@ -146,7 +146,7 @@ jobs:
         run: dart test --platform chrome --compiler dart2wasm --reporter expanded
 
   flutter:
-    name: "ws_flutter (Flutter ${{ matrix.flutter }})"
+    name: "Flutter lifecycle recipe (Flutter ${{ matrix.flutter }})"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:

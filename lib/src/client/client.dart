@@ -122,7 +122,8 @@ abstract interface class WebSocketClient<T>
   /// Pending [connect] futures keep waiting. Does nothing once closed.
   ///
   /// The OS may freeze the app and kill its sockets without telling either
-  /// side, so pair it with [resume] (`ws_flutter` does both).
+  /// side, so pair it with [resume] (the README's Flutter lifecycle recipe
+  /// does both).
   void suspend({bool disconnect = false});
 
   /// Ends [suspend] and checks the connection now, without the backoff.

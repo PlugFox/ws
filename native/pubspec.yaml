@@ -2,7 +2,7 @@ name: ws_native
 description: >
   Native (Rust) transport for the ws WebSocket client: TLS, framing and JSON
   parsing off the Dart thread. Install it with WsNative.install().
-version: 2.0.0-dev.1
+version: 2.0.0-dev.2
 repository: https://github.com/plugfox/ws/tree/master/native
 issue_tracker: https://github.com/plugfox/ws/issues
 publish_to: none # until the first release

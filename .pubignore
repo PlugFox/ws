@@ -77,7 +77,7 @@ target/
 
 # Separate package `ws_native`, published from native/.
 /native/
-# Separate package `ws_flutter`, published from flutter/.
+# The Flutter lifecycle recipe (README), tested in flutter/, not published.
 /flutter/
 # Device checks (Flutter app), not part of any package.
 /device_test/

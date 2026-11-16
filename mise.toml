@@ -21,7 +21,7 @@ jobs = 4
 # --- dependencies ------------------------------------------------------------
 
 [tasks.deps]
-description = "Fetch Dart packages of ws, ws_native, ws_flutter and the benchmarks"
+description = "Fetch Dart packages of ws, ws_native, the Flutter lifecycle recipe and the benchmarks"
 run = [
   "dart pub get",
   "dart pub get --directory=native",
@@ -109,7 +109,7 @@ description = "Integration tests on a connected device (args: <device-id> [--use
 run = "tool/device_test.sh"
 
 [tasks."test:flutter"]
-description = "ws_flutter tests (app lifecycle)"
+description = "Flutter lifecycle recipe tests (flutter/, not published)"
 dir = "flutter"
 run = "flutter test"
 

@@ -1,3 +1,16 @@
+## 2.0.0-dev.2
+
+- `ws_flutter` is not published: the name belongs to another package on
+  pub.dev. Do not add `ws_flutter` as the 2.0.0-dev.1 README said; the
+  app lifecycle handling (`WebSocketLifecycle`) is now a recipe in the
+  README, "Flutter app lifecycle".
+- README: a pre-release warning, install instructions, recipes (Flutter
+  app lifecycle, tokens and authentication, resubscribing after a
+  reconnect, connection status in the UI, binary messages) and a
+  performance comparison with `web_socket_channel`.
+- `ws_native` must have the same version as `ws`: use `ws_native`
+  2.0.0-dev.2 with this release.
+
 ## 2.0.0-dev.1
 
 - **BREAKING**: complete rewrite. New API: `WebSocketClient.binary()`,

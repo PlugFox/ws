@@ -1,6 +1,7 @@
 # ws_device_test
 
-Integration tests of `ws`, `ws_native` and `ws_flutter` on real devices,
+Integration tests of `ws`, `ws_native` and the Flutter lifecycle recipe
+(`../flutter`) on real devices,
 against the Rust test server (`../server`) on the development machine.
 Not published.
 

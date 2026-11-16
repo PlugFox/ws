@@ -181,7 +181,8 @@ interceptors was dropped (see "Not in 2.0" below).
   (DECISIONS.md D41).
 - [x] App lifecycle: iOS suspends sockets in the background. Reconnect on
   resume. Do not drain the battery with heartbeats in the background.
-  `suspend()`/`resume()` and `ws_flutter` (DECISIONS.md D44). Still open:
+  `suspend()`/`resume()` and the Flutter lifecycle recipe in the README
+  (DECISIONS.md D44, D58). Still open:
   T-resume on real devices (30 s, 5 min, 2 h in the background).
 - [x] App Store review: plain BSD sockets are fine; ATS does not apply
   (docs/SECURITY.md); the privacy-manifest entry for the iOS library is in

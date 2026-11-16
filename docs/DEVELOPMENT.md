@@ -40,34 +40,32 @@ Things the task list does not show:
   with cargo-zigbuild (D40). Android libraries are 16 KB page aligned
   (`rust/build.rs`; `llvm-readelf -l` shows `0x4000`).
 - Releasing is one tag (DECISIONS.md D43):
-  1. Bump `version` in `pubspec.yaml`, `native/pubspec.yaml` and
-     `flutter/pubspec.yaml`, add the same heading to the three CHANGELOGs,
-     and run
+  1. Bump `version` in `pubspec.yaml` and `native/pubspec.yaml`, add the
+     same heading to both CHANGELOGs, and run
      `dart run tool/native_release.dart --allow-empty`, which updates
      `wsVersion`. `dart run tool/release_check.dart <version>` checks all
      of it.
   2. Push the tag (`git tag 2.0.0 && git push origin 2.0.0`).
      `release.yml` builds and verifies the 12 libraries, writes the
-     hashes, stages `ws_native` with the third-party notices and
-     `ws_flutter`, runs the dry runs and creates a **draft** release.
-  3. Look at the draft, then approve the `pub.dev` environment. The
-     workflow publishes the release and `ws`, then `ws_native` and
-     `ws_flutter` (approve those two jobs as well).
+     hashes, stages `ws_native` with the third-party notices, runs the
+     dry runs and creates a **draft** release.
+  3. Look at the draft, then approve the `pub.dev` environment for
+     `Publish ws` (undrafts the GitHub release, publishes `ws`, waits
+     until pub.dev serves it) and then for `Publish ws_native`.
+     `ws_native` pins the exact `ws` version, so both are always released
+     together.
 
-  One-time setup for the first release of `ws_native` and `ws_flutter`:
-  OIDC cannot create a package, and the staged packages depend on
-  `ws: ^<version>` from pub.dev, so they cannot be published before `ws`.
-  On the first tag approve only the `publish` job (GitHub release, then
-  `ws`), leave `publish-native` and `publish-flutter` unapproved, and
-  publish the staged packages of the same run by hand:
-  `gh run download <run-id> -n ws_native -n ws_flutter`, then
-  `dart pub publish` in `ws_native` and `flutter pub publish` in
-  `ws_flutter`. Then enable automated publishing for them (below).
-  - On pub.dev, for the three packages: Admin → Automated publishing → GitHub
-    Actions, repository `PlugFox/ws`, tag pattern `{{version}}`, require
-    environment `pub.dev`.
-  - In the repository: create the environment `pub.dev` with required
-    reviewers, and turn on immutable releases.
+  One-time setup (done for 2.0.0-dev.1):
+  - In the repository: the environment `pub.dev` with required reviewers
+    and deployments only from tags; immutable releases on.
+  - On pub.dev, for `ws` and `ws_native`: Admin → Automated publishing →
+    GitHub Actions, repository `PlugFox/ws`, tag pattern `{{version}}`,
+    publishing from push events, require environment `pub.dev`.
+  - A new package cannot be created through OIDC, and a staged package
+    that depends on `ws` from pub.dev cannot be published before that
+    `ws` version exists. So a new package's first version is published by
+    hand from the run's artifact (`gh run download <run-id> -n <name>`)
+    after `Publish ws`; that is how `ws_native` 2.0.0-dev.1 went out.
 
   The release tooling runs on every push to `rewrite` that touches it
   (dry run, nothing is published). `mise run release:hashes` verifies
@@ -80,12 +78,13 @@ Things the task list does not show:
   against the test server on this machine: `mise run test:device
   <device-id>` (`flutter devices` lists ids). See `device_test/README.md`
   for the user-CA case and iOS signing.
-- `ws_flutter` (`flutter/`) is a Flutter package: `flutter pub get`,
-  `flutter analyze`, `flutter test` there (`mise run test:flutter`). CI
+- `flutter/` holds the README's Flutter app lifecycle recipe as a
+  package that is not published (DECISIONS.md D58), so it stays tested:
+  `flutter pub get`, `flutter analyze`, `flutter test` there
+  (`mise run test:flutter`). CI
   installs Flutter with `tool/flutter_sdk.sh`, which checks the archive
   against Flutter's release manifest, and tests the lowest supported
   Flutter (3.38.1, Dart 3.10.0) and 3.50.0.
-- `ws_native` and `ws_flutter` cannot be published from their
-  directories. Pub applies the
+- `ws_native` cannot be published from its directory. Pub applies the
   repository's ignore files, which hide it (DECISIONS.md D25), so it is
   staged into a directory outside the repository.
