@@ -573,7 +573,7 @@ pub const fn victory_zeny(level: u32) -> u64 {
 }
 
 /// Most stacks a bag holds and items per stack.
-pub const MAX_STACKS: usize = 100;
+pub const MAX_STACKS: usize = 150;
 /// Most stacks a merchant's cart adds on top (Pushcart, `Bag::cart`).
 pub const MAX_CART_STACKS: usize = 100;
 pub const MAX_STACK: u32 = 30_000;

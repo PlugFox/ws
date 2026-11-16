@@ -14,6 +14,8 @@ test('a new character carries the starting kit', async ({ page }) => {
   await page.keyboard.press('Alt+KeyE');
   const inv = page.locator('[data-win="inventory"]');
   await expect(inv).toContainText('100 Z');
+  // The bag's fill: stacks used of the 150 it holds.
+  await expect(inv.locator('.bag')).toHaveText(/^\d+ \/ 150$/);
   const potion = inv.locator('.u-slot', { has: page.locator('img[data-icon="item:red_potion"]') });
   await expect(potion).toContainText('5');
   await potion.hover();

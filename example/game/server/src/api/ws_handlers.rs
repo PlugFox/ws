@@ -1210,13 +1210,18 @@ impl Conn {
         let guard = self.session.character.read().await;
         let ch = guard.as_ref()?;
         let bag = &ch.bag;
+        // Derived numbers with this gear (the Equipment window), and how
+        // many stacks the bag takes (the Inventory window's "used / cap").
+        let mut stats = super::character_handlers::class_stats(&ch.archetype, ch.level as i64, bag);
+        if let Some(o) = stats.as_object_mut() {
+            o.insert("bag_capacity".into(), bag.capacity().into());
+        }
         Some(Out::Msg(ServerMsg::Inventory {
             zeny: bag.zeny,
             // One entry per stack, named by its instance key (`sword+7`).
             items: bag.items.iter().map(|s| (s.key(), s.count)).collect(),
             equip: bag.equip.to_vec(),
-            // Derived numbers with this gear (the Equipment window).
-            stats: super::character_handlers::class_stats(&ch.archetype, ch.level as i64, bag).to_string(),
+            stats: stats.to_string(),
         }))
     }
 

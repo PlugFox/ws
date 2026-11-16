@@ -441,8 +441,8 @@ mod tests {
 
     #[test]
     fn the_exchange_checks_room_and_the_zeny_cap() {
-        // A hundred different knives (refine × card): a hundred stacks.
-        const W: [&str; 10] = ["drops_card", "hornet_card", "tarou_card", "drainliar_card", "scorpion_card", "desert_wolf_card", "skeleton_card", "poporing_card", "sirocco_card", "sohee_card"];
+        // A full bag of different knives (refine × card): one stack each.
+        const W: [&str; 15] = ["drops_card", "hornet_card", "tarou_card", "drainliar_card", "scorpion_card", "desert_wolf_card", "skeleton_card", "poporing_card", "sirocco_card", "sohee_card", "condor_card", "creamy_card", "bongun_card", "chepet_card", "cookie_card"];
         let knife = |i: usize| Attrs { refine: (i % 10) as u8 + 1, cards: vec![W[i / 10].to_string()] };
         let full = Bag { items: (0..MAX_STACKS).map(|i| Stack { id: "knife".into(), count: 1, attrs: knife(i) }).collect(), ..Bag::default() };
         let first = items::key("knife", &knife(0));

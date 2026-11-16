@@ -3831,6 +3831,7 @@ final class HubSession {
           for (final s in inv.items) {'id': s.id, 'count': s.count},
         ],
         'equip': inv.equip,
+        if (_stats['bag_capacity'] case final int cap) 'capacity': cap,
         'cls': _myArchetype,
         'combat': _inStage,
       }),

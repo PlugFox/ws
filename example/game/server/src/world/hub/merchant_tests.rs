@@ -286,7 +286,7 @@ fn a_loaded_cart_hits_harder() {
         b.add(&format!("knife+{}", i % 11), 1).ok();
         b.add(&format!("cutter+{}", i % 11), 1).ok();
     }
-    assert!(b.items.len() <= b.capacity() && b.capacity() == 120);
+    assert!(b.items.len() <= b.capacity() && b.capacity() == crate::world::combat::items::MAX_STACKS + 20);
 }
 
 /// Potion Pitcher throws the caster's own potion at the wounded ally: it
