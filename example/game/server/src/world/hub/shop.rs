@@ -97,10 +97,15 @@ impl HubInstance {
     /// headgear) if it changed.
     pub fn set_bag(&mut self, user_id: u32, bag: Bag, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
+        let before = self.players[i].fighter.is_none().then(|| self.sheet_of(i));
         let p = &mut self.players[i];
         p.profile.weapon = bag.weapon().to_string();
         p.profile.bag = bag;
         self.refresh_appearance(i, out);
+        // The Equipment window's numbers when the gear changed them (town).
+        if before.is_some_and(|b| b != self.sheet_of(i)) {
+            self.send_own_sheet(i, out);
+        }
         self.trade_bag_changed(user_id, out);
     }
 

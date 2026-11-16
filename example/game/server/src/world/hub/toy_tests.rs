@@ -32,6 +32,7 @@ const SHIFT_TEST: MapEvent = MapEvent {
     duration_secs: 30.0,
     light_scale: 1.0,
     shake: 0,
+    calls_waves: false,
 };
 
 static MISSION_TEST: MissionInfo = MissionInfo {

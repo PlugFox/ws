@@ -413,8 +413,12 @@ extension type GameView._(JSObject _) implements JSObject {
   external double playerMenuTarget();
 
   /// Another player's gear, read-only: `{id, name, title?, level?, look?,
-  /// equip: [10 ids]}`; '' closes it.
+  /// equip: [10 ids], sheet?}` (`sheet`: their live numbers, `sheetView`);
+  /// '' closes it. The same player again only refreshes the numbers.
   external void showInspect(String json);
+
+  /// The player the open inspect window shows (0 = closed).
+  external double inspectTarget();
 
   /// The entity under the pointer (NaN = none): its name lights up.
   external void setHover(double entityId, bool clickable);

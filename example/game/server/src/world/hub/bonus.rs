@@ -392,7 +392,7 @@ impl HubInstance {
         let (px, py) = (self.players[idx].x, self.players[idx].y);
         let uid = self.players[idx].profile.user_id;
         let entity = self.players[idx].profile.character_id;
-        let around = |x: f32, y: f32, dir: (f32, f32)| Aimed { x, y, ox: px, oy: py, dir, ally: Some(uid), monster: None };
+        let around = |x: f32, y: f32, dir: (f32, f32)| Aimed { x, y, ox: px, oy: py, dir, ally: Some(uid), monster: None, pet: None };
         let here = around(px, py, (1.0, 0.0));
         match kind {
             Kind::Nova | Kind::Blessing | Kind::IncreaseAgi | Kind::Gloria | Kind::Kyrie => {
@@ -409,7 +409,7 @@ impl HubInstance {
                     .horde
                     .as_ref()
                     .and_then(|h| {
-                        let field = Field { horde: h, players: &self.players, map: self.players[idx].map };
+                        let field = Field { horde: h, players: &self.players, companions: &self.companions, map: self.players[idx].map };
                         aim_skill(&field, &self.players[idx], def, slv)
                     })
                     .unwrap_or(here);
@@ -546,7 +546,7 @@ impl HubInstance {
             let (px, py) = (self.players[i].x, self.players[i].y);
             let tag = (s, self.horde.as_ref().map_or(0, |h| h.store().generation[s as usize]));
             let dir = super::aim::norm(x - px, y - py).unwrap_or((1.0, 0.0));
-            let aimed = Aimed { x, y, ox: px, oy: py, dir, ally: None, monster: Some(tag) };
+            let aimed = Aimed { x, y, ox: px, oy: py, dir, ally: None, monster: Some(tag), pet: None };
             if let Some(f) = self.players[i].fighter.as_mut() {
                 f.cards.wisp_cd = (f.procs().wisp as f32 * hz) as u32;
             }
@@ -581,7 +581,7 @@ impl HubInstance {
             let (px, py) = (self.players[idx].x, self.players[idx].y);
             let dir = (v.angle.cos(), v.angle.sin());
             let range = self.skills.get(v.skill).range.max(1.0);
-            let aimed = Aimed { x: px + dir.0 * range, y: py + dir.1 * range, ox: px, oy: py, dir, ally: None, monster: None };
+            let aimed = Aimed { x: px + dir.0 * range, y: py + dir.1 * range, ox: px, oy: py, dir, ally: None, monster: None, pet: None };
             let (skill, slv, power) = (v.skill, v.slv, v.power);
             v.angle = (v.angle + ARROW_TURN) % TAU;
             v.left = v.left.saturating_sub(1);

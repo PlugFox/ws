@@ -137,7 +137,7 @@ fn plan<'a>(sk: &'a MonsterSkill, walk: &WalkGrid, mx: f32, my: f32, aim: (f32, 
         match e {
             Effect::Move { mode, distance } => (x, y) = moved(walk, x, y, dir, distance.at(1).max(0.0), *mode),
             Effect::Act(act) => {
-                let aimed = Aimed { x: aim.0, y: aim.1, ox: x, oy: y, dir, ally: None, monster: None };
+                let aimed = Aimed { x: aim.0, y: aim.1, ox: x, oy: y, dir, ally: None, monster: None, pet: None };
                 out.push((area_of(act, 1, sk.range, &aimed, x, y).0, &**act));
             }
             Effect::Passive(_) | Effect::Mount | Effect::Quiver(_) | Effect::Pending(_) => {}
@@ -315,7 +315,7 @@ fn land(
             Effect::Act(act) => act,
             Effect::Passive(_) | Effect::Mount | Effect::Quiver(_) | Effect::Pending(_) => continue,
         };
-        let aimed = Aimed { x: c.x, y: c.y, ox: mx, oy: my, dir: c.dir, ally: None, monster: None };
+        let aimed = Aimed { x: c.x, y: c.y, ox: mx, oy: my, dir: c.dir, ally: None, monster: None, pet: None };
         let (area, _) = area_of(act, 1, sk.range, &aimed, mx, my);
         if let Payload::Rally(r) = &act.payload {
             rally(horde, c.slot, r, &area, hz, hits);
@@ -386,7 +386,7 @@ pub(super) fn on_death(
         let mut zone = *next_zone;
         let mut zones = Vec::new();
         for act in def.effects.iter().filter_map(Effect::act) {
-            let aimed = Aimed { x: aim.0, y: aim.1, ox: x, oy: y, dir, ally: None, monster: None };
+            let aimed = Aimed { x: aim.0, y: aim.1, ox: x, oy: y, dir, ally: None, monster: None, pet: None };
             let (area, _) = area_of(act, 1, def.range, &aimed, x, y);
             if let Payload::Rally(r) = &act.payload {
                 rally(horde, s, r, &area, hz, hits);

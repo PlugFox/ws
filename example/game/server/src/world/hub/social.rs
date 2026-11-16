@@ -19,24 +19,27 @@ impl HubInstance {
         self.players.iter().position(|p| p.profile.character_id == entity_id && p.map == map).filter(|&j| j != i)
     }
 
-    /// Answers `inspect`: the worn gear of `target` (on the map).
+    /// Answers `inspect`: the worn gear of `target` (on the map), then
+    /// their live combat numbers (`PLAYER_SHEET`: buffs, auras and
+    /// conditions included). The client asks again while the window is
+    /// open to keep the numbers current.
     pub fn inspect(&mut self, user_id: u32, target: u32, out: &mut Outgoing) {
         let Some(i) = self.find(user_id) else { return };
-        let msg = match self.player_beside(i, target) {
-            Some(j) => {
-                let p = &self.players[j];
-                ServerMsg::PlayerInspect {
-                    entity_id: target,
-                    name: p.profile.name.clone(),
-                    archetype: p.profile.archetype.clone(),
-                    level: p.fighter.as_ref().map_or(p.profile.level, |f| f.level),
-                    look: p.profile.look,
-                    equip: p.profile.bag.equip.to_vec(),
-                }
-            }
-            None => no_such_player(),
+        let Some(j) = self.player_beside(i, target) else {
+            out.push((user_id, HubEvent::Control(no_such_player())));
+            return;
+        };
+        let p = &self.players[j];
+        let msg = ServerMsg::PlayerInspect {
+            entity_id: target,
+            name: p.profile.name.clone(),
+            archetype: p.profile.archetype.clone(),
+            level: p.fighter.as_ref().map_or(p.profile.level, |f| f.level),
+            look: p.profile.look,
+            equip: p.profile.bag.equip.to_vec(),
         };
         out.push((user_id, HubEvent::Control(msg)));
+        out.push((user_id, HubEvent::Control(self.sheet_of(j).msg(target))));
     }
 
     /// Hands a party invitation (already accepted by the lobby directory)
@@ -95,10 +98,16 @@ mod tests {
         let mut out = Vec::new();
         hub.inspect(1, 102, &mut out);
         match &controls(&out, 1)[..] {
-            [ServerMsg::PlayerInspect { entity_id: 102, name, archetype, level: 1, equip, .. }] => {
+            [ServerMsg::PlayerInspect { entity_id: 102, name, archetype, level: 1, equip, .. }, ServerMsg::PlayerSheet { entity_id: 102, sheet }] => {
                 assert_eq!((name.as_str(), archetype.as_str()), ("p2", "novice"));
                 assert_eq!(equip.len(), 10);
                 assert_eq!((equip[0].as_str(), equip[4].as_str(), equip[1].as_str()), ("cap", "knife", ""));
+                // In town: the fighter they would arrive as (gear, passives).
+                let i = hub.find(2).unwrap();
+                let want = super::super::fight::Fighter::arrive(&hub.players[i].profile, &hub.skills).armour();
+                let sheet: serde_json::Value = serde_json::from_str(sheet).unwrap();
+                assert_eq!(sheet["ac"].as_i64(), Some(i64::from(want)));
+                assert_eq!(sheet["level"].as_i64(), Some(1));
             }
             other => panic!("{other:?}"),
         }

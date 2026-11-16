@@ -333,6 +333,11 @@ void main() {
       expect(() => ServerMsg.decode(hex('7002')), throwsA(isA<WireFormatError>()), reason: 'unknown op');
     });
 
+    test('player sheet golden (protocol.rs `player_sheet_matches_the_dart_golden`)', () {
+      final s = ServerMsg.decode(hex('aaac02097b226163223a31387d'))! as PlayerSheet;
+      expect((s.entityId, s.json), (300, '{"ac":18}'));
+    });
+
     test('friends goldens (protocol.rs `golden::friends`)', () {
       expect(toHex(ClientMsg.friendList()), '5d00');
       expect(toHex(ClientMsg.friendAdd(300)), '5d01ac02');

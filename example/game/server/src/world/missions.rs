@@ -238,6 +238,7 @@ const SANDSTORM: MapEvent = MapEvent {
     duration_secs: 30.0,
     light_scale: 0.6,
     shake: 30,
+    calls_waves: false,
 };
 
 /// The great sinkhole churns from Phreeoni's unlock to the end of the run
@@ -252,6 +253,7 @@ const CHURNING: MapEvent = MapEvent {
     duration_secs: 300.0,
     light_scale: 1.0,
     shake: 160,
+    calls_waves: false,
 };
 
 /// The ladder, in order. Location agents fill in their entry (roster
@@ -548,6 +550,7 @@ const CULVERT_ENV: Environment = Environment {
             duration_secs: 20.0,
             light_scale: 1.0,
             shake: 60,
+            calls_waves: false,
         },
         MapEvent {
             id: "flush_east",
@@ -559,6 +562,7 @@ const CULVERT_ENV: Environment = Environment {
             duration_secs: 20.0,
             light_scale: 1.0,
             shake: 60,
+            calls_waves: false,
         },
     ],
     objects: &CULVERT_EGGS,
@@ -624,6 +628,7 @@ const PAYON_ENV: Environment = Environment {
             duration_secs: 20.0,
             light_scale: 0.7,
             shake: 0,
+            calls_waves: false,
         },
         MapEvent {
             id: "coffin",
@@ -636,6 +641,7 @@ const PAYON_ENV: Environment = Environment {
             duration_secs: 4.0,
             light_scale: 1.0,
             shake: 110,
+            calls_waves: false,
         },
         MapEvent {
             id: "moonrise",
@@ -647,6 +653,7 @@ const PAYON_ENV: Environment = Environment {
             duration_secs: 30.0,
             light_scale: 1.15,
             shake: 70,
+            calls_waves: false,
         },
     ],
     // On the walkable cell nearest each brazier of the map (RSW fire effect 47).
@@ -701,6 +708,7 @@ const WAR_HORN: MapEvent = MapEvent {
     duration_secs: 25.0,
     light_scale: 1.0,
     shake: 40,
+    calls_waves: true,
 };
 
 /// The war banners planted at the start (cells, by the map's banner
@@ -783,6 +791,7 @@ const SHIFT_CHANGE: MapEvent = MapEvent {
     duration_secs: 30.0,
     light_scale: 1.0,
     shake: 30,
+    calls_waves: false,
 };
 
 /// Crates from the cranes during a shift: one near each player every 3 s;
@@ -821,6 +830,7 @@ const GLAST_ENV: Environment = Environment {
             duration_secs: 30.0,
             light_scale: 0.7,
             shake: 50,
+            calls_waves: true,
         },
         MapEvent {
             id: "eclipse",
@@ -832,6 +842,7 @@ const GLAST_ENV: Environment = Environment {
             duration_secs: 35.0,
             light_scale: 0.55,
             shake: 120,
+            calls_waves: false,
         },
     ],
     objects: &GLAST_OBJECTS,
@@ -908,7 +919,7 @@ const THOR_ENV: Environment = Environment { light_scale: 0.9, hazards: &[], even
 
 /// The Lava Surge of one half (`surge_west` / `surge_east`).
 const fn surge(id: &'static str, name: &'static str, warning: &'static str, first_secs: f32) -> MapEvent {
-    MapEvent { id, name, warning, first_secs, every_secs: 300.0, warn_secs: 12.0, duration_secs: 25.0, light_scale: 1.1, shake: 90 }
+    MapEvent { id, name, warning, first_secs, every_secs: 300.0, warn_secs: 12.0, duration_secs: 25.0, light_scale: 1.1, shake: 90, calls_waves: false }
 }
 
 const THOR_EVENTS: [MapEvent; 3] = [
@@ -925,6 +936,7 @@ const THOR_EVENTS: [MapEvent; 3] = [
         duration_secs: 8.0,
         light_scale: 1.15,
         shake: 200,
+        calls_waves: false,
     },
 ];
 
@@ -986,6 +998,7 @@ const TOWER_ENV: Environment = Environment {
             duration_secs: 20.0,
             light_scale: 1.0,
             shake: 80,
+            calls_waves: false,
         },
         MapEvent {
             id: "stair_sanctum",
@@ -997,6 +1010,7 @@ const TOWER_ENV: Environment = Environment {
             duration_secs: 20.0,
             light_scale: 1.0,
             shake: 80,
+            calls_waves: false,
         },
         MapEvent {
             id: tower::JUDGMENT,
@@ -1008,6 +1022,7 @@ const TOWER_ENV: Environment = Environment {
             duration_secs: 15.0,
             light_scale: 0.85,
             shake: 40,
+            calls_waves: false,
         },
         // The summit lasts to the end of the run: the chandeliers stay out.
         MapEvent {
@@ -1020,6 +1035,7 @@ const TOWER_ENV: Environment = Environment {
             duration_secs: 300.0,
             light_scale: 0.85,
             shake: 160,
+            calls_waves: false,
         },
     ],
     objects: &TOWER_TUBES,
@@ -1660,7 +1676,7 @@ mod tests {
 
     #[test]
     fn events_show_every_occurrence_on_the_timeline() {
-        let e = MapEvent { id: "tide", name: "Tide", warning: "", first_secs: 120.0, every_secs: 300.0, warn_secs: 15.0, duration_secs: 40.0, light_scale: 1.0, shake: 0 };
+        let e = MapEvent { id: "tide", name: "Tide", warning: "", first_secs: 120.0, every_secs: 300.0, warn_secs: 15.0, duration_secs: 40.0, light_scale: 1.0, shake: 0, calls_waves: false };
         let b = event_brief(&e, 900.0);
         assert_eq!((b.starts.as_slice(), b.warn_secs, b.duration_secs), (&[120, 420, 720][..], 15, 40));
     }

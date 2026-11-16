@@ -1256,7 +1256,6 @@ impl Companions {
     }
 
     /// The unit with this entity id.
-    #[cfg_attr(not(test), expect(dead_code, reason = "API for the skills side (cast.rs); only the tests call it yet"))]
     pub fn by_entity(&self, entity: u32) -> Option<&Companion> {
         self.units.iter().find(|c| c.entity() == entity)
     }
@@ -1493,7 +1492,6 @@ impl Companions {
     }
 
     /// Heals one companion (a pitched potion); returns what it took.
-    #[cfg_attr(not(test), expect(dead_code, reason = "API for the skills side (cast.rs); only the tests call it yet"))]
     pub fn heal_entity(&mut self, entity: u32, amount: i32) -> i32 {
         let Some(c) = self.units.iter_mut().find(|c| c.entity() == entity && c.alive() && c.kind != Kind::Sphere) else { return 0 };
         let h = amount.min(c.max_hp - c.hp).max(0);

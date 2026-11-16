@@ -143,6 +143,8 @@ impl HubInstance {
         }
         let pool = Telegraph { id: zones[0], shape: 0, look: look::GOLD, x, y, dir: 0, a: POOL_R, b: 0.0, span_ms: span, follow: 0 };
         let flame = Telegraph { id: zones[1], shape: 0, look: look::FIRE, x, y, dir: 0, a: 0.6, b: 0.0, span_ms: span, follow: 0 };
+        // The order is the effects' act index: `[skills.payon_brazier]` lights
+        // and burns its fire on area 1 (the flame) alone.
         let msg = ServerMsg::BossZones {
             caster: 0,
             ability: BRAZIER_ABILITY.into(),

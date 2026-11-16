@@ -323,6 +323,13 @@ pub struct MapEvent {
     /// Camera shake as it begins (0 = none, 255 = strongest; clients with
     /// reduced motion skip it), over a second.
     pub shake: u8,
+    /// It heralds monsters (Orc Village's war horn and its column, Glast
+    /// Heim's Witching Hour raising the graves): once the poison fog closes
+    /// the waves no occurrence warns, begins or is forced any more, and one
+    /// only warned of is called off (an `ENDS` for it). A pure hazard (a
+    /// sandstorm, a lava surge, a shift change) and a boss's herald (the
+    /// boss still comes) keep false and go on to the end.
+    pub calls_waves: bool,
 }
 
 impl MapEvent {
@@ -564,6 +571,7 @@ mod tests {
         duration_secs: 30.0,
         light_scale: 0.6,
         shake: 0,
+        calls_waves: false,
     };
 
     #[test]

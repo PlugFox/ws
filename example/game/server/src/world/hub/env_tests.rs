@@ -38,6 +38,7 @@ const STORM: MapEvent = MapEvent {
     duration_secs: 30.0,
     light_scale: 0.5,
     shake: 120,
+    calls_waves: false,
 };
 
 static MISSION: MissionInfo = MissionInfo {
@@ -361,6 +362,35 @@ fn nothing_hatches_once_the_fog_has_closed_the_waves() {
     }
     assert_eq!(s.env.objects.len(), 2, "the eggs stay eggs");
     assert_eq!(s.horde.as_ref().unwrap().store().alive().len(), 2, "no brood");
+}
+
+#[test]
+fn a_pure_hazard_event_goes_on_after_the_fog() {
+    let mut s = stage();
+    let mut out = Vec::new();
+    at(&mut s, 1.0, &mut out);
+    s.horde.as_mut().unwrap().close_spawning();
+    let mut out = Vec::new();
+    at(&mut s, 95.0, &mut out);
+    at(&mut s, 100.5, &mut out);
+    let phases: Vec<u8> = msgs(&out, 1)
+        .iter()
+        .filter_map(|m| match m {
+            ServerMsg::EnvEvent { phase, .. } => Some(*phase),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(phases, vec![env_phase::WARNING, env_phase::BEGINS], "the storm still warns and rises");
+}
+
+#[test]
+fn only_the_heralds_of_monsters_stop_with_the_waves() {
+    // Every location's map events: the ones that announce or call monsters
+    // stop once the fog closes the waves; hazards and bosses' heralds go on
+    // (docs/locations/<location>.md).
+    let mut calls: Vec<&str> = crate::world::missions::MISSIONS.iter().flat_map(|m| m.env.events).filter(|e| e.calls_waves).map(|e| e.id).collect();
+    calls.sort_unstable();
+    assert_eq!(calls, vec!["war_horn", "witching_hour"]);
 }
 
 // --- Spawners and event strikes (the ladder from 60 to 99) -------------------

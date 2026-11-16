@@ -28,6 +28,7 @@ const HOUR: MapEvent = MapEvent {
     duration_secs: 10.0,
     light_scale: 0.7,
     shake: 0,
+    calls_waves: true,
 };
 
 static MISSION_TEST: MissionInfo = MissionInfo {
@@ -234,6 +235,26 @@ fn a_zombie_master_raises_fresh_graves_that_open_unless_broken() {
 }
 
 #[test]
+fn no_witching_hour_and_no_raise_once_the_fog_closed_the_waves() {
+    let mut s = stage();
+    let mut out = Vec::new();
+    at(&mut s, 0.5, &mut out);
+    fell(&mut s, GRAVE, 0.6, &mut out);
+    assert_eq!(s.env.glast.felled(), 1);
+    s.horde_mut().unwrap().close_spawning();
+    let z = s.horde.as_ref().unwrap().catalog().kind_of("zombie_master").unwrap();
+    s.horde_mut().unwrap().spawn(z, 20.0, 12.5).unwrap();
+    let mut out = Vec::new();
+    for t in 0..700 {
+        at(&mut s, 1.0 + t as f32 * 0.1, &mut out);
+    }
+    let m = msgs(&out);
+    assert!(!m.iter().any(|m| matches!(m, ServerMsg::EnvEvent { id, .. } if id == WITCHING_HOUR)), "the bell does not toll");
+    assert!(zones_of(&m, RISE_ABILITY).is_none() && zones_of(&m, RAISE_ABILITY).is_none(), "no grave rises or is raised");
+    assert_eq!((count(&s, GRAVE), count(&s, FRESH_GRAVE), s.env.glast.felled()), (0, 0, 1));
+}
+
+#[test]
 fn the_glast_mission_plants_graves_and_fonts_on_walkable_ground() {
     let m = missions::find(MISSION).unwrap();
     assert!((m.env.light_scale - 0.7).abs() < 1e-6);
@@ -242,7 +263,7 @@ fn the_glast_mission_plants_graves_and_fonts_on_walkable_ground() {
     assert!(graves.iter().all(|o| o.on_felled == ObjectEffect::Hook(GRAVE_HOOK) && o.hatch.is_some_and(|h| h.every_secs > 0.0)));
     let first: Vec<f32> = graves.iter().map(|o| o.hatch.unwrap().secs).collect();
     assert_eq!(first[0], 90.0, "the graves start opening at 1:30");
-    assert!(m.env.event(WITCHING_HOUR).is_some_and(|e| e.first_secs == 240.0 && e.every_secs == 240.0));
+    assert!(m.env.event(WITCHING_HOUR).is_some_and(|e| e.first_secs == 240.0 && e.every_secs == 240.0 && e.calls_waves));
     assert_eq!(m.env.hazards.iter().filter(|h| h.during == Some(WITCHING_HOUR)).count(), 10, "a cursed plot per grave");
     assert!(m.env.hazards.iter().all(|h| h.problem().is_none()));
     // On the baked map (when the pack has it): every spot is walkable.

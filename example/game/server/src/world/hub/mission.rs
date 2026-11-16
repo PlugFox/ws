@@ -85,6 +85,7 @@ impl HubInstance {
         self.boss_bar(map, out);
         self.monster_plates(map, out);
         self.buff_icons(map, out);
+        self.sheets(map, out);
         if self.tick.is_multiple_of(BOSS_SCAN)
             && let Some(h) = self.horde.as_ref()
         {

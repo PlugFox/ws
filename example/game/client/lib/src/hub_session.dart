@@ -7,6 +7,7 @@ import 'dart:typed_data';
 
 import 'package:game_client/src/api.dart';
 import 'package:game_client/src/auto_use.dart';
+import 'package:game_client/src/cast_pose.dart';
 import 'package:game_client/src/contacts.dart';
 import 'package:game_client/src/changelog.dart';
 import 'package:game_client/src/leaderboard.dart';
@@ -14,6 +15,7 @@ import 'package:game_client/src/online.dart';
 import 'package:game_client/src/classes.dart';
 import 'package:game_client/src/click_move.dart';
 import 'package:game_client/src/engine.dart';
+import 'package:game_client/src/env_events.dart';
 import 'package:game_client/src/feedback.dart';
 import 'package:game_client/src/guide.dart';
 import 'package:game_client/src/input.dart';
@@ -24,6 +26,7 @@ import 'package:game_client/src/prediction.dart';
 import 'package:game_client/src/parties.dart';
 import 'package:game_client/src/protocol.dart';
 import 'package:game_client/src/refine.dart';
+import 'package:game_client/src/sheet.dart';
 import 'package:game_client/src/tips.dart';
 import 'package:game_client/src/update.dart';
 import 'package:game_client/src/version.dart';
@@ -227,6 +230,17 @@ final class HubSession {
   Map<String, Object?> _stats;
   final int _myExp;
 
+  /// The player's live combat numbers (`PLAYER_SHEET`: buffs, auras and
+  /// conditions included); the Equipment window prefers them to [_stats].
+  Map<String, Object?>? _liveSheet;
+
+  /// The player the inspect window was opened on, their gear and their
+  /// live numbers; [_inspectTimer] asks again while the window shows them.
+  int? _inspectId;
+  PlayerInspect? _inspected;
+  Map<String, Object?>? _inspectedSheet;
+  Timer? _inspectTimer;
+
   /// The stylist window is open (NPC id), and a restyle is in flight.
   String? _stylist;
 
@@ -286,6 +300,10 @@ final class HubSession {
   /// offer (the mission window).
   String _stageMission = '';
 
+  /// The run's map events warned of or running (their banners and edge
+  /// warnings come down on a new instance: [_endEnvEvents]).
+  final _envEvents = EnvEventLog();
+
   /// Mission modifiers (server `world::modifiers`): the table, the lobby's
   /// choice, a choice made before a party exists (sent once our own new
   /// lobby arrives), and a won run's clear bonus for the result screen.
@@ -339,6 +357,10 @@ final class HubSession {
   /// [_attackFacing] until then while it stands.
   final _castUntil = <int, double>{};
   final _stanceUntil = <int, double>{};
+
+  /// Casts that end in a throw (alchemist flasks, potions, spheres): the
+  /// toss plays after the wind-up (`cast_pose.dart`).
+  final _throws = <int, CastPose>{};
 
   /// Own state from the vitals: 0 up, 1 downed, 2 dead.
   int get _myState => _vitals[_me]?.state ?? 0;
@@ -944,6 +966,7 @@ final class HubSession {
         view.setCombo(0, 0, 0, 0);
         _combo = 0;
         _stageMission = '';
+        _endEnvEvents();
         view.setMissionClock('', 0, false);
         view.setMissionModifiers(jsonEncode({'scope': 'stage'}));
         _vitals.clear();
@@ -977,6 +1000,7 @@ final class HubSession {
         _clock = ServerClock(tickHz: _tickHz);
         _monsterKinds = msg.monsters;
         _stageMission = msg.mission;
+        _endEnvEvents();
         _vitals.clear();
         // A fresh arrival carries no timed effect (COMBAT.md §4.6).
         _buffs = const [];
@@ -1262,6 +1286,8 @@ final class HubSession {
         view.toast(accepted ? '$name joined your party.' : '$name declined your invitation.');
       case final PlayerInspect s:
         _onInspect(s);
+      case final PlayerSheet s:
+        _onSheet(s);
       case NpcDialog():
         _onNpcDialog(msg);
       case HubLeft(:final reason):
@@ -1533,6 +1559,8 @@ final class HubSession {
     if (_sitting.contains(id)) return Act.sit;
     // A skill's wind-up pose, then (as after a swing) the combat stance.
     if (now < (_castUntil[id] ?? 0)) return Act.cast;
+    // A thrown skill (a flask, a potion, a sphere): the toss as it lands.
+    if (_throws[id]?.at(now) == CastPhase.release) return Act.attack;
     // With a weapon: the swing (the engine picks the one its class and
     // family draw the weapon in), then the combat stance for a while (RO
     // draws weapons only in those), then the plain stand.
@@ -1547,7 +1575,7 @@ final class HubSession {
   int _poseFacing(int id, bool moving, int facing, double now) {
     final f = _attackFacing[id];
     if (moving || f == null) return facing;
-    final hold = math.max(_castUntil[id] ?? 0, _inStage ? _stanceUntil[id] ?? 0 : _attackUntil[id] ?? 0);
+    final hold = math.max(math.max(_castUntil[id] ?? 0, _throws[id]?.end ?? 0), _inStage ? _stanceUntil[id] ?? 0 : _attackUntil[id] ?? 0);
     return now < hold ? f : facing;
   }
 
@@ -1583,8 +1611,11 @@ final class HubSession {
     );
   }
 
-  /// Combat numbers for the Equipment window (from the server's `stats`).
+  /// Combat numbers for the Equipment window: the server's live sheet
+  /// (`PLAYER_SHEET`), else the gear's `stats` until it comes.
   Map<String, Object?> _sheet() {
+    final live = _liveSheet;
+    if (live != null) return sheetView(live);
     final w = _stats['weapon'];
     final weapon = w is Map ? w : const {};
     final interval = (weapon['interval_ms'] as num?)?.toDouble() ?? 0;
@@ -1608,6 +1639,21 @@ final class HubSession {
   Map<String, Object?> _glossaryContext(int level) {
     final w = _stats['weapon'];
     final saves = _stats['saves'];
+    // The live numbers (buffs, conditions) when the server sent them.
+    final live = _liveSheet;
+    if (live != null) {
+      return {
+        'level': level,
+        'cls': _myArchetype,
+        'k': ?live['k'],
+        'proficiency': ?live['proficiency'],
+        'classMod': ?live['class_mod'],
+        'ac': ?live['ac'],
+        'attackBonus': ?live['to_hit'],
+        'spellDc': ?live['save_dc'],
+        if (live['saves'] is Map) 'saves': live['saves'],
+      };
+    }
     return {
       'level': level,
       'cls': _myArchetype,
@@ -2751,8 +2797,39 @@ final class HubSession {
     );
   }
 
-  /// Another player's gear (View equipment).
+  /// Another player's gear (View equipment). A refresh's answer for a
+  /// window closed meanwhile is dropped (it must not open it again).
   void _onInspect(PlayerInspect s) {
+    if (s.entityId != _inspectId) return;
+    if (_inspected != null && view.inspectTarget().toInt() != s.entityId) return;
+    if (_inspected?.entityId != s.entityId) _inspectedSheet = null;
+    _inspected = s;
+    _showInspected();
+  }
+
+  /// A live sheet: the player's own (Equipment window, glossary) or the
+  /// inspected player's.
+  void _onSheet(PlayerSheet s) {
+    final Object? json;
+    try {
+      json = jsonDecode(s.json);
+    } on FormatException {
+      return;
+    }
+    if (json is! Map<String, Object?>) return;
+    if (s.entityId == _me) {
+      _liveSheet = json;
+      _renderStatus();
+    } else if (s.entityId == _inspected?.entityId && view.inspectTarget().toInt() == s.entityId) {
+      _inspectedSheet = json;
+      _showInspected();
+    }
+  }
+
+  void _showInspected() {
+    final s = _inspected;
+    if (s == null) return;
+    final sheet = _inspectedSheet;
     view.showInspect(
       jsonEncode({
         'id': s.entityId,
@@ -2761,8 +2838,32 @@ final class HubSession {
         'level': s.level,
         'look': {...s.look.toUi(), 'job': bodyJob(s.archetype, tierOfLevel(s.level))},
         'equip': s.equip,
+        if (sheet != null) 'sheet': sheetView(sheet),
       }),
     );
+  }
+
+  /// View equipment on [target]: asks now, then once a second while the
+  /// window shows them (their buffs and conditions come and go).
+  void _inspect(int target) {
+    _inspectId = target;
+    _inspected = null;
+    _inspectedSheet = null;
+    _send(ClientMsg.inspect(target));
+    _inspectTimer?.cancel();
+    _inspectTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (_inspected == null) {
+        // The first answer is on its way (or the player was gone).
+        if (t.tick > 5) t.cancel();
+        return;
+      }
+      if (view.inspectTarget().toInt() != target || _inspectId != target) {
+        t.cancel();
+        if (_inspectId == target) _inspectId = null;
+        return;
+      }
+      _send(ClientMsg.inspect(target));
+    });
   }
 
   /// A flag where the pointer is on the ground (else under the player).
@@ -2795,13 +2896,15 @@ final class HubSession {
     view.setEnvironmentEvent(
       jsonEncode({'phase': e.phase, 'id': e.id, 'name': e.name, 'startMs': e.startMs, 'durationMs': e.durationMs}),
     );
-    switch (e.phase) {
-      case EnvEvent.warning:
-        view.toast(e.text.isNotEmpty ? e.text : '${e.name} is coming!');
-      case EnvEvent.begins:
-        view.toast('${e.name}!');
-      case EnvEvent.ends:
-        view.toast('The ${e.name.toLowerCase()} is over.');
+    view.toast(_envEvents.take(e));
+  }
+
+  /// A new instance (town, another stage, a rejoin): every map event the
+  /// last one warned of or ran ends on the view at once (the war horn's
+  /// side banner, a storm's veil), not only when the next map loads.
+  void _endEnvEvents() {
+    for (final id in _envEvents.clear()) {
+      view.setEnvironmentEvent(jsonEncode({'phase': EnvEvent.ends, 'id': id, 'name': '', 'startMs': 0, 'durationMs': 0}));
     }
   }
 
@@ -3607,7 +3710,7 @@ final class HubSession {
           case 'party_kick' when target != null:
             _send(ClientMsg.lobbyKick(target));
           case 'inspect' when target != null:
-            _send(ClientMsg.inspect(target));
+            _inspect(target);
           case 'friend' when target != null:
             _send(ClientMsg.friendAdd(target));
           case 'trade' when target != null:
@@ -3877,6 +3980,7 @@ final class HubSession {
     }
     if (c.skill.isEmpty) {
       _castUntil.remove(id);
+      _throws.remove(id);
       _tracks[id]?.resetSent();
       return;
     }
@@ -3889,9 +3993,15 @@ final class HubSession {
         : (c.x, c.y);
     final dx = c.x - x, dy = c.y - y;
     if (dx * dx + dy * dy > 0.04) _attackFacing[id] = facingOf(dx, dy);
-    final until = now + math.max(c.castMs, 400) / 1000;
-    _castUntil[id] = until;
-    _stanceUntil[id] = until + 4;
+    // The wind-up pose, then for a thrown skill the toss.
+    final pose = CastPose.of(c.skill, now, c.castMs);
+    _castUntil[id] = pose.windUpEnd;
+    if (pose.throws) {
+      _throws[id] = pose;
+    } else {
+      _throws.remove(id);
+    }
+    _stanceUntil[id] = pose.end + 4;
     t?.resetSent();
   }
 
@@ -4739,6 +4849,7 @@ final class HubSession {
     _stopped = true;
     _pingTimer?.cancel();
     _returnTimer?.cancel();
+    _inspectTimer?.cancel();
     _pulse.stop();
     for (final (target, type, fn) in _listeners) {
       target.removeEventListener(type, fn);

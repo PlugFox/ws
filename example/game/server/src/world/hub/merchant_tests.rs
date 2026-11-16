@@ -472,4 +472,57 @@ fn the_baked_merchant_skills_are_cast() {
     assert!(book.find("pushcart").is_some());
 }
 
+/// Every class line has a travel skill for the travel key; the merchant's
+/// is Cart Boost (a dash, then a short run) from tier 1, so the Alchemist
+/// and the Creator keep it.
+#[test]
+fn every_class_has_a_travel_skill() {
+    let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/dist");
+    let Ok(book) = SkillBook::load(&dist) else { return };
+    for class in combat::Class::ALL {
+        assert!(
+            book.iter().any(|(_, d)| d.class == Some(class) && !d.passive && d.travels()),
+            "{class:?} has no travel skill"
+        );
+    }
+    let (_, cb) = book.find("cart_boost").unwrap();
+    assert!(cb.travels() && cb.mobile && cb.tier == 1 && cb.target == combat::skills::Target::Escape);
+}
+
+/// Cart Boost on the travel key: the merchant dashes where it walks and
+/// runs faster for a moment.
+#[test]
+fn cart_boost_dashes_on_the_travel_key_and_speeds_the_merchant_up() {
+    const CART: &str = r#"{"skills":[
+      {"id":"pushcart","name":"Pushcart","class":"merchant","max_level":5,"passive":true,"effects":[{"type":"cart","stacks":[0,20]}]},
+      {"id":"cart_boost","name":"Cart Boost","class":"merchant","max_level":5,"target":"escape","mobile":true,"range":5,"cooldown":[7,-0.4],
+       "effects":[{"type":"move","mode":"dash","distance":[2.5,0.5]},{"type":"buff","secs":[2,0.4],"speed":[0.1,0.04]}]}
+    ]}"#;
+    let row = format!("#{}#", ".".repeat(20));
+    let wall = "#".repeat(22);
+    let mut rows = vec![wall.as_str()];
+    rows.extend(std::iter::repeat_n(row.as_str(), 9));
+    rows.push(wall.as_str());
+    let camera = CameraConstraint::Free { pitch: -45.0, min_zoom: 10.0, max_zoom: 40.0, default_zoom: 20.0 };
+    let field = map("field", LocationKind::Field, camera, &rows, vec![portal("to_town", [1, 1, 1], "town", [3, 3])]);
+    let world = Arc::new(HubWorld::new(vec![field], "field").unwrap());
+    let catalog = Arc::new(MonsterCatalog::new(vec![test_def("blob", 0.01, 50, 0.0, false)]).unwrap());
+    let horde = Horde::new(Arc::clone(&world), catalog, HordeConfig { director_enabled: false, seed: Some(1), ..HordeConfig::default() });
+    let mut st = HubInstance::stage(1, "m1", world, HubSimConfig::default()).with_horde(horde).with_skills(Arc::new(SkillBook::from_json(CART).unwrap()));
+    let mut l = Loadout::default();
+    l.skills.insert("pushcart".into(), 1);
+    l.skills.insert("cart_boost".into(), 3);
+    st.join(PlayerProfile { archetype: "merchant".into(), level: 10, loadout: l, ..profile(1) }, Uuid::nil(), None, 0, &mut Vec::new());
+    put(&mut st, 1, 6.5, 5.5);
+    let (book_index, _) = st.skills.find("cart_boost").unwrap();
+    assert_eq!(fighter(&mut st).travel, Some(book_index), "Cart Boost is on the travel key, no hotbar slot needed");
+    let speed = fighter(&mut st).mods.speed;
+    let mut out = Vec::new();
+    st.act(1, [8, 0], 1 << super::cast::TRAVEL_SLOT);
+    st.tick(&mut out);
+    let moved = me(&st).x - 6.5;
+    assert!(moved > 2.0, "dashed toward the pointer: {moved}");
+    assert!(fighter(&mut st).mods.speed > speed, "and runs faster after it");
+}
+
 

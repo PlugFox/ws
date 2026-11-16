@@ -8,7 +8,6 @@
 
 use super::map::{MapData, MapError};
 use super::missions;
-use super::modifiers::{self, ModFlags};
 use super::protocol::{pose, Appearance, CastPrefs, UsePrefs, Look, MapInfo, PlayerInfo, ServerMsg, SnapshotBody, MAX_EMOTE, MAX_FLAG};
 use super::horde::view::MonsterView;
 use super::horde::{Horde, PlayerView};
@@ -78,6 +77,7 @@ mod thanatos;
 mod thor;
 mod toy;
 mod trade;
+mod sheet;
 mod social;
 mod stats;
 pub use companion::HomSave;
@@ -812,6 +812,7 @@ impl HubInstance {
         self.announce_env(idx, out);
         self.announce_companions(idx, out);
         out.push((user_id, HubEvent::Control(self.skills_msg(idx))));
+        self.send_own_sheet(idx, out);
         for o in self.players.iter().filter(|o| o.link_dead && o.map == p.map && o.profile.user_id != user_id) {
             out.push((user_id, HubEvent::Control(ServerMsg::PlayerLink { entity_id: o.profile.character_id, online: false })));
         }
@@ -855,8 +856,9 @@ impl HubInstance {
         p.pressed = 0;
         p.portal_guard = true;
         if let Some(f) = p.fighter.as_mut() {
-            // Resend the buff icons.
+            // Resend the buff icons and the combat sheet.
             f.buffs_sent = f.buffs_sent.wrapping_add(1);
+            f.sheet_sent = None;
         }
         let entity_id = p.profile.character_id;
         let map = p.map;
@@ -909,6 +911,8 @@ impl HubInstance {
             cast::equip(f, &self.skills, &p.profile.loadout);
         }
         out.push((user_id, HubEvent::Control(self.skills_msg(i))));
+        // New passives: the Equipment window's numbers (missions: next check).
+        self.send_own_sheet(i, out);
         // Got on or off the Peco Peco: the map sees it.
         self.refresh_appearance(i, out);
     }
@@ -1320,7 +1324,7 @@ impl HubInstance {
                     if (dx != 0.0 || dy != 0.0) && !f.mods.cloak {
                         f.unhide();
                     }
-                    step * f.mods.pace() * f.card_pace() * f.status.speed() * if f.curses.intersects(ModFlags::SLOW) { modifiers::SLOW_PACE } else { 1.0 }
+                    step * f.pace()
                 }
                 None => step * (1.0 + p.ride),
             };
@@ -3230,6 +3234,51 @@ mod tests {
         }
         assert!(stage.lives.is_empty());
         assert_eq!(fighter(&stage, 1).mods.ac, base, "and gone with it");
+    }
+
+    /// `PLAYER_SHEET` JSONs sent to `user` about `entity`, oldest first.
+    fn sheets_for(out: &Outgoing, user: u32, entity: u32) -> Vec<serde_json::Value> {
+        controls_for(out, user)
+            .into_iter()
+            .filter_map(|m| match m {
+                ServerMsg::PlayerSheet { entity_id, sheet } if entity_id == entity => serde_json::from_str(&sheet).ok(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_equipment_sheet_follows_buffs_for_oneself_and_for_an_inspector() {
+        let mut stage = skill_stage("acolyte", 10, &[("chant", 1)]);
+        let mut out = Vec::new();
+        stage.join(PlayerProfile { archetype: "mage".into(), level: 10, ..profile(2) }, Uuid::nil(), None, 0, &mut out);
+        let base = fighter(&stage, 1).armour();
+        out.clear();
+        stage.tick(&mut out);
+        stage.tick(&mut out);
+        stage.tick(&mut out);
+        let own = sheets_for(&out, 1, 101);
+        assert_eq!(own.len(), 1, "sent once on arrival, not every tick");
+        assert_eq!(own[0]["ac"].as_i64(), Some(i64::from(base)));
+        // The aura (+2 AC) is up: the sheet follows, with its base.
+        out.clear();
+        stage.act(1, [0, 0], 1);
+        for _ in 0..4 {
+            stage.tick(&mut out);
+        }
+        let ac = fighter(&stage, 1).armour();
+        assert_eq!(ac, base + 2);
+        let own = sheets_for(&out, 1, 101);
+        let last = own.last().expect("the buff resends the sheet");
+        assert_eq!((last["ac"].as_i64(), last["ac_base"].as_i64()), (Some(i64::from(ac)), Some(i64::from(base))));
+        assert_eq!(last["ac_parts"]["buffs"].as_i64(), Some(2));
+        // Another player inspecting sees the same live number.
+        out.clear();
+        stage.inspect(2, 101, &mut out);
+        let seen = sheets_for(&out, 2, 101);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0]["ac"].as_i64(), Some(i64::from(ac)));
+        assert!(sheets_for(&out, 1, 101).is_empty(), "the inspected player is not told");
     }
 
     #[test]

@@ -6,6 +6,21 @@ typedef ChangelogEntry = ({String title, String date, List<String> items});
 
 const changelog = <ChangelogEntry>[
   (
+    title: 'Fixes: hats, live stats, Cart Boost, braziers and minimaps',
+    date: '2026-11-16',
+    items: [
+      'Cart Boost is now the Merchant line\'s travel skill (Space on missions, from the first tier): dash behind your cart where you walk, then run faster for a few seconds.',
+      'Heal, Sanctuary, Potion Pitcher and Slim Potion Pitcher pick homunculi too, yours and your party\'s, when they are the most wounded.',
+      'Alchemists and Creators throw their flasks, potions, spheres and plant bottles with a real toss instead of the casting pose.',
+      'Hats and masks show properly again on everyone (the Flu Mask spun a whole sheet over its wearer), and the Creator\'s weapons look like themselves.',
+      'The Equipment window shows your live numbers, buffs, auras and conditions included, and so does inspecting another player: AC, to-hit, damage, saves and speed with the bonus beside each, and a breakdown on hover.',
+      'A lit brazier in Payon Cave now burns in place with a small flare as it catches, instead of a fireball dropping onto it.',
+      'Orc war horns and Glast Heim\'s Witching Hour fall silent once the poison fog stops the waves; a horn only warned of is called off.',
+      'Warnings like "A column is coming from the west" no longer stay on screen after you leave the map.',
+      'Minimaps of Sograt Desert, the Geffen fields, the Prontera sewers and Izlude show the sea and rivers where they really are.',
+    ],
+  ),
+  (
     title: 'Five new expeditions and a clearer HUD',
     date: '2026-11-15',
     items: [

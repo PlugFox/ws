@@ -205,7 +205,7 @@ fn indicators_match_the_server_areas_at_every_level() {
     let stage = caster();
     let me = &stage.players[0];
     // Aimed 3 m east of the caster.
-    let aimed = Aimed { x: me.x + 6.0, y: me.y, ox: me.x, oy: me.y, dir: (1.0, 0.0), ally: None, monster: None };
+    let aimed = Aimed { x: me.x + 6.0, y: me.y, ox: me.x, oy: me.y, dir: (1.0, 0.0), ally: None, monster: None, pet: None };
     let mut checked = 0;
     let mut bad = Vec::new();
     for s in tree["skills"].as_array().unwrap() {

@@ -481,6 +481,7 @@ impl HubInstance {
 
     /// Warnings, beginnings and ends of the map events, and their hazards.
     fn env_events(&mut self, map: MapIdx, now: f32, out: &mut Outgoing) {
+        let closed = self.horde.as_ref().is_some_and(|h| h.spawning_closed());
         for k in 0..self.env.events.len() {
             let e = self.env.events[k];
             let d = e.def;
@@ -492,6 +493,22 @@ impl HubInstance {
                 start_ms: ms(start),
                 duration_ms: ms(d.duration_secs),
             };
+            // The fog closed the waves: an event heralding monsters stops
+            // (one running plays out; one only warned of is called off, its
+            // banner and ground taken back).
+            if closed && d.calls_waves && e.running.is_none() {
+                if let Some(next) = e.warned.filter(|&w| w > now) {
+                    self.env.events[k].warned = None;
+                    info!("{}: {} called off at {now:.0} s (the fog closed the waves)", self.name, d.name);
+                    self.broadcast(map, &event_msg(env_phase::ENDS, next), out);
+                    for i in 0..self.env.hazards.len() {
+                        if self.env.hazards[i].def.during == Some(d.id) && self.env.hazards[i].zone != 0 {
+                            self.hide_hazard(map, i, out);
+                        }
+                    }
+                }
+                continue;
+            }
             if let Some(start) = e.running {
                 if now >= start + d.duration_secs {
                     self.env.events[k].running = None;
@@ -1097,10 +1114,16 @@ impl HubInstance {
     /// A location's script starts map event `id` now, off its schedule (a
     /// boss calling a sandstorm): announced, its hazards on, its light and
     /// shake as a scheduled one, ending after its duration. Returns false
-    /// when it already runs or the mission has no such event.
+    /// when it already runs, the mission has no such event, or it calls
+    /// waves ([`MapEvent::calls_waves`]) and the fog closed them.
     pub(super) fn env_force_event(&mut self, map: MapIdx, id: &str, now: f32, out: &mut Outgoing) -> bool {
         let Some(k) = self.env.events.iter().position(|e| e.def.id == id) else { return false };
         if self.env.events[k].running.is_some() {
+            return false;
+        }
+        // No herald of monsters once the fog closed the waves (the Orc
+        // Lord's Call the Clans blows no horn then).
+        if self.env.events[k].def.calls_waves && self.horde.as_ref().is_some_and(|h| h.spawning_closed()) {
             return false;
         }
         let d = self.env.events[k].def;

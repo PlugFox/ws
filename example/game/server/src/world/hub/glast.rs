@@ -264,6 +264,10 @@ impl HubInstance {
     /// Zombie Masters with a player near plant fresh graves beside them.
     fn glast_raise(&mut self, map: MapIdx, now: f32, out: &mut Outgoing) {
         let Some(horde) = self.horde.as_ref() else { return };
+        // Once the fog closed the waves its graves would never open: no Raise.
+        if horde.spawning_closed() {
+            return;
+        }
         let Some(master) = horde.catalog().kind_of(ZOMBIE_MASTER) else { return };
         let masters: Vec<(u16, u8, f32, f32)> = horde.monsters().filter(|m| m.2 == master).map(|m| (m.0, m.1, m.3, m.4)).collect();
         // Forget the dead.

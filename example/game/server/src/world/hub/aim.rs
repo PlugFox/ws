@@ -4,6 +4,7 @@
 //! party.
 
 use super::area::Area;
+use super::companion::{Companion, Companions, Kind as CompanionKind};
 use super::fight::Fighter;
 use super::{HubPlayer, MapIdx};
 use crate::world::combat::skills::{Effect, MoveMode, Payload, Shape, SkillDef, Target, TargetKind};
@@ -40,6 +41,9 @@ pub(super) struct Aimed {
     pub ally: Option<u32>,
     /// The picked monster `(slot, generation)`: homing hits follow it.
     pub monster: Option<(u16, u8)>,
+    /// The picked companion (its entity id): a heal or a potion thrown at
+    /// a homunculus follows it and lands on it.
+    pub pet: Option<u32>,
 }
 
 pub(super) fn norm(x: f32, y: f32) -> Option<(f32, f32)> {
@@ -74,6 +78,8 @@ pub(super) fn reach_of(def: &SkillDef, slv: u8) -> f32 {
 pub(super) struct Field<'a> {
     pub horde: &'a Horde,
     pub players: &'a [HubPlayer],
+    /// Heals and potions pick the homunculi among the allies.
+    pub companions: &'a Companions,
     pub map: MapIdx,
 }
 
@@ -191,12 +197,31 @@ impl Field<'_> {
         })
     }
 
+    /// Homunculi out on this map (the caster's and the party's), alive,
+    /// with their body within `range` of a point: allies for the skills
+    /// that mend (heals, thrown potions). Plants and spheres are not.
+    pub fn homunculi(&self, x: f32, y: f32, range: f32) -> impl Iterator<Item = &Companion> + '_ {
+        let map = self.map;
+        self.companions.units().iter().filter(move |c| {
+            matches!(c.kind, CompanionKind::Homunculus(_))
+                && c.alive()
+                && c.map == map
+                && (c.x - x).powi(2) + (c.y - y).powi(2) <= (range + c.body()).powi(2)
+        })
+    }
+
     /// Monsters crowding an ally.
     fn threat(&self, p: &HubPlayer) -> usize {
         let mut buf = Vec::new();
         Area::Circle { x: p.x, y: p.y, r: THREAT_RADIUS }.monsters(self.horde, &mut buf);
         buf.iter().filter(|&&s| !self.horde.is_plant(s)).count()
     }
+}
+
+/// It mends whom it reaches (a heal, a thrown potion): companions count
+/// as allies for it.
+fn mends(def: &SkillDef) -> bool {
+    def.effects.iter().filter_map(Effect::act).any(|a| matches!(a.payload, Payload::Heal(_) | Payload::Pitch { .. }))
 }
 
 /// A group skill on monster `m`: centred on what crowds around it.
@@ -256,10 +281,13 @@ pub(super) fn aim_press(field: &Field<'_>, caster: &HubPlayer, def: &SkillDef, s
     // Where the pointer is on the ground, when the player aims by hand.
     let pointer = aim.filter(|_| press.manual).map(|(ax, ay)| (px + ax, py + ay));
     let range = def.range;
-    let base = Aimed { x: px, y: py, ox: px, oy: py, dir: facing_dir(caster.facing), ally: None, monster: None };
+    let base = Aimed { x: px, y: py, ox: px, oy: py, dir: facing_dir(caster.facing), ally: None, monster: None, pet: None };
     let at = |x: f32, y: f32| Aimed { x, y, dir: norm(x - px, y - py).unwrap_or(base.dir), ..base };
     let on = |m: (u16, f32, f32)| Aimed { monster: Some(field.tag(m.0)), ..at(m.1, m.2) };
     let ally = |p: &HubPlayer| Aimed { ally: Some(p.profile.user_id), ..at(p.x, p.y) };
+    let pet = |c: &Companion| Aimed { pet: Some(c.entity()), ..at(c.x, c.y) };
+    // A heal or a potion counts the homunculi as allies.
+    let mends = mends(def);
     // Who still wants the buff this skill leaves (everyone, if it leaves none).
     let timed = press.skill.filter(|_| def.timed_buff(slv));
     let needs = |f: &Fighter| timed.is_none_or(|s| f.buff_left(s, press.now) <= press.refresh);
@@ -351,14 +379,18 @@ pub(super) fn aim_press(field: &Field<'_>, caster: &HubPlayer, def: &SkillDef, s
                 None => Some(Aimed { ally: Some(caster.profile.user_id), ..base }),
             }
         }
-        // Lowest HP share, ties to the nearest; auto-cast leaves scratches.
+        // Lowest HP share, ties to the nearest (a player before a
+        // homunculus); auto-cast leaves scratches. A heal or a potion takes
+        // the homunculi too, the caster's and the party's.
         Target::MostWoundedAlly => {
-            let share = |f: &Fighter| f.hp as f32 / f.max_hp.max(1) as f32;
-            let (p, _) = field
-                .allies(px, py, range)
-                .filter(|(_, f)| f.hp < f.max_hp && (!press.auto || share(f) < AUTO_HEAL_BELOW))
-                .min_by(|a, b| share(a.1).total_cmp(&share(b.1)).then(d2(a.0).total_cmp(&d2(b.0))))?;
-            Some(ally(p))
+            let share = |hp: i32, max: i32| hp as f32 / max.max(1) as f32;
+            let wants = |hp: i32, max: i32| hp < max && (!press.auto || share(hp, max) < AUTO_HEAL_BELOW);
+            let players = field.allies(px, py, range).filter(|(_, f)| wants(f.hp, f.max_hp)).map(|(p, f)| (share(f.hp, f.max_hp), d2(p), ally(p)));
+            let pets = field
+                .homunculi(px, py, range)
+                .filter(|c| mends && wants(c.hp, c.max_hp))
+                .map(|c| (share(c.hp, c.max_hp), (c.x - px).powi(2) + (c.y - py).powi(2), pet(c)));
+            players.chain(pets).min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))).map(|(.., aimed)| aimed)
         }
         // The most crowded ally still without the buff; auto-cast only
         // when monsters crowd someone.
@@ -381,7 +413,10 @@ pub(super) fn aim_press(field: &Field<'_>, caster: &HubPlayer, def: &SkillDef, s
         }
         Target::DensestAllies => {
             let r = reach_of(def, slv);
-            let allies: Vec<(f32, f32)> = field.allies(px, py, range).map(|(p, _)| (p.x, p.y)).collect();
+            // A mending area (Sanctuary, a potion for the party) counts
+            // the homunculi it would reach.
+            let pets = field.homunculi(px, py, range).filter(|_| mends).map(|c| (c.x, c.y));
+            let allies: Vec<(f32, f32)> = field.allies(px, py, range).map(|(p, _)| (p.x, p.y)).chain(pets).collect();
             let best = allies.iter().max_by_key(|a| {
                 allies.iter().filter(|b| (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) <= r * r).count()
             })?;

@@ -182,6 +182,14 @@
 //!                      look, 10 × str equipped (slot order of
 //!                      `items::Slot`; empty = nothing): another player's
 //!                      worn gear, the answer to INSPECT
+//! 0xAA PLAYER_SHEET    var entity_id, str sheet (JSON: the player's live
+//!                      combat numbers, `hub::sheet::Sheet`: armour class,
+//!                      attack, damage, speed, saves... with buffs,
+//!                      conditions and auras, each with its base and a
+//!                      breakdown): to the player itself when it changes
+//!                      and on arrival, and after PLAYER_INSPECT for the
+//!                      inspected player (clients older than it skip the
+//!                      unknown kind)
 //! 0x7A CHAT            u8 op: 0 say: var entity_id, str name, str text
 //!                      (a player's line, to the players around them:
 //!                      `chat::CHAT_RANGE` cells on a hub map, the whole
@@ -435,6 +443,7 @@ pub mod kind {
     pub const BOSS_BAR: u8 = 0x72;
     pub const PARTY_INVITE: u8 = 0x70;
     pub const PLAYER_INSPECT: u8 = 0x71;
+    pub const PLAYER_SHEET: u8 = 0xAA;
     pub const CHAT: u8 = 0x7A;
     pub const FRIENDS: u8 = 0x78;
     pub const FRIEND_NOTE: u8 = 0x79;
@@ -1218,6 +1227,9 @@ pub enum ServerMsg {
     /// Another player's worn gear (the answer to `inspect`): ten slot
     /// item ids in `items::Slot` order, empty = nothing.
     PlayerInspect { entity_id: u32, name: String, archetype: String, level: u32, look: Look, equip: Vec<String> },
+    /// A player's live combat numbers (JSON of `hub::sheet::Sheet`): the
+    /// Equipment window of the recipient or of the player it inspects.
+    PlayerSheet { entity_id: u32, sheet: String },
     /// A player's chat line (`entity_id` = their character, `name` its
     /// name): over their head and in the chat log.
     Chat { entity_id: u32, name: String, text: String },
@@ -1621,6 +1633,11 @@ impl ServerMsg {
                     b.put_str(equip.get(i).map_or("", String::as_str));
                 }
             }
+            ServerMsg::PlayerSheet { entity_id, sheet } => {
+                b.put_u8(kind::PLAYER_SHEET);
+                b.put_var((*entity_id).into());
+                b.put_str(sheet);
+            }
             ServerMsg::Loot { entity_id, x, y, item, count, rare } => {
                 b.put_u8(kind::LOOT);
                 b.put_var((*entity_id).into());
@@ -1924,6 +1941,7 @@ impl ServerMsg {
                 look: Look::read(&mut r)?,
                 equip: (0..super::combat::items::EQUIP_SLOTS).map(|_| r.str()).collect::<Option<_>>()?,
             },
+            kind::PLAYER_SHEET => ServerMsg::PlayerSheet { entity_id: r.var32()?, sheet: r.str()? },
             kind::LOOT => ServerMsg::Loot {
                 entity_id: r.var32()?,
                 x: r.pos()?,
@@ -2761,6 +2779,7 @@ mod tests {
                 look: Look { gender: 1, hair: 7, hair_color: 3, body_color: 5 },
                 equip: vec!["cap".into(), String::new(), String::new(), String::new(), "rod".into(), String::new(), String::new(), String::new(), String::new(), "clip".into()],
             },
+            ServerMsg::PlayerSheet { entity_id: 300, sheet: r#"{"ac":18}"#.into() },
         ];
         for m in all {
             let b = m.encode();
@@ -3142,6 +3161,18 @@ pub(crate) mod golden {
         assert!(ClientMsg::decode(&[0xA7, 10]).is_err(), "short");
         // The quick-use key's ITEM_USE (`ClientMsg.quickHp`).
         assert_eq!(hex(&ClientMsg::ItemUse { item: crate::world::hub::QUICK_HP.into() }.encode()), "5803406870");
+    }
+
+    const PLAYER_SHEET_GOLDEN: &str = "aaac02097b226163223a31387d";
+
+    /// 0xAA PLAYER_SHEET; change together with `client_test.dart`
+    /// (`player sheet golden`).
+    #[test]
+    fn player_sheet_matches_the_dart_golden() {
+        let m = ServerMsg::PlayerSheet { entity_id: 300, sheet: r#"{"ac":18}"#.into() };
+        let b = m.encode();
+        assert_eq!(hex(&b), PLAYER_SHEET_GOLDEN);
+        assert_eq!(ServerMsg::decode(&b), Some(m));
     }
 
     const SKILL_STRIKES_GOLDEN: &str = "9eac02066d6574656f72d00001a002d000d804";

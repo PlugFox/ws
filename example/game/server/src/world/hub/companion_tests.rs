@@ -4,6 +4,7 @@
 //! tick (`HubInstance::tick`), so the horde's movement, the fight's melee,
 //! the hazards and the messages all run as in a real stage.
 
+use super::super::fight::Fighter;
 use super::super::test_support::{map, portal};
 use super::super::tests::profile;
 use super::super::{brain, HubEvent, HubInstance, HubSimConfig, HubWorld, Outgoing, PlayerProfile};
@@ -775,6 +776,147 @@ fn heals_and_potions_reach_companions() {
     assert_eq!(stage.companions.heal_entity(e, 4), 4);
     let out = run(&mut stage, 1);
     assert_eq!(hits_on(&out, e).iter().filter(|x| x.flags & hit::HEAL != 0).count(), 2, "both heals are shown");
+}
+
+// ---------------------------------------------------------------------------
+// Heals and potions pick homunculi as allies
+// ---------------------------------------------------------------------------
+
+/// Skills that mend an ally: Potion Pitcher, Heal (an area on the picked
+/// ally, as baked) and a point heal (only the picked one), plus an ally buff
+/// that must never pick a companion.
+const MEND_BOOK: &str = r#"{"skills":[
+  {"id":"potion_pitcher","name":"Potion Pitcher","class":"merchant","max_level":5,"target":"most_wounded_ally","range":6,"cooldown":0.2,
+   "effects":[{"type":"pitch","mult":[1.5,0.1],"regen":2.0}]},
+  {"id":"heal","name":"Heal","class":"acolyte","max_level":10,"target":"most_wounded_ally","range":10,"cooldown":0.2,
+   "effects":[{"type":"heal","dice":"1d8","mult":[0,1],"radius":1.5}]},
+  {"id":"mend","name":"Mend","class":"acolyte","max_level":10,"target":"most_wounded_ally","range":10,"cooldown":0.2,
+   "effects":[{"type":"heal","dice":"1d8","mult":[0,1]}]}
+]}"#;
+
+/// The open field with [`MEND_BOOK`]: the Merchant (user 1, Potion Pitcher
+/// on slot 0, two Red Potions) with its Lif out at (10.5, 10.5), and a
+/// priest (user 2, Heal on slot 0, the point heal on slot 1) beside it.
+fn mend_stage() -> HubInstance {
+    let mut stage = field(&open_rows().iter().map(String::as_str).collect::<Vec<_>>());
+    stage = stage.with_skills(Arc::new(SkillBook::from_json(MEND_BOOK).unwrap()));
+    let mut out = Vec::new();
+    let mut m = merchant(HomType::Lif, 25);
+    m.loadout.skills.insert("potion_pitcher".into(), 5);
+    m.loadout.hotbar[0] = "potion_pitcher".into();
+    stage.join(m, Uuid::nil(), None, 0, &mut out);
+    let mut loadout = Loadout::default();
+    loadout.hotbar.resize(combat::skills::SLOTS, String::new());
+    for (i, id) in ["heal", "mend"].into_iter().enumerate() {
+        loadout.skills.insert(id.into(), 10);
+        loadout.hotbar[i] = id.into();
+    }
+    stage.join(PlayerProfile { archetype: "acolyte".into(), level: 30, loadout, ..profile(2) }, Uuid::nil(), None, 0, &mut out);
+    put(&mut stage, 1, 10.5, 10.5);
+    put(&mut stage, 2, 12.5, 10.5);
+    stage.tick(&mut out);
+    assert!(stage.companions.homunculus_of(1).is_some());
+    let i = stage.find(1).unwrap();
+    stage.players[i].fighter.as_mut().unwrap().potions = vec![("red_potion".into(), 2)];
+    stage
+}
+
+fn vitals(stage: &mut HubInstance, user: u32) -> &mut Fighter {
+    let i = stage.find(user).unwrap();
+    stage.players[i].fighter.as_mut().unwrap()
+}
+
+/// `user` holds `slots` until a cast of theirs goes out (at most 6 ticks),
+/// then a few more ticks let it land; everything sent.
+fn press(stage: &mut HubInstance, user: u32, slots: u16) -> Outgoing {
+    let mut out = Vec::new();
+    let mut held = slots;
+    for _ in 0..12 {
+        stage.act(user, [0, 0], held);
+        stage.tick(&mut out);
+        if controls(&out, user).iter().any(|m| matches!(m, ServerMsg::Cast { caster, skill, .. } if *caster == 100 + user && !skill.is_empty())) {
+            held = 0;
+        }
+    }
+    stage.act(user, [0, 0], 0);
+    out
+}
+
+fn used_items(out: &Outgoing) -> Vec<String> {
+    out.iter()
+        .filter_map(|(u, e)| match (*u, e) {
+            (1, HubEvent::ItemUsed { item }) => Some(item.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn potion_pitcher_throws_at_the_most_wounded_homunculus() {
+    let mut stage = mend_stage();
+    // The owner scratched (99 %), its homunculus at a quarter.
+    let max = vitals(&mut stage, 1).max_hp;
+    vitals(&mut stage, 1).hp = max - 1;
+    let hom_max = hom(&stage).max_hp;
+    hom_mut(&mut stage).hp = hom_max / 4;
+    let at = hom(&stage).x;
+    let out = press(&mut stage, 1, 1);
+    let e = hom(&stage).entity();
+    assert_eq!(used_items(&out), vec!["red_potion".to_string()], "one potion thrown");
+    assert!(hits_on(&out, e).iter().any(|h| h.flags & hit::HEAL != 0 && h.amount > 0), "it lands on the homunculus");
+    assert!(vitals(&mut stage, 1).regen[0].is_none(), "not on the scratched owner");
+    let cast = controls(&out, 1).into_iter().find_map(|m| match m {
+        ServerMsg::Cast { caster: 101, skill, x, .. } if skill == "potion_pitcher" => Some(x),
+        _ => None,
+    });
+    assert!(cast.is_some_and(|x| (x - at).abs() < 0.5), "aimed at the homunculus: {cast:?}, it stood at {at}");
+
+    // A more wounded player still comes first.
+    vitals(&mut stage, 1).hp = max / 5;
+    hom_mut(&mut stage).hp = hom_max / 2;
+    let out = press(&mut stage, 1, 1);
+    assert_eq!(used_items(&out).len(), 1);
+    assert!(vitals(&mut stage, 1).regen[0].is_some(), "the owner at 20 % is the most wounded");
+}
+
+#[test]
+fn auto_pitch_on_a_homunculus_waits_for_the_potion_threshold() {
+    let mut stage = mend_stage();
+    let i = stage.find(1).unwrap();
+    stage.players[i].prefs.auto = 1;
+    stage.players[i].uses.hp = 50;
+    let hom_max = hom(&stage).max_hp;
+    hom_mut(&mut stage).hp = hom_max * 7 / 10;
+    // The client holds an auto-cast slot down by itself.
+    assert!(used_items(&press(&mut stage, 1, 1)).is_empty(), "70 % is above the 50 % threshold");
+    hom_mut(&mut stage).hp = hom_max * 3 / 10;
+    assert_eq!(used_items(&press(&mut stage, 1, 1)), vec!["red_potion".to_string()]);
+}
+
+#[test]
+fn a_priest_heals_a_party_members_homunculus() {
+    let mut stage = mend_stage();
+    // Both players unhurt: before, Heal found no one to cast on.
+    let hom_max = hom(&stage).max_hp;
+    hom_mut(&mut stage).hp = 5;
+    let out = press(&mut stage, 2, 1);
+    let e = hom(&stage).entity();
+    assert!(controls(&out, 2).iter().any(|m| matches!(m, ServerMsg::Cast { caster: 102, skill, .. } if skill == "heal")), "Heal is cast");
+    assert!(hits_on(&out, e).iter().any(|h| h.flags & hit::HEAL != 0 && h.amount > 0), "Heal mends the homunculus");
+    assert!(hom(&stage).hp > 5);
+
+    // A heal with no area (only the picked ally) follows the homunculus
+    // and lands on it.
+    hom_mut(&mut stage).hp = hom_max / 4;
+    let before = hom(&stage).hp;
+    let out = press(&mut stage, 2, 2);
+    let follow = controls(&out, 2).into_iter().find_map(|m| match m {
+        ServerMsg::Cast { caster: 102, skill, areas, .. } if skill == "mend" => areas.first().map(|a| a.follow),
+        _ => None,
+    });
+    assert_eq!(follow, Some(e), "its marker follows the homunculus");
+    assert!(hits_on(&out, e).iter().any(|h| h.flags & hit::HEAL != 0 && h.amount > 0));
+    assert!(hom(&stage).hp > before);
 }
 
 // ---------------------------------------------------------------------------

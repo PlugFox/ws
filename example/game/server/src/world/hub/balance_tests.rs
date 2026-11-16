@@ -215,8 +215,9 @@ fn potions_restore_what_their_tooltip_says_over_its_time() {
 
 /// Timed buffs that are windows, not states to keep up: Mystical
 /// Amplification's empowered next spell, Enchant Deadly Poison's burst,
-/// Blade Stop's catch and Steel Body's slow armour.
-const BURSTS: &[&str] = &["mystical_amplification", "enchant_deadly_poison", "blade_stop", "steel_body"];
+/// Blade Stop's catch, Steel Body's slow armour and the short run after
+/// Cart Boost's dash (a travel skill, not a haste to keep up).
+const BURSTS: &[&str] = &["mystical_amplification", "enchant_deadly_poison", "blade_stop", "steel_body", "cart_boost"];
 
 /// Every timed buff a player casts again and again (Blessing, Increase AGI,
 /// Improve Concentration, Endure, ...) outlasts its cooldown and wind-up at

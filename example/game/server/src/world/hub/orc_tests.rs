@@ -27,6 +27,7 @@ const TEST_HORN: MapEvent = MapEvent {
     duration_secs: 10.0,
     light_scale: 1.0,
     shake: 0,
+    calls_waves: true,
 };
 
 static MISSION_TEST: MissionInfo = MissionInfo {
@@ -232,12 +233,89 @@ fn the_orc_lord_calls_the_clans_and_his_banners_fall_with_him() {
     assert_eq!(count(&s, BANNER), 0);
 }
 
+/// The horn messages of `out` (phase, start ms).
+fn horn_msgs(out: &Outgoing) -> Vec<(u8, u32)> {
+    msgs(out)
+        .iter()
+        .filter_map(|m| match m {
+            ServerMsg::EnvEvent { id, phase, start_ms, .. } if id == HORN => Some((*phase, *start_ms)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn no_horn_sounds_once_the_fog_closed_the_waves() {
+    let mut s = stage(1);
+    let mut out = Vec::new();
+    at(&mut s, 1.0, &mut out);
+    // The first horn sounds and its column marches in.
+    at(&mut s, TEST_HORN.first_secs + 0.1, &mut out);
+    assert_eq!(s.env.orc.horns(), 1);
+    at(&mut s, TEST_HORN.first_secs + TEST_HORN.duration_secs + 0.1, &mut out);
+    // The fog rises: no horn warns, begins or calls a column any more.
+    s.horde_mut().unwrap().close_spawning();
+    let warriors = count(&s, "ork_warrior");
+    let mut out = Vec::new();
+    for n in 1..4 {
+        let start = TEST_HORN.first_secs + TEST_HORN.every_secs * n as f32;
+        for t in [start - TEST_HORN.warn_secs + 0.1, start + 0.1, start + 2.0, start + TEST_HORN.duration_secs + 0.1] {
+            at(&mut s, t, &mut out);
+        }
+    }
+    assert_eq!(horn_msgs(&out), vec![], "the horns fall silent");
+    assert_eq!(s.env.orc.horns(), 1);
+    assert_eq!(count(&s, "ork_warrior"), warriors, "no column");
+    assert_eq!(s.env_event_start(HORN), None);
+}
+
+#[test]
+fn a_horn_warned_of_as_the_fog_rises_is_called_off() {
+    let mut s = stage(1);
+    let mut out = Vec::new();
+    at(&mut s, 1.0, &mut out);
+    let start = TEST_HORN.first_secs;
+    let mut out = Vec::new();
+    at(&mut s, start - 2.0, &mut out);
+    assert_eq!(horn_msgs(&out), vec![(0, (start * 1000.0) as u32)], "the warning");
+    // The fog rises between the warning and the horn: it ends unblown, once.
+    s.horde_mut().unwrap().close_spawning();
+    let mut out = Vec::new();
+    at(&mut s, start - 1.0, &mut out);
+    assert_eq!(horn_msgs(&out), vec![(2, (start * 1000.0) as u32)], "called off (clients take the side banner down)");
+    let mut out = Vec::new();
+    at(&mut s, start + 0.1, &mut out);
+    at(&mut s, start + 3.0, &mut out);
+    assert_eq!(horn_msgs(&out), vec![]);
+    assert_eq!(s.env.orc.horns(), 0);
+    assert_eq!(count(&s, "ork_warrior"), 0);
+}
+
+#[test]
+fn the_orc_lord_blows_no_horn_after_the_fog() {
+    let mut s = stage(1);
+    let mut out = Vec::new();
+    at(&mut s, 1.0, &mut out);
+    s.horde_mut().unwrap().close_spawning();
+    let k = kind(&s, "orc_lord");
+    let lord = s.horde_mut().unwrap().spawn(k, 60.0, 50.5).unwrap();
+    at(&mut s, 2.5, &mut out);
+    let max = s.horde.as_ref().unwrap().block(lord).hp;
+    s.horde_mut().unwrap().store_mut().hp[lord as usize] = max * (CLANS_PCT - 2) / 100;
+    let mut out = Vec::new();
+    at(&mut s, 4.0, &mut out);
+    at(&mut s, 4.1, &mut out);
+    assert_eq!(horn_msgs(&out), vec![], "Call the Clans forces no horn");
+    assert_eq!(s.env.orc.horns(), 0);
+}
+
 #[test]
 fn the_orc_village_mission_plants_its_banners_on_walkable_ground_and_sounds_the_horn() {
     let m = missions::find(MISSION).unwrap();
     let horn = m.env.event(HORN).expect("the war horn");
     assert_eq!((horn.first_secs, horn.every_secs, horn.duration_secs), (120.0, 150.0, 25.0));
     assert!(m.env.strikes.iter().any(|s| s.during == HORN && s.ranged), "arrows fall while it sounds");
+    assert!(horn.calls_waves, "the horn heralds a column: it stops with the waves");
     assert_eq!(m.env.objects[0].monster, BANNER);
     assert_eq!(m.env.objects[0].spots.len(), 8);
     assert!(m.tips.len() >= 6);

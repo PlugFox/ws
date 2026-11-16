@@ -100,6 +100,7 @@ abstract final class Kind {
   static const fog = 0x6E;
   static const partyInvite = 0x70;
   static const playerInspect = 0x71;
+  static const playerSheet = 0xAA;
   static const chat = 0x7A;
   static const friends = 0x78;
   static const friendNote = 0x79;
@@ -1268,6 +1269,7 @@ sealed class ServerMsg {
       Kind.playerInspect => PlayerInspect(r.varint(), r.str(), r.str(), r.varint(), Look._read(r), [
         for (var i = 0; i < EquipSlot.count; i++) r.str(),
       ]),
+      Kind.playerSheet => PlayerSheet(r.varint(), r.str()),
       Kind.chat => switch (r.u8()) {
         0 => ChatLine(r.varint(), r.str(), r.str()),
         1 => Announcement(r.str()),
@@ -2521,6 +2523,17 @@ final class PlayerInspect extends ServerMsg {
   final int level;
   final Look look;
   final List<String> equip;
+}
+
+/// A player's live combat numbers (`PLAYER_SHEET`, server `hub/sheet.rs`):
+/// [json] holds armour class, attack, damage, speed, saves... with buffs,
+/// conditions and auras, each with its `*_base` and the AC's `ac_parts`.
+/// The recipient's own ([entityId] = theirs) when it changes, and an
+/// inspected player's after [PlayerInspect].
+final class PlayerSheet extends ServerMsg {
+  const PlayerSheet(this.entityId, this.json);
+  final int entityId;
+  final String json;
 }
 
 /// Longest chat line the server keeps (`chat::CHAT_MAX_CHARS`).

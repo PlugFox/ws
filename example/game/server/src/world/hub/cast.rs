@@ -90,6 +90,9 @@ pub(super) enum Follow {
     Player(u32),
     /// A monster `(slot, generation)`: a homing hit.
     Monster(u16, u8),
+    /// A companion (entity id): a heal or a potion on its way to a
+    /// homunculus.
+    Companion(u32),
 }
 
 /// A trap waiting for a monster.
@@ -299,14 +302,14 @@ pub(super) fn telegraphs(def: &SkillDef, slv: u8, caster: &HubPlayer, aimed: &Ai
             FollowFx::Target => match (aimed.monster, aimed.ally) {
                 (Some((s, _)), _) => MONSTER_ENTITY_BASE + s as u32,
                 (None, Some(uid)) => entity_of(uid),
-                _ => 0,
+                _ => aimed.pet.unwrap_or(0),
             },
             // A single target is struck wherever it goes (`land`): its
             // marker goes with it.
             FollowFx::None if point => match (aimed.monster, aimed.ally) {
                 (Some((s, _)), _) => MONSTER_ENTITY_BASE + s as u32,
                 (None, Some(uid)) => entity_of(uid),
-                _ => 0,
+                _ => aimed.pet.unwrap_or(0),
             },
             FollowFx::None => 0,
         };
@@ -524,14 +527,17 @@ pub(super) fn land(
         let ally = aimed.ally.or_else(|| (matches!(def.target, Target::Caster | Target::Escape) && !act.payload.hostile()).then_some(uid));
         let follow = match act.area.follow {
             FollowFx::Caster => Follow::Player(uid),
-            FollowFx::Target => match (aimed.monster, aimed.ally) {
-                (Some((s, g)), _) => Follow::Monster(s, g),
-                (None, Some(a)) => Follow::Player(a),
+            FollowFx::Target => match (aimed.monster, aimed.ally, aimed.pet) {
+                (Some((s, g)), ..) => Follow::Monster(s, g),
+                (None, Some(a), _) => Follow::Player(a),
+                (None, None, Some(e)) => Follow::Companion(e),
                 _ => Follow::None,
             },
-            // A point skill still lands on the monster it picked.
-            FollowFx::None => match aimed.monster {
-                Some((s, g)) if point => Follow::Monster(s, g),
+            // A point skill still lands on the monster it picked (or the
+            // homunculus a heal or a potion picked).
+            FollowFx::None => match (aimed.monster, aimed.pet) {
+                (Some((s, g)), _) if point => Follow::Monster(s, g),
+                (None, Some(e)) if point => Follow::Companion(e),
                 _ => Follow::None,
             },
         };
@@ -905,7 +911,7 @@ impl HubInstance {
                 {
                     continue;
                 }
-                let field = Field { horde, players: &self.players, map };
+                let field = Field { horde, players: &self.players, companions: &self.companions, map };
                 // An auto-cast slot fires only at a target that needs it and
                 // aims itself; a press by hand follows the pointer when the
                 // player aims manually.
@@ -926,10 +932,10 @@ impl HubInstance {
                 let me = &self.players[idx];
                 // A summon pressed by hand with nothing to aim at comes out
                 // beside the caster (the homunculus at the stage's start).
-                let beside = |x: f32, y: f32| Aimed { x, y, ox: me.x, oy: me.y, dir: (0.0, 1.0), ally: None, monster: None };
-                // A potion throw with no wounded player in reach goes to the
-                // caster's most wounded companion (auto-cast: below the
-                // potion threshold too).
+                let beside = |x: f32, y: f32| Aimed { x, y, ox: me.x, oy: me.y, dir: (0.0, 1.0), ally: None, monster: None, pet: None };
+                // A potion throw with no wounded player or homunculus in
+                // reach goes to the caster's most wounded companion (a
+                // plant; auto-cast: below the potion threshold too).
                 let pet = || {
                     let share = |c: &&super::companion::Companion| c.hp as f32 / c.max_hp.max(1) as f32;
                     self.companions
@@ -947,7 +953,7 @@ impl HubInstance {
                 let Some(aimed) = aim_press(&field, me, def, level, &press).or_else(fallback) else { continue };
                 // Auto-cast throws potions only below the caster's own
                 // potion threshold (`USE_PREFS`), as it drinks them.
-                if auto && def.pitches() && aimed.ally.is_some() && !pitch_wanted(&self.players, me, &aimed) {
+                if auto && def.pitches() && (aimed.ally.is_some() || aimed.pet.is_some()) && !pitch_wanted(&self.players, &self.companions, me, &aimed) {
                     continue;
                 }
                 let cast_ticks = (def.cast_secs(level) * hz).round() as u32;
@@ -1069,6 +1075,11 @@ impl HubInstance {
                         l.follow = Follow::None;
                     }
                 }
+                Follow::Companion(e) => match self.companions.by_entity(e) {
+                    Some(c) if c.alive() => l.area = l.area.moved_to(c.x, c.y),
+                    // It fell on the way: the heal lands on nobody.
+                    _ => l.follow = Follow::None,
+                },
                 Follow::None => {}
             }
             if let Some(trap) = l.trap {
@@ -1134,12 +1145,16 @@ fn drains(def: &SkillDef) -> bool {
     def.effects.iter().filter_map(Effect::act).any(|a| matches!(&a.payload, Payload::Buff(b) if b.toggle && b.sp_drain.at(def.max_level) > 0.0))
 }
 
-/// An auto-cast potion throw is wanted: the picked ally is below the
-/// caster's HP potion threshold (none set: never by itself).
-fn pitch_wanted(players: &[HubPlayer], me: &HubPlayer, aimed: &Aimed) -> bool {
+/// An auto-cast potion throw is wanted: the picked ally (or homunculus)
+/// is below the caster's HP potion threshold (none set: never by itself).
+fn pitch_wanted(players: &[HubPlayer], companions: &Companions, me: &HubPlayer, aimed: &Aimed) -> bool {
     let pct = me.uses.hp;
-    let Some(f) = aimed.ally.and_then(|a| players.iter().find(|p| p.profile.user_id == a)).and_then(|p| p.fighter.as_ref()) else { return false };
-    pct > 0 && i64::from(f.hp) * 100 < i64::from(f.max_hp) * i64::from(pct)
+    let vitals = match aimed.pet {
+        Some(e) => companions.by_entity(e).map(|c| (c.hp, c.max_hp)),
+        None => aimed.ally.and_then(|a| players.iter().find(|p| p.profile.user_id == a)).and_then(|p| p.fighter.as_ref()).map(|f| (f.hp, f.max_hp)),
+    };
+    let Some((hp, max_hp)) = vitals else { return false };
+    pct > 0 && i64::from(hp) * 100 < i64::from(max_hp) * i64::from(pct)
 }
 
 impl HubInstance {
@@ -1348,8 +1363,11 @@ fn act(
                 f.hp += amount;
                 hits.push(HitEvent { target: id, amount: amount as u32, flags: hit::HEAL | (DamageType::Radiant as u8) << 4 });
             }
-            // A heal over an area mends the companions in it too.
-            if !l.point && !companions.is_empty() {
+            // A heal over an area mends the companions in it too; one on a
+            // picked homunculus mends it.
+            if let (true, Follow::Companion(e)) = (l.point, l.follow) {
+                companions.heal_entity(e, dice.roll(rng, false).max(0));
+            } else if !l.point && !companions.is_empty() {
                 companions.heal_in(&l.area, dice.roll(rng, false).max(0));
             }
         }

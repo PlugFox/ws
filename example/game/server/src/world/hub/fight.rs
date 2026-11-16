@@ -214,6 +214,30 @@ pub struct Fighter {
     /// Field plants this fighter grew (Plant Cultivation, `cast.rs`):
     /// slot and generation, oldest first.
     pub(super) grown: Vec<(u16, u8)>,
+    /// The combat sheet last sent to the player (`PLAYER_SHEET`,
+    /// `sheet.rs`); `None` sends it with the next check.
+    pub(super) sheet_sent: Option<super::sheet::Sheet>,
+}
+
+/// The terms of a fighter's armour class ([`Fighter::armour_parts`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(super) struct ArmourParts {
+    /// Armour, shield, refines and the tier (`Gear::ac_at`).
+    pub worn: i32,
+    /// Magic items, card sets and passives (no buffs).
+    pub items: i32,
+    /// Running buffs (party ones too: Angelus, Steel Body...).
+    pub buffs: i32,
+    /// Conditions (Mired, Taunted).
+    pub conditions: i32,
+    /// Cards that hold right now (standing still, under 30% HP).
+    pub cards: i32,
+}
+
+impl ArmourParts {
+    pub const fn total(&self) -> i32 {
+        self.worn + self.items + self.buffs + self.conditions + self.cards
+    }
 }
 
 impl Fighter {
@@ -282,6 +306,7 @@ impl Fighter {
             arrow: DamageType::Physical,
             quiver_dirty: false,
             grown: Vec::new(),
+            sheet_sent: None,
         }
     }
 
@@ -475,7 +500,7 @@ impl Fighter {
     }
 
     /// The passives and the magic items worn: the mods without buffs.
-    fn base_mods(&self) -> Mods {
+    pub(super) fn base_mods(&self) -> Mods {
         let mut m = self.passive;
         m.add(&self.gear.mods);
         m
@@ -635,17 +660,55 @@ impl Fighter {
         self.status = Status(0);
     }
 
-    /// Armour class with buffs and conditions.
+    /// Armour class with buffs and conditions (what monsters roll against).
     pub(super) fn armour(&self) -> i32 {
+        self.armour_parts().total()
+    }
+
+    /// Where [`Fighter::armour`] comes from (the Equipment window's
+    /// breakdown, `sheet.rs`).
+    pub(super) fn armour_parts(&self) -> ArmourParts {
         let o = &self.gear.procs;
         let planted = if self.cards.planted { o.still_ac as i32 } else { 0 };
         let desperate = if o.desperate_ac != 0 && self.desperate() { o.desperate_ac as i32 } else { 0 };
-        self.ac + self.mods.ac + self.status.ac() + planted + desperate
+        let base = self.base_mods().ac;
+        ArmourParts { worn: self.ac, items: base, buffs: self.mods.ac - base, conditions: self.status.ac(), cards: planted + desperate }
+    }
+
+    /// The basic attack's bonus with `m` (the fighter's mods, maybe with a
+    /// swing's situational extras), without Bless's die.
+    pub(super) fn to_hit_with(&self, m: &Mods) -> i32 {
+        self.weapon.to_hit(self.level) + m.to_hit
+    }
+
+    /// The basic attack's weapon dice with `m` and the element it deals.
+    pub(super) fn swing_dice(&self, m: &Mods) -> (Dice, DamageType) {
+        let (dice, kind) = self.weapon.damage(self.class, self.level);
+        // Maximize Power: the weapon's dice at their maximum. A card's
+        // element replaces the weapon's; the arrow nocked (Arrow Change)
+        // replaces both.
+        (m.weapon_dice(dice), self.nocked().unwrap_or(self.gear.procs.endow.unwrap_or(kind)))
+    }
+
+    /// Flat damage per basic-attack hit with `m` (masteries, refines,
+    /// Phreeoni's growth); a swing may add the pack's.
+    pub(super) fn swing_flat(&self, m: &Mods) -> i32 {
+        m.damage_flat + self.cards.growth as i32
+    }
+
+    /// Walking speed multiplier: buffs, cards, conditions, curses.
+    pub(super) fn pace(&self) -> f32 {
+        let curse = if self.curses.intersects(ModFlags::SLOW) { crate::world::modifiers::SLOW_PACE } else { 1.0 };
+        self.mods.pace() * self.card_pace() * self.status.speed() * curse
     }
 
     /// Saving throw bonus against `c` (or a plain Reflex save).
     pub(super) fn save_against(&self, c: Option<Condition>) -> i32 {
-        let save = c.map_or(Save::Reflex, Condition::save);
+        self.save_bonus(c.map_or(Save::Reflex, Condition::save))
+    }
+
+    /// Saving throw bonus of `save` (class and gear).
+    pub(super) fn save_bonus(&self, save: Save) -> i32 {
         self.class.save_bonus(self.level, save) + self.gear.saves[save as usize]
     }
 
@@ -1003,19 +1066,14 @@ impl HubInstance {
             let o = *f.procs();
             // Katars crit a step earlier.
             m.crit += weapon.kind.crit();
-            let (dice, kind) = weapon.damage(f.class, f.level);
-            // Maximize Power: the weapon's dice at their maximum.
-            let dice = m.weapon_dice(dice);
-            // A card's element replaces the weapon's; the arrow nocked
-            // (Arrow Change) replaces both.
-            let kind = f.nocked().unwrap_or(o.endow.unwrap_or(kind));
+            let (dice, kind) = f.swing_dice(&m);
             let uid0 = p.profile.user_id;
             let near = o.pack != 0
                 && pack.iter().any(|&(u, x, y)| u != uid0 && (x - p.x).powi(2) + (y - p.y).powi(2) <= 25.0);
             if near {
                 m.to_hit += o.pack as i32;
             }
-            let flat = m.damage_flat + if near { o.pack as i32 } else { 0 } + f.cards.growth as i32;
+            let flat = f.swing_flat(&m) + if near { o.pack as i32 } else { 0 };
             let damage = Damage::new(Dice { bonus: dice.bonus + flat, ..dice }, kind);
             let (range, arc_cos, splash) = match weapon.reach {
                 Reach::Melee { range, arc_cos } => (range, Some(arc_cos), 0.0),
@@ -1065,7 +1123,7 @@ impl HubInstance {
                     let advantage = (status.advantage_against() + (m.advantage || ambush || riposte) as i8 + f.status.advantage()).clamp(-1, 1);
                     let ac = block.ac + status.ac();
                     let bless = if m.to_hit_die > 0 { rng.die(m.to_hit_die) as i32 } else { 0 };
-                    match attack_roll(rng, weapon.to_hit(f.level) + m.to_hit + bless, ac, advantage, m.crit_from()) {
+                    match attack_roll(rng, f.to_hit_with(&m) + bless, ac, advantage, m.crit_from()) {
                         AttackOutcome::Miss => hits.push(HitEvent { target: id, amount: 0, flags: hit::MISS }),
                         outcome => {
                             let def = horde.catalog().get(horde.store().kind[s as usize]);
