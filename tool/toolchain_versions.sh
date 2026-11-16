@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Fails when the pinned toolchain versions drift apart: the Dart SDK of
 # mise.toml, the format/analyze job (checkout.yml), the release workflow and
-# the game image; the Flutter of the release workflow and the CI matrix; the
-# Rust of mise.toml and the game image (tool/rust_toolchain.sh checks the
+# the game image; the lowest Flutter of flutter/pubspec.yaml and the CI
+# matrix (the release builds no Flutter package, D58); the Rust of mise.toml
+# and the game image (tool/rust_toolchain.sh checks the
 # rust-toolchain.toml files); the Node, Python and uv of mise.toml and the
 # image.
 #
@@ -41,13 +42,14 @@ same Dart \
   "release.yml=$(first 's/^ *DART_VERSION: \([0-9.]*\).*/\1/p' "$release")" \
   "Dockerfile=$(first 's/^ARG DART_VERSION=\(.*\)$/\1/p' "$docker")"
 
-flutter="$(first 's/^ *FLUTTER_VERSION: \([0-9.]*\).*/\1/p' "$release")"
+# The lowest Flutter the recipe package declares must be tested in CI.
+flutter="$(first 's/^ *flutter: ">=\([0-9.]*\)"$/\1/p' "$root/flutter/pubspec.yaml")"
 matrix="$(first 's/^ *flutter: \[\(.*\)\]$/\1/p' "$checkout")"
 if [[ -z "$flutter" || ", $matrix, " != *", $flutter, "* ]]; then
-  echo "Flutter $flutter (release.yml) is not in the checkout.yml matrix [$matrix]" >&2
+  echo "Flutter $flutter (flutter/pubspec.yaml) is not in the checkout.yml matrix [$matrix]" >&2
   status=1
 else
-  echo "Flutter $flutter"
+  echo "Flutter $flutter (lowest) in [$matrix]"
 fi
 
 same Rust \
