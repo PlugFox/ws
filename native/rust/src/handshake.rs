@@ -208,8 +208,8 @@ pub fn validate(head: &[u8], request: &Request<'_>) -> Result<Option<String>, Fa
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches;
     use super::*;
+    use std::assert_matches;
 
     const KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
     const ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
@@ -282,10 +282,7 @@ mod tests {
             check("HTTP/1.0 403 Forbidden\r\nX: y", &[]),
             Err(Failure::Status(403, _))
         );
-        assert_matches!(
-            check("HTTP/1.1 403", &[]),
-            Err(Failure::Status(403, _))
-        );
+        assert_matches!(check("HTTP/1.1 403", &[]), Err(Failure::Status(403, _)));
     }
 
     #[test]

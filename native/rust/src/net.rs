@@ -305,8 +305,8 @@ fn proxy_error(message: String) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches;
     use super::*;
+    use std::assert_matches;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[tokio::test]
