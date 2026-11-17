@@ -251,5 +251,12 @@ jobs:
           path: ws_native
       - working-directory: ws_native
         run: |
+          # The version URL Publish ws waits for can answer before the
+          # package listing that version solving reads (pub.dev caches it):
+          # 2.0.0-dev.2 failed here once. Retry until ws resolves.
+          for _ in $(seq 1 30); do
+            dart pub get && break
+            sleep 10
+          done
           dart pub get
           dart pub publish --force
