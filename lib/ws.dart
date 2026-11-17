@@ -1,12 +1,10 @@
-library ws;
+/// A WebSocket client for Dart and Flutter on every platform, with
+/// reconnects, heartbeats and request/response calls.
+library;
 
-export 'package:ws/src/client/message_stream.dart';
-export 'package:ws/src/client/metrics.dart';
-export 'package:ws/src/client/state.dart';
-export 'package:ws/src/client/state_stream.dart';
-export 'package:ws/src/client/status_codes.dart';
-export 'package:ws/src/client/web_socket_ready_state.dart';
-export 'package:ws/src/client/websocket_exception.dart';
-export 'package:ws/src/client/ws_client.dart';
-export 'package:ws/src/client/ws_interceptor.dart';
-export 'package:ws/src/client/ws_options.dart';
+export 'src/client/client.dart' show WebSocketClient;
+export 'src/client/exceptions.dart';
+export 'src/client/metrics.dart';
+export 'src/client/options.dart';
+export 'src/client/rpc.dart';
+export 'src/client/state.dart';

@@ -1,0 +1,17 @@
+Third-party software in libws_native
+====================================
+
+The ws_native library is built from the Rust crates listed below. Their
+licences require these notices to accompany binary copies.
+{{#each licenses}}
+
+--------------------------------------------------------------------------------
+{{{name}}} ({{id}})
+
+Used by:
+{{#each used_by}}
+- {{{crate.name}}} {{crate.version}}{{#if crate.repository}} <{{{crate.repository}}}>{{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

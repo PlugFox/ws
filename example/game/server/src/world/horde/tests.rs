@@ -1,0 +1,886 @@
+use super::catalog::test_def;
+use super::*;
+use crate::world::hub::test_support::map;
+use crate::world::map::{CameraConstraint, LocationKind};
+
+/// Open `w×h` field with a border wall and an optional vertical wall at
+/// `x = wall` spanning all rows but the top 3 (a detour).
+fn world(w: usize, h: usize, wall: Option<usize>) -> Arc<HubWorld> {
+    let rows: Vec<String> = (0..h)
+        .map(|r| {
+            (0..w)
+                .map(|c| {
+                    let border = r == 0 || c == 0 || r == h - 1 || c == w - 1;
+                    // Row 0 is the north edge; the gap is at the top (north).
+                    let inner_wall = wall == Some(c) && r > 3;
+                    if border || inner_wall { '#' } else { '.' }
+                })
+                .collect()
+        })
+        .collect();
+    let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let camera = CameraConstraint::Free { pitch: -45.0, min_zoom: 10.0, max_zoom: 40.0, default_zoom: 20.0 };
+    let field = map("field", LocationKind::Field, camera, &refs, vec![]);
+    Arc::new(HubWorld::new(vec![field], "field").unwrap())
+}
+
+fn catalog() -> Arc<MonsterCatalog> {
+    Arc::new(
+        MonsterCatalog::new(vec![test_def("blob", 3.0, 1, 0.0, false), test_def("boss", 3.0, 50, 0.0, true)])
+            .unwrap(),
+    )
+}
+
+fn config(light: f32) -> HordeConfig {
+    HordeConfig { light_radius: light, director_enabled: false, seed: Some(7), ..HordeConfig::default() }
+}
+
+#[test]
+fn double_box_filter_matches_the_circle() {
+    let mut rng = StdRng::seed_from_u64(3);
+    for _ in 0..100_000 {
+        let (dx, dy, r) = (rng.random_range(-20.0..20.0f32), rng.random_range(-20.0..20.0f32), rng.random_range(0.1..15.0f32));
+        assert_eq!(in_radius(dx, dy, r), dx * dx + dy * dy <= r * r, "{dx},{dy} r={r}");
+    }
+}
+
+#[test]
+fn monster_walks_around_a_wall_to_the_player() {
+    let w = world(40, 30, Some(20));
+    let mut h = Horde::new(Arc::clone(&w), catalog(), config(30.0));
+    let player = (30.5, 5.5);
+    let slot = h.spawn(0, 8.5, 5.5).unwrap();
+    let walk = &w.map(0).walk;
+    let mut reached = None;
+    for t in 0..2000 {
+        h.tick(t, 20, &[player]);
+        let (_, _, _, x, y) = h.monsters().find(|m| m.0 == slot).unwrap();
+        assert!(walk.is_walkable(x, y), "monster inside a wall at {x},{y}");
+        let (dx, dy) = (player.0 - x, player.1 - y);
+        if dx * dx + dy * dy <= 1.0 {
+            reached = Some(t);
+            break;
+        }
+    }
+    // Straight line is 22 cells; the detour over the top is ~ 22 + 2×20.
+    let t = reached.expect("monster reached the player");
+    assert!(t > 22 * 20 / 3, "it cannot have gone through the wall (t={t})");
+}
+
+#[test]
+fn far_monsters_step_at_a_reduced_staggered_rate() {
+    let w = world(200, 20, None);
+    let mut cfg = config(10.0);
+    cfg.recycle_factor = 100.0; // keep it
+    let mut h = Horde::new(w, catalog(), cfg);
+    let player = (5.5, 10.5);
+    let near = h.spawn(0, 12.5, 10.5).unwrap();
+    let far = h.spawn(0, 150.5, 10.5).unwrap();
+    let pos = |h: &Horde, s: u16| h.monsters().find(|m| m.0 == s).map(|m| (m.3, m.4)).unwrap();
+    let (mut near_moves, mut far_moves) = (0, 0);
+    for t in 0..40 {
+        let (n0, f0) = (pos(&h, near), pos(&h, far));
+        h.tick(t, 20, &[player]);
+        near_moves += usize::from(pos(&h, near) != n0);
+        far_moves += usize::from(pos(&h, far) != f0);
+    }
+    assert!(near_moves >= 30, "near monster moves every tick until contact ({near_moves})");
+    assert_eq!(far_moves, 10, "far monster moves every 4th tick");
+    // Same distance per second either way.
+    let (fx, _) = pos(&h, far);
+    assert!((150.5 - fx - 3.0 * 2.0).abs() < 0.05, "far monster covered 2 s × 3 cells/s, at {fx}");
+}
+
+#[test]
+fn far_monsters_are_recycled_into_the_spawn_ring() {
+    let w = world(220, 40, None);
+    let mut h = Horde::new(w, catalog(), config(10.0));
+    let player = (10.5, 20.5);
+    let slot = h.spawn(0, 200.5, 20.5).unwrap();
+    let generation0 = h.monsters().next().unwrap().1;
+    for t in 0..(4 * 20 + 5) {
+        h.tick(t, 20, &[player]);
+    }
+    assert_eq!(h.len(), 1);
+    let (s, generation, _, x, y) = h.monsters().next().unwrap();
+    assert!(s != slot || generation != generation0, "a recycled monster is a new entity to clients");
+    let d = ((x - player.0).powi(2) + (y - player.1).powi(2)).sqrt();
+    let (lo, hi) = WaveRules::NORMAL.spawn_margin;
+    assert!((10.0 + lo..=10.0 + hi).contains(&d), "respawned just outside the light, at distance {d}");
+    assert_eq!(h.stats().recycled, 1);
+}
+
+#[test]
+fn bosses_are_never_recycled_or_demoted() {
+    let w = world(220, 40, None);
+    let mut h = Horde::new(w, catalog(), config(10.0));
+    let boss = h.spawn(1, 200.5, 20.5).unwrap();
+    for t in 0..200 {
+        h.tick(t, 20, &[(10.5, 20.5)]);
+        assert_eq!(h.stats().full, 1, "boss runs at full rate every tick");
+    }
+    assert_eq!(h.monsters().next().unwrap().0, boss);
+    assert_eq!(h.stats().recycled, 0);
+}
+
+#[test]
+fn a_stacked_crowd_spreads_out_and_stays_walkable() {
+    let w = world(40, 40, None);
+    let mut h = Horde::new(Arc::clone(&w), catalog(), config(30.0));
+    for _ in 0..40 {
+        h.spawn(0, 20.5, 25.5).unwrap();
+    }
+    let player = (20.5, 10.5);
+    for t in 0..300 {
+        h.tick(t, 20, &[player]);
+    }
+    let before: Vec<_> = h.monsters().collect();
+    h.tick(300, 20, &[player]);
+    let m: Vec<_> = h.monsters().collect();
+    // Settled: the pile around a standing player does not wobble.
+    let wobble = m.iter().zip(&before).map(|(a, b)| (a.3 - b.3).hypot(a.4 - b.4)).sum::<f32>() / m.len() as f32;
+    assert!(wobble < 0.005, "settled crowd moves {wobble} cells/tick on average");
+    let nearest: Vec<f32> = m
+        .iter()
+        .map(|a| {
+            assert!(w.map(0).walk.is_walkable(a.3, a.4));
+            m.iter().filter(|b| b.0 != a.0).map(|b| (a.3 - b.3).hypot(a.4 - b.4)).fold(f32::INFINITY, f32::min)
+        })
+        .collect();
+    let worst = nearest.iter().copied().fold(f32::INFINITY, f32::min);
+    let mean = nearest.iter().sum::<f32>() / nearest.len() as f32;
+    // Radii are 0.35: touching is 0.7 apart. A pile pressed against a
+    // player keeps a soft overlap (measured: mean ≈ 0.48, worst ≈ 0.33).
+    assert!(mean > 0.42, "mean nearest-neighbour distance {mean}");
+    assert!(worst > 0.28, "closest pair {worst} apart");
+    // And they surround the player instead of piling up behind each other.
+    let near = m.iter().filter(|a| ((a.3 - player.0).powi(2) + (a.4 - player.1).powi(2)).sqrt() < 3.0).count();
+    assert!(near >= 10, "{near} monsters in contact range");
+}
+
+#[test]
+fn game_master_waves_land_just_outside_the_light_in_random_directions() {
+    // A wall splits the field; the east half is reachable only around it.
+    let w = world(160, 160, Some(80));
+    let light = 30.0;
+    let mut cfg = config(light);
+    cfg.director_enabled = true;
+    cfg.waves.budget = 55.0; // the test boss costs 50
+    let (lo, hi) = cfg.waves.spawn_margin;
+    let mut h = Horde::new(Arc::clone(&w), catalog(), cfg);
+    let players = [(40.5, 60.5), (50.5, 70.5)];
+    let mut seen = std::collections::HashSet::new();
+    let mut fresh = 0;
+    let mut octants = [0u32; 8];
+    for t in 0..20 * 65 {
+        h.tick(t, 20, &players);
+        for (slot, generation, _, x, y) in h.monsters() {
+            if seen.insert((slot, generation)) {
+                fresh += 1;
+                let d: Vec<f32> = players.iter().map(|&(px, py)| (x - px).hypot(y - py)).collect();
+                // Just outside somebody's light (one step of slack), and in
+                // nobody's light.
+                // A cluster's members spread up to √12 + 1 around its centre.
+                assert!(d.iter().any(|&d| d <= light + hi + 5.0), "spawned too far: {d:?}");
+                assert!(d.iter().all(|&d| d > light + lo - 0.5), "spawned in the light: {d:?}");
+                let (dx, dy) = (x - players[0].0, y - players[0].1);
+                octants[((dy.atan2(dx) + std::f32::consts::PI) / std::f32::consts::FRAC_PI_4) as usize % 8] += 1;
+                assert!(h.field().dist(x as i32, y as i32) != field::UNREACHABLE);
+            }
+        }
+    }
+    assert!(h.waves() >= 3, "waves every 20 s");
+    assert!(octants.iter().all(|&n| n > 0), "spawns come from every direction: {octants:?}");
+    assert!(fresh > 40, "{fresh} monsters spawned");
+    assert!(h.monsters().any(|m| m.2 == 1), "the boss is bought once affordable");
+}
+
+/// One player's view driven tick by tick, with the client mirror applying
+/// every section.
+struct Viewer {
+    view: view::MonsterView,
+    mirror: view::MonsterMirror,
+    buf: bytes::BytesMut,
+}
+
+impl Viewer {
+    fn new(h: &Horde) -> Self {
+        Self { view: view::MonsterView::new(h.capacity()), mirror: Default::default(), buf: Default::default() }
+    }
+
+    fn frame(&mut self, h: &Horde, p: PlayerView, tick: u32) -> (view::DeltaStats, view::MonsterDelta) {
+        self.buf.clear();
+        let stats = h.write_delta(&mut self.view, &p, tick, &mut self.buf);
+        assert_eq!(stats.bytes, self.buf.len());
+        let mut r = crate::world::wire::Reader::new(&self.buf);
+        let delta = view::MonsterDelta::decode(&mut r).expect("section decodes");
+        assert!(r.is_empty());
+        self.mirror.apply(tick, &delta).expect("delta applies");
+        (stats, delta)
+    }
+
+    /// Worst distance between where the client draws a monster and where it is.
+    fn worst_error(&self, h: &Horde, tick: u32) -> f32 {
+        let mut worst = 0.0f32;
+        for (slot, generation, _, x, y) in h.monsters() {
+            if let Some(m) = self.mirror.monsters.get(&slot) {
+                assert_eq!(m.generation, generation, "mirror holds a stale monster in slot {slot}");
+                let (px, py) = view::predict(&m.rec, tick as f64);
+                worst = worst.max(((px - x).powi(2) + (py - y).powi(2)).sqrt());
+            }
+        }
+        worst
+    }
+}
+
+#[test]
+fn deltas_keep_the_client_within_the_error_bound() {
+    let w = world(120, 120, None);
+    let mut h = Horde::new(w, catalog(), config(20.0));
+    let mut v = Viewer::new(&h);
+    for i in 0..60 {
+        let a = i as f32 * 0.37;
+        h.spawn(0, 60.5 + a.cos() * (6.0 + i as f32 * 0.3), 60.5 + a.sin() * (6.0 + i as f32 * 0.3)).unwrap();
+    }
+    let edge = h.config.view.edge_error;
+    for t in 0..400u32 {
+        // The player circles, so the crowd keeps turning.
+        let a = t as f32 * 0.02;
+        let p = PlayerView { x: 60.5 + a.cos() * 15.0, y: 60.5 + a.sin() * 15.0, light: 20.0, id: 0, hunted: true };
+        h.tick_views(t, 20, &[p]);
+        let (stats, delta) = v.frame(&h, p, t);
+        assert_eq!(delta.baseline, if t == 0 { 0 } else { 1 });
+        assert!(stats.bytes <= h.config.view.budget, "{stats:?}");
+        assert_eq!(stats.deferred, 0, "60 monsters fit the budget");
+        // Everything within reach is known; nothing far beyond it is.
+        let reach = p.light + h.config.aoi_margin;
+        for (slot, _, _, x, y) in h.monsters() {
+            let d = ((x - p.x).powi(2) + (y - p.y).powi(2)).sqrt();
+            if d < reach - 0.5 {
+                assert!(v.mirror.monsters.contains_key(&slot), "t={t}: slot {slot} at {d:.1} is missing");
+            }
+            if d > reach + 3.0 {
+                assert!(!v.mirror.monsters.contains_key(&slot), "t={t}: slot {slot} at {d:.1} lingers");
+            }
+        }
+        // The prediction never drifts past the (edge) threshold plus one
+        // tick of quantisation.
+        assert!(v.worst_error(&h, t) <= edge + 0.02, "t={t}: {}", v.worst_error(&h, t));
+    }
+}
+
+#[test]
+fn a_settled_crowd_costs_almost_nothing() {
+    let w = world(60, 60, None);
+    let mut h = Horde::new(w, catalog(), config(20.0));
+    let mut v = Viewer::new(&h);
+    for i in 0..40 {
+        h.spawn(0, 20.5 + (i % 8) as f32, 20.5 + (i / 8) as f32).unwrap();
+    }
+    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0, id: 0, hunted: true };
+    let mut bytes = Vec::new();
+    for t in 0..600u32 {
+        h.tick_views(t, 20, &[p]);
+        bytes.push(v.frame(&h, p, t).0.bytes);
+    }
+    let first: usize = bytes[..20].iter().sum();
+    let last: usize = bytes[500..].iter().sum();
+    // Two bytes per frame is the empty section (baseline + count).
+    assert!(last <= 100 * 2 + 40, "settled: {last} bytes in 100 frames (first second: {first})");
+}
+
+#[test]
+fn the_budget_spreads_a_burst_and_nearest_monsters_come_first() {
+    let w = world(100, 100, None);
+    let mut cfg = config(30.0);
+    cfg.view.budget = 200;
+    let mut h = Horde::new(w, catalog(), cfg);
+    let mut v = Viewer::new(&h);
+    for i in 0..300 {
+        h.spawn(0, 25.5 + (i % 20) as f32 * 2.5, 25.5 + (i / 20) as f32 * 2.5).unwrap();
+    }
+    let p = PlayerView { x: 50.5, y: 50.5, light: 30.0, id: 0, hunted: true };
+    h.tick_views(0, 20, &[p]);
+    let (s0, d0) = v.frame(&h, p, 0);
+    assert!(s0.bytes <= 200 && s0.deferred > 0, "{s0:?}");
+    // The first frame holds the monsters nearest to the player.
+    let dist = |slot: u16| {
+        let m = h.monsters().find(|m| m.0 == slot).unwrap();
+        ((m.3 - p.x).powi(2) + (m.4 - p.y).powi(2)).sqrt()
+    };
+    let sent: Vec<f32> = d0.entries.iter().map(|e| match e { view::DeltaEntry::Spawn { slot, .. } => dist(*slot), _ => unreachable!() }).collect();
+    let nearest_left = h.monsters().filter(|m| !v.mirror.monsters.contains_key(&m.0)).map(|m| dist(m.0)).fold(f32::MAX, f32::min);
+    assert!(sent.iter().all(|&d| d <= nearest_left + 0.01), "sent {sent:?}, nearest unsent {nearest_left}");
+    let mut t = 1;
+    while v.mirror.monsters.len() < 300 {
+        h.tick_views(t, 20, &[p]);
+        let (s, _) = v.frame(&h, p, t);
+        assert!(s.bytes <= 200);
+        t += 1;
+        assert!(t < 200, "the view fills up: {} known", v.mirror.monsters.len());
+    }
+}
+
+#[test]
+fn a_lost_frame_resyncs_through_a_keyframe() {
+    let w = world(60, 60, None);
+    let mut h = Horde::new(w, catalog(), config(20.0));
+    let mut v = Viewer::new(&h);
+    for i in 0..10 {
+        h.spawn(0, 22.5 + i as f32, 25.5).unwrap();
+    }
+    let p = PlayerView { x: 30.5, y: 40.5, light: 20.0, id: 0, hunted: true };
+    for t in 0..5 {
+        h.tick_views(t, 20, &[p]);
+        v.frame(&h, p, t);
+    }
+    // Frame 5 is lost on the way: frame 6 no longer applies.
+    h.tick_views(5, 20, &[p]);
+    v.buf.clear();
+    h.write_delta(&mut v.view, &p, 5, &mut v.buf);
+    h.tick_views(6, 20, &[p]);
+    v.buf.clear();
+    h.write_delta(&mut v.view, &p, 6, &mut v.buf);
+    let delta = view::MonsterDelta::decode(&mut crate::world::wire::Reader::new(&v.buf)).unwrap();
+    assert!(v.mirror.apply(6, &delta).is_err(), "a gap is detected");
+    // The instance resets the view; the next frame is a keyframe.
+    v.view.reset();
+    h.tick_views(7, 20, &[p]);
+    let (_, d) = v.frame(&h, p, 7);
+    assert_eq!(d.baseline, 0);
+    assert_eq!(v.mirror.monsters.len(), 10);
+}
+
+#[test]
+fn a_reused_slot_is_a_new_monster_to_the_client() {
+    let w = world(60, 60, None);
+    let mut cfg = config(20.0);
+    cfg.pool = 2;
+    let mut h = Horde::new(w, catalog(), cfg);
+    let mut v = Viewer::new(&h);
+    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0, id: 0, hunted: true };
+    let a = h.spawn(0, 25.5, 30.5).unwrap();
+    h.tick_views(0, 20, &[p]);
+    v.frame(&h, p, 0);
+    // Free the slot and refill both (FIFO: the second spawn reuses `a`).
+    h.despawn(a);
+    let b = h.spawn(0, 35.5, 30.5).unwrap();
+    let c = h.spawn(0, 30.5, 25.5).unwrap();
+    assert_ne!(b, a);
+    assert_eq!(c, a);
+    h.tick_views(1, 20, &[p]);
+    let (_, d) = v.frame(&h, p, 1);
+    assert!(d.entries.iter().all(|e| !matches!(e, view::DeltaEntry::Remove { .. })), "SPAWN supersedes REMOVE: {d:?}");
+    assert_eq!(v.mirror.monsters.len(), 2);
+    assert!(v.worst_error(&h, 1) < 0.1, "the new monster is where it stands, not where the old one was");
+}
+
+#[test]
+fn removed_and_dead_monsters_leave_the_view() {
+    let w = world(100, 60, None);
+    let mut h = Horde::new(w, catalog(), config(10.0));
+    let mut v = Viewer::new(&h);
+    let a = h.spawn(0, 15.5, 30.5).unwrap();
+    h.spawn(0, 18.5, 30.5).unwrap();
+    let mut p = PlayerView { x: 10.5, y: 30.5, light: 10.0, id: 0, hunted: true };
+    h.tick_views(0, 20, &[p]);
+    v.frame(&h, p, 0);
+    assert_eq!(v.mirror.monsters.len(), 2);
+    h.despawn(a);
+    h.tick_views(1, 20, &[p]);
+    let (s, _) = v.frame(&h, p, 1);
+    assert_eq!((s.removes, v.mirror.monsters.len()), (1, 1));
+    // The player teleports away: the rest drops out of the light.
+    p.x = 80.5;
+    h.tick_views(2, 20, &[p]);
+    v.frame(&h, p, 2);
+    assert!(v.mirror.monsters.is_empty());
+}
+
+#[test]
+fn no_players_freezes_the_horde() {
+    let w = world(40, 40, None);
+    let mut cfg = config(10.0);
+    cfg.director_enabled = true;
+    let mut h = Horde::new(w, catalog(), cfg);
+    h.spawn(0, 20.5, 20.5).unwrap();
+    for t in 0..100 {
+        h.tick(t, 20, &[]);
+    }
+    assert_eq!(h.len(), 1);
+    assert_eq!(h.monsters().next().unwrap().3, 20.5);
+    assert_eq!(h.director_elapsed(), 0.0);
+}
+
+#[test]
+fn held_monsters_stand_and_slowed_ones_crawl() {
+    use crate::world::combat::Condition;
+    let w = world(60, 20, None);
+    let mut h = Horde::new(w, catalog(), config(30.0));
+    let held = h.spawn(0, 10.5, 5.5).unwrap();
+    let slow = h.spawn(0, 10.5, 10.5).unwrap();
+    let free = h.spawn(0, 10.5, 15.5).unwrap();
+    h.store_mut().afflict(held, Condition::Frozen, 100);
+    h.store_mut().afflict(slow, Condition::Slowed, 100);
+    let player = (50.5, 10.5);
+    for t in 0..20 {
+        h.tick(t, 20, &[player]);
+    }
+    let x = |h: &Horde, s: u16| h.monsters().find(|m| m.0 == s).unwrap().3;
+    assert_eq!(x(&h, held), 10.5, "frozen in place");
+    let (slow_d, free_d) = (x(&h, slow) - 10.5, x(&h, free) - 10.5);
+    assert!(free_d > 2.0 && (slow_d / free_d - 0.5).abs() < 0.1, "half speed: {slow_d} vs {free_d}");
+    // The freeze runs out (100 ticks): it walks again.
+    for t in 20..110 {
+        h.tick(t, 20, &[player]);
+    }
+    assert!(x(&h, held) > 10.5);
+}
+
+#[test]
+fn status_changes_reach_the_client_even_standing_still() {
+    use crate::world::combat::Condition;
+    let w = world(60, 60, None);
+    let mut h = Horde::new(w, catalog(), config(20.0));
+    let mut v = Viewer::new(&h);
+    let p = PlayerView { x: 30.5, y: 30.5, light: 20.0, id: 0, hunted: true };
+    let a = h.spawn(0, 25.5, 30.5).unwrap();
+    let b = h.spawn(0, 35.5, 30.5).unwrap();
+    h.store_mut().afflict(b, Condition::Stunned, 50);
+    h.tick_views(0, 20, &[p]);
+    let (_, d) = v.frame(&h, p, 0);
+    let spawn_status = |slot: u16| {
+        d.entries.iter().find_map(|e| match *e {
+            view::DeltaEntry::Spawn { slot: s, status, .. } if s == slot => Some(status),
+            _ => None,
+        })
+    };
+    assert_eq!(spawn_status(a), Some(None), "no byte for a clean newcomer");
+    assert_eq!(spawn_status(b), Some(Some(Condition::Stunned.bit())));
+    // Freeze the first; it stands still, yet the change goes out.
+    h.store_mut().afflict(a, Condition::Frozen, 50);
+    h.tick_views(1, 20, &[p]);
+    v.frame(&h, p, 1);
+    assert_eq!(v.mirror.monsters[&a].status, Condition::Frozen.bit());
+    assert_eq!(v.mirror.monsters[&b].status, Condition::Stunned.bit());
+    // Nothing changes: nothing about status is resent.
+    h.tick_views(2, 20, &[p]);
+    let (_, d) = v.frame(&h, p, 2);
+    assert!(d.entries.iter().all(|e| !matches!(e, view::DeltaEntry::Nudge { status: Some(_), .. } | view::DeltaEntry::Move { status: Some(_), .. })));
+    h.store_mut().cure(a, Condition::Frozen);
+    h.tick_views(3, 20, &[p]);
+    v.frame(&h, p, 3);
+    assert_eq!(v.mirror.monsters[&a].status, 0, "the thaw is sent too");
+    // Bits past the seventh take a second varint byte.
+    h.store_mut().afflict(a, Condition::Poisoned, 50);
+    h.store_mut().afflict(a, Condition::Mired, 50);
+    h.tick_views(4, 20, &[p]);
+    v.frame(&h, p, 4);
+    assert_eq!(v.mirror.monsters[&a].status, Condition::Poisoned.bit() | Condition::Mired.bit());
+}
+
+#[test]
+fn the_query_index_agrees_with_a_full_scan() {
+    let w = world(120, 120, None);
+    let mut h = Horde::new(Arc::clone(&w), catalog(), config(30.0));
+    let mut rng = StdRng::seed_from_u64(11);
+    for _ in 0..1500 {
+        let (x, y) = (rng.random_range(1.5..118.5f32), rng.random_range(1.5..118.5f32));
+        h.spawn(rng.random_range(0..2), x, y);
+    }
+    // Some die (HP 0 before the despawn), some move: the index follows.
+    let alive: Vec<u16> = h.store().alive().to_vec();
+    for &s in alive.iter().step_by(7) {
+        h.store_mut().hp[s as usize] = 0;
+    }
+    h.tick(1, 20, &[(60.0, 60.0)]);
+    for _ in 0..200 {
+        let (x, y, r) = (rng.random_range(0.0..120.0f32), rng.random_range(0.0..120.0f32), rng.random_range(0.5..12.0f32));
+        let s = h.store();
+        let body = |i: usize| h.catalog().get(s.kind[i]).radius;
+        // Box candidates cover every body that reaches the box.
+        let mut got = Vec::new();
+        h.near_box(x - r, y - r, x + r, y + r, &mut got);
+        for &m in s.alive() {
+            let i = m as usize;
+            let reaches = s.hp[i] > 0 && (s.x[i] - x).abs() <= r + body(i) && (s.y[i] - y).abs() <= r + body(i);
+            assert!(!reaches || got.contains(&m), "missed {m}");
+        }
+        assert!(got.iter().all(|&m| s.hp[m as usize] > 0), "dead ones are skipped");
+        // Nearest by body gap, ring by ring.
+        let brute = s
+            .alive()
+            .iter()
+            .filter(|&&m| s.hp[m as usize] > 0)
+            .map(|&m| {
+                let i = m as usize;
+                (m, ((s.x[i] - x).powi(2) + (s.y[i] - y).powi(2)).sqrt() - body(i))
+            })
+            .filter(|m| m.1 <= r)
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        let fast = h.nearest_to(x, y, r, |_| false);
+        assert_eq!(fast.map(|f| f.0), brute.map(|b| b.0), "at {x},{y} r={r}");
+    }
+    // A move is seen at once.
+    let s0 = h.store().alive()[1];
+    h.place(s0, 3.0, 3.0);
+    let mut got = Vec::new();
+    h.near_box(2.5, 2.5, 3.5, 3.5, &mut got);
+    assert!(got.contains(&s0));
+}
+
+#[test]
+fn churn_inside_a_tick_needs_no_rebuild_and_stays_exact() {
+    let w = world(120, 120, None);
+    let mut h = Horde::new(Arc::clone(&w), catalog(), HordeConfig { pool: 2048, ..config(30.0) });
+    let mut rng = StdRng::seed_from_u64(21);
+    for _ in 0..1500 {
+        h.spawn(0, rng.random_range(1.5..118.5f32), rng.random_range(1.5..118.5f32));
+    }
+    h.tick(1, 20, &[(60.0, 60.0)]);
+    let mut buf = Vec::new();
+    let builds = h.index_builds();
+    // One tick of combat: knockbacks (up to 3 cells), kills, despawns and
+    // spawns that reuse the freed slots, with queries in between.
+    for round in 0..300 {
+        let alive = h.store().alive().to_vec();
+        let s = alive[rng.random_range(0..alive.len())];
+        match round % 4 {
+            0 => {
+                let (x, y) = (h.store().x[s as usize], h.store().y[s as usize]);
+                let a = rng.random_range(0.0..std::f32::consts::TAU);
+                let d = rng.random_range(0.0..1.5f32);
+                h.place(s, (x + a.cos() * d).clamp(1.5, 118.5), (y + a.sin() * d).clamp(1.5, 118.5));
+            }
+            1 => h.store_mut().hp[s as usize] = 0,
+            2 => {
+                h.despawn(s);
+                h.spawn(0, rng.random_range(1.5..118.5f32), rng.random_range(1.5..118.5f32));
+            }
+            _ => {}
+        }
+        let (x, y, r) = (rng.random_range(0.0..120.0f32), rng.random_range(0.0..120.0f32), rng.random_range(0.5..10.0f32));
+        buf.clear();
+        h.near_box(x - r, y - r, x + r, y + r, &mut buf);
+        let mut sorted = buf.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), buf.len(), "no monster twice");
+        let st = h.store();
+        for &m in st.alive() {
+            let i = m as usize;
+            let b = h.catalog().get(st.kind[i]).radius;
+            let reaches = st.hp[i] > 0 && (st.x[i] - x).abs() <= r + b && (st.y[i] - y).abs() <= r + b;
+            assert!(!reaches || buf.contains(&m), "round {round}: missed {m}");
+        }
+    }
+    // 75 spawns overflow the fresh list once; knockbacks alone never do.
+    assert!(h.index_builds() - builds <= 2, "{} rebuilds in one tick", h.index_builds() - builds);
+    // A new tick moves everything and builds once, whatever the director
+    // spawned during the step; queries never build.
+    let before = h.index_builds();
+    h.tick(2, 20, &[(60.0, 60.0)]);
+    for _ in 0..50 {
+        h.near_box(10.0, 10.0, 20.0, 20.0, &mut buf);
+    }
+    assert_eq!(h.index_builds(), before + 1);
+}
+
+/// `cargo test --release --lib query_cost -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn query_cost() {
+    let w = world(400, 400, None);
+    let mut h = Horde::new(Arc::clone(&w), catalog(), HordeConfig { pool: 4096, ..config(30.0) });
+    let mut rng = StdRng::seed_from_u64(5);
+    // A dense crowd around a player plus a sparse field: the survivors case.
+    for i in 0..3000 {
+        let (x, y) = if i % 2 == 0 {
+            (200.0 + rng.random_range(-25.0..25.0f32), 200.0 + rng.random_range(-25.0..25.0f32))
+        } else {
+            (rng.random_range(2.0..398.0f32), rng.random_range(2.0..398.0f32))
+        };
+        h.spawn(0, x, y);
+    }
+    let n = 20_000;
+    let pts: Vec<(f32, f32)> = (0..n).map(|_| (200.0 + rng.random_range(-20.0..20.0f32), 200.0 + rng.random_range(-20.0..20.0f32))).collect();
+    let mut buf = Vec::new();
+    let t = std::time::Instant::now();
+    let mut found = 0;
+    for &(x, y) in &pts {
+        buf.clear();
+        h.near_box(x - 6.0, y - 6.0, x + 6.0, y + 6.0, &mut buf);
+        found += buf.len();
+    }
+    let idx = t.elapsed();
+    let t = std::time::Instant::now();
+    let mut brute = 0;
+    for &(x, y) in &pts {
+        let s = h.store();
+        brute += s.alive().iter().filter(|&&m| (s.x[m as usize] - x).abs() <= 6.35 && (s.y[m as usize] - y).abs() <= 6.35).count();
+    }
+    let scan = t.elapsed();
+    let t = std::time::Instant::now();
+    for &(x, y) in &pts {
+        std::hint::black_box(h.nearest_to(x, y, 10.0, |_| false));
+    }
+    let near = t.elapsed();
+    // After real ticks (positions as the crowd spreads them).
+    let mut rebuild = std::time::Duration::ZERO;
+    for k in 0..100 {
+        h.tick(k, 20, &[(200.0, 200.0)]);
+        let t0 = std::time::Instant::now();
+        h.rebuild_index();
+        rebuild += t0.elapsed();
+    }
+    let rebuild = rebuild / 100;
+    eprintln!(
+        "3000 monsters, 6-cell box: index {:.2} µs/query ({} hits), full scan {:.2} µs/query ({brute}); nearest {:.2} µs; rebuild {:.1} µs",
+        idx.as_secs_f64() * 1e6 / n as f64,
+        found,
+        scan.as_secs_f64() * 1e6 / n as f64,
+        near.as_secs_f64() * 1e6 / n as f64,
+        rebuild.as_secs_f64() * 1e6,
+    );
+}
+
+#[test]
+fn with_nobody_hunted_monsters_roam_away_and_come_back_when_hunted() {
+    let w = world(80, 80, None);
+    let mut h = Horde::new(Arc::clone(&w), catalog(), config(30.0));
+    let walk = &w.map(0).walk;
+    let slots: Vec<u16> = (0..12).map(|i| h.spawn(0, 30.5 + (i % 4) as f32 * 2.0, 30.5 + (i / 4) as f32 * 2.0).unwrap()).collect();
+    let mut p = PlayerView { x: 40.5, y: 40.5, light: 30.0, id: 1, hunted: true };
+    let mean_dist = |h: &Horde| {
+        let sum: f32 = h.monsters().map(|m| ((m.3 - 40.5).powi(2) + (m.4 - 40.5).powi(2)).sqrt()).sum();
+        sum / h.len() as f32
+    };
+    // They close in on the player...
+    for t in 0..200 {
+        h.tick_views(t, 20, &[p]);
+    }
+    let gathered = mean_dist(&h);
+    assert!(gathered < 3.0, "the crowd reached the player: {gathered}");
+
+    // ... who goes down (or hides): no more chasing, no frozen crowd either.
+    p.hunted = false;
+    let before: Vec<(f32, f32)> = slots.iter().map(|&s| h.monsters().find(|m| m.0 == s).map(|m| (m.3, m.4)).unwrap()).collect();
+    let mut moved_ticks = 0;
+    let mut last = before.clone();
+    for t in 200..600 {
+        h.tick_views(t, 20, &[p]);
+        let now: Vec<(f32, f32)> = slots.iter().map(|&s| h.monsters().find(|m| m.0 == s).map(|m| (m.3, m.4)).unwrap()).collect();
+        if now.iter().zip(&last).any(|(a, b)| (a.0 - b.0).abs() + (a.1 - b.1).abs() > 1e-3) {
+            moved_ticks += 1;
+        }
+        for &(x, y) in &now {
+            assert!(walk.is_walkable(x, y), "roamed into a wall at {x},{y}");
+        }
+        last = now;
+    }
+    assert!(moved_ticks > 350, "the crowd keeps moving (moved on {moved_ticks} of 400 ticks)");
+    let wandered = slots
+        .iter()
+        .zip(&before)
+        .filter(|(s, b)| h.monsters().find(|m| m.0 == **s).is_some_and(|m| (m.3 - b.0).powi(2) + (m.4 - b.1).powi(2) > 4.0))
+        .count();
+    assert!(wandered >= slots.len() / 2, "most monsters wandered off: {wandered}");
+    let dispersed = mean_dist(&h);
+    assert!(dispersed > gathered + 2.0, "lost interest: {gathered} -> {dispersed}");
+    assert_eq!(h.len(), slots.len(), "nothing recycled or spawned meanwhile");
+
+    // Back up: they come for the player again.
+    p.hunted = true;
+    for t in 600..800 {
+        h.tick_views(t, 20, &[p]);
+    }
+    let back = mean_dist(&h);
+    assert!(back < 3.0, "re-acquired the target: {back}");
+}
+
+#[test]
+fn roaming_headings_vary_and_rest_some_legs() {
+    let (mut rest, mut moves) = (0, 0);
+    let mut sum = (0.0f32, 0.0f32);
+    for slot in 0..300u16 {
+        match roam_heading(slot, 0, 1000, 20) {
+            None => rest += 1,
+            Some((x, y)) => {
+                assert!(((x * x + y * y) - 1.0).abs() < 1e-4);
+                sum = (sum.0 + x, sum.1 + y);
+                moves += 1;
+            }
+        }
+    }
+    assert!((60..140).contains(&rest), "about a third rest: {rest}");
+    // Random directions: no common drift.
+    assert!((sum.0 * sum.0 + sum.1 * sum.1).sqrt() < moves as f32 * 0.2, "drift {sum:?}");
+    // One heading per leg: the same within a leg.
+    // Slot 5 at 20 Hz: legs of 50 ticks, offset 485, so 1000 and 1014 share one.
+    assert_eq!(roam_heading(5, 0, 1000, 20), roam_heading(5, 0, 1014, 20));
+}
+
+#[test]
+fn a_burrowed_monster_moves_unseen_and_surfaces_findable() {
+    use crate::world::combat::Condition;
+    use super::storage::STATUS_BURROWED;
+    let w = world(60, 30, None);
+    let mut h = Horde::new(w, catalog(), config(40.0));
+    let mut v = Viewer::new(&h);
+    let p = PlayerView { x: 50.5, y: 15.5, light: 40.0, id: 0, hunted: true };
+    let mole = h.spawn(0, 10.5, 15.5).unwrap();
+    let wall = h.spawn(0, 12.5, 15.5).unwrap();
+    h.tick_views(0, 20, &[p]);
+    h.set_burrowed(mole, true);
+    // No query finds it, at once and after a rebuild.
+    assert!(h.nearest_to(10.5, 15.5, 1.0, |s| s == wall).is_none());
+    h.store_mut().afflict(mole, Condition::Poisoned, 200);
+    for t in 1..40 {
+        h.tick_views(t, 20, &[p]);
+    }
+    let mut near = Vec::new();
+    h.near_box(0.0, 0.0, 60.0, 30.0, &mut near);
+    assert!(!near.contains(&mole) && near.contains(&wall));
+    // It still walks (under the other one: no push), and its status keeps
+    // the burrowed bit through condition ticks; clients get it.
+    let x = h.monsters().find(|m| m.0 == mole).unwrap().3;
+    assert!(x > 13.0, "moved under the crowd toward the player: {x}");
+    assert_eq!(h.store().status[mole as usize], STATUS_BURROWED | Condition::Poisoned.bit());
+    v.frame(&h, p, 40);
+    assert_eq!(v.mirror.monsters[&mole].status & STATUS_BURROWED, STATUS_BURROWED);
+    // Up again: findable without waiting for a rebuild.
+    h.set_burrowed(mole, false);
+    let (mx, my) = (h.store().x[mole as usize], h.store().y[mole as usize]);
+    assert_eq!(h.nearest_to(mx, my, 0.5, |s| s == wall).map(|f| f.0), Some(mole));
+    assert_eq!(h.store().status[mole as usize] & STATUS_BURROWED, 0);
+}
+
+/// A catalog with a kiter, a skirmisher and a healer (speed 3 cells/s).
+fn tactics_catalog() -> Arc<MonsterCatalog> {
+    use tactics::Behaviour;
+    let with = |id: &str, b: Behaviour| MonsterDef { behaviour: b, ..test_def(id, 3.0, 1, 0.0, false) };
+    Arc::new(
+        MonsterCatalog::new(vec![with("archer", Behaviour::Kiter), with("goblin", Behaviour::Skirmisher), with("priest", Behaviour::Healer)])
+            .unwrap(),
+    )
+}
+
+fn at(h: &Horde, slot: u16) -> (f32, f32) {
+    h.monsters().find(|m| m.0 == slot).map(|m| (m.3, m.4)).unwrap()
+}
+
+#[test]
+fn a_kiter_keeps_its_band_and_backs_off_slower_than_a_player() {
+    let w = world(80, 30, None);
+    let mut h = Horde::new(Arc::clone(&w), tactics_catalog(), config(30.0));
+    h.set_reach(vec![16.0, 0.0, 0.0]);
+    let player = (10.5, 15.5);
+    let archer = h.spawn(0, 40.5, 15.5).unwrap();
+    for t in 0..200 {
+        h.tick(t, 20, &[player]);
+    }
+    let (x, y) = at(&h, archer);
+    let d = ((x - player.0).powi(2) + (y - player.1).powi(2)).sqrt();
+    assert!((8.0..=13.5).contains(&d), "it closes in and holds its band (9..13 cells): {d}");
+    // The player rushes it: it backs off, but slower than a walking player.
+    let mut p = (x - 4.0, y);
+    let mut gap = Vec::new();
+    for t in 200..230 {
+        h.tick(t, 20, &[p]);
+        let (mx, my) = at(&h, archer);
+        gap.push(((mx - p.0).powi(2) + (my - p.1).powi(2)).sqrt());
+        p.0 += 6.0 / 20.0;
+    }
+    let (mx, my) = at(&h, archer);
+    assert!(((mx - x).powi(2) + (my - y).powi(2)).sqrt() > 1.5 && mx > x, "it backed off: ({x}, {y}) -> ({mx}, {my})");
+    let closest = gap.iter().copied().fold(f32::MAX, f32::min);
+    assert!(closest < 1.5, "a player catches it within 1.5 s: {gap:?}");
+}
+
+#[test]
+fn a_kiter_out_of_sight_comes_round_the_wall() {
+    let w = world(60, 30, Some(30));
+    let mut h = Horde::new(Arc::clone(&w), tactics_catalog(), config(40.0));
+    h.set_reach(vec![16.0, 0.0, 0.0]);
+    let player = (36.5, 20.5);
+    // Behind the wall, 10 cells away in a straight line: no shot from there.
+    let archer = h.spawn(0, 26.5, 20.5).unwrap();
+    for t in 0..300 {
+        h.tick(t, 20, &[player]);
+    }
+    let (x, y) = at(&h, archer);
+    assert!(line_clear(&w.map(0).walk, x, y, player.0, player.1), "it found a line of sight: ({x}, {y})");
+}
+
+#[test]
+fn a_skirmisher_breaks_off_after_its_swing_and_returns() {
+    let w = world(60, 30, None);
+    let mut h = Horde::new(Arc::clone(&w), tactics_catalog(), config(30.0));
+    let player = (20.5, 15.5);
+    let goblin = h.spawn(1, 26.5, 15.5).unwrap();
+    let dist = |h: &Horde| {
+        let (x, y) = at(h, goblin);
+        ((x - player.0).powi(2) + (y - player.1).powi(2)).sqrt()
+    };
+    for t in 0..60 {
+        h.tick(t, 20, &[player]);
+    }
+    assert!(dist(&h) < 1.0, "it closes in: {}", dist(&h));
+    // The hub's melee sets its cooldown as it swings (32 ticks: 1.6 s).
+    h.store_mut().cooldown[goblin as usize] = 32;
+    let mut far = 0.0f32;
+    for t in 60..80 {
+        h.tick(t, 20, &[player]);
+        h.store_mut().cooldown[goblin as usize] -= 1;
+        far = far.max(dist(&h));
+    }
+    assert!(far > 2.0, "it broke off: {far}");
+    for t in 80..140 {
+        h.tick(t, 20, &[player]);
+        let c = &mut h.store_mut().cooldown[goblin as usize];
+        *c = c.saturating_sub(1);
+    }
+    assert!(dist(&h) < 1.0, "and came back for the next swing: {}", dist(&h));
+}
+
+#[test]
+fn a_healer_stays_behind_and_tires_when_chased() {
+    let w = world(100, 30, None);
+    let mut h = Horde::new(Arc::clone(&w), tactics_catalog(), config(40.0));
+    let player = (10.5, 15.5);
+    let priest = h.spawn(2, 50.5, 15.5).unwrap();
+    for t in 0..400 {
+        h.tick(t, 20, &[player]);
+    }
+    let (x, _) = at(&h, priest);
+    assert!((x - player.0) >= 7.5 && (x - player.0) <= 12.5, "it hangs back 8..12 cells: {}", x - player.0);
+    // Chased at a walk: it flees, tires and is caught.
+    let mut p = (x - 5.0, 15.5);
+    let mut caught = false;
+    for t in 400..520 {
+        h.tick(t, 20, &[p]);
+        p.0 += 6.0 / 20.0;
+        let (mx, _) = at(&h, priest);
+        if (mx - p.0).abs() < 1.5 {
+            caught = true;
+            break;
+        }
+    }
+    assert!(caught, "a player catches a fleeing healer");
+}
+
+#[test]
+fn a_taunt_turns_any_behaviour_into_a_chase() {
+    let w = world(60, 30, None);
+    let mut h = Horde::new(Arc::clone(&w), tactics_catalog(), config(30.0));
+    h.set_reach(vec![16.0, 0.0, 0.0]);
+    let archer = h.spawn(0, 30.5, 15.5).unwrap();
+    h.store_mut().afflict(archer, Condition::Taunted, 400);
+    let players = [PlayerView { x: 20.5, y: 15.5, light: 30.0, id: 7, hunted: true }];
+    h.store_mut().taunter[archer as usize] = 7;
+    for t in 0..100 {
+        h.tick_views(t, 20, &players);
+    }
+    let (x, _) = at(&h, archer);
+    assert!(x - 20.5 < 1.5, "taunted, it walks up to its taunter: {x}");
+}

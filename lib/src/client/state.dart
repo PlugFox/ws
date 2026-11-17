@@ -1,190 +1,200 @@
 import 'package:meta/meta.dart';
-import 'package:ws/src/client/status_codes.dart';
-import 'package:ws/src/client/web_socket_ready_state.dart';
+import 'package:ws/src/client/exceptions.dart';
 
-/// {@template web_socket_client_state}
-/// WebSocket client state.
-/// {@endtemplate}
-/// {@category Client}
-/// {@category Entity}
+/// The state of a `WebSocketClient`.
+///
+/// ```
+///             connect()                  transport open + onOpen hook
+/// disconnected ───────► connecting ─────────────────────────────► open
+///      ▲                   │  ▲                                      │
+///      │  terminal error   │  │ timer                 lost / failed  │
+///      ├───────────────────┘  └──────── reconnecting ◄───────────────┤
+///      │                                                             │
+///      └──────────────────────── disconnecting ◄──── disconnect() ───┘
+///
+/// suspend() while reconnecting, or a connection lost while suspended
+///   ──► suspended ──► connecting on resume(), connect() or reconnect()
+/// close() from any state ──► closed (terminal)
+/// ```
+///
+/// An open connection stays [WebSocketState.open] through `suspend()`.
 @immutable
-sealed class WebSocketClientState {
-  /// {@macro web_socket_client_state}
-  const WebSocketClientState();
+sealed class WebSocketState {
+  const WebSocketState();
 
-  /// Connection has not yet been established.
-  /// {@macro web_socket_client_state}
-  const factory WebSocketClientState.connecting({
-    required String url,
-  }) = WebSocketClientState$Connecting;
+  /// Not connected and not trying to. The initial state, and the state after
+  /// `disconnect()` or a failure that is not retried.
+  const factory WebSocketState.disconnected({
+    int? closeCode,
+    String? closeReason,
+    WebSocketException? error,
+  }) = WebSocketState$Disconnected;
 
-  /// Connection is open and ready to communicate.
-  /// {@macro web_socket_client_state}
-  const factory WebSocketClientState.open({
-    required String url,
-  }) = WebSocketClientState$Open;
+  /// Opening a connection. [attempt] is 0 for the first try after
+  /// `connect()`, and counts reconnects after that.
+  const factory WebSocketState.connecting({
+    required Uri url,
+    required int attempt,
+  }) = WebSocketState$Connecting;
 
-  /// Connection is in the process of closing.
-  /// {@macro web_socket_client_state}
-  const factory WebSocketClientState.disconnecting({
-    required int? closeCode,
-    required String? closeReason,
-  }) = WebSocketClientState$Disconnecting;
+  /// Connected; messages can be sent.
+  const factory WebSocketState.open({required Uri url, String? protocol}) =
+      WebSocketState$Open;
 
-  /// Connection has been closed or couldn't be opened.
-  /// {@macro web_socket_client_state}
-  const factory WebSocketClientState.closed({
-    required int? closeCode,
-    required String? closeReason,
-  }) = WebSocketClientState$Closed;
+  /// Waiting [delay] before reconnect attempt number [attempt], because of
+  /// [cause].
+  const factory WebSocketState.reconnecting({
+    required int attempt,
+    required Duration delay,
+    required WebSocketException cause,
+  }) = WebSocketState$Reconnecting;
 
-  /// The initial state of the web socket client.
-  /// {@macro web_socket_client_state}
-  factory WebSocketClientState.initial() => WebSocketClientState.closed(
-        closeCode: WebSocketStatusCodes.normalClosure.code,
-        closeReason: 'INITIAL_CLOSED_STATE',
-      );
+  /// The closing handshake is in progress after `disconnect()`.
+  const factory WebSocketState.disconnecting({int? code, String? reason}) =
+      WebSocketState$Disconnecting;
 
-  /// Returns the current state of the connection.
-  /// 0	: CONNECTING - Socket has been created. The connection is not yet open.
-  /// 1	: OPEN       - The connection is open and ready to communicate.
-  /// 2	: CLOSING    - The connection is in the process of closing.
-  /// 3	: CLOSED     - The connection is closed or couldn't be opened.
-  abstract final WebSocketReadyState readyState;
+  /// `suspend()` was called and there is no connection: no attempt starts
+  /// until `resume()`. [cause] is why the last connection ended, if it was
+  /// not `suspend(disconnect: true)`.
+  const factory WebSocketState.suspended({WebSocketException? cause}) =
+      WebSocketState$Suspended;
+
+  /// `close()` was called. Terminal: the client cannot be used again.
+  const factory WebSocketState.closed() = WebSocketState$Closed;
+
+  /// Whether messages can be sent now.
+  bool get isOpen => false;
+
+  /// Whether the client was closed for good.
+  bool get isClosed => false;
 }
 
-/// Connection has not yet been established.
-/// {@macro web_socket_client_state}
-/// {@category Client}
-/// {@category Entity}
-final class WebSocketClientState$Connecting extends WebSocketClientState {
-  /// {@macro web_socket_client_state}
-  const WebSocketClientState$Connecting({
-    required this.url,
+/// See [WebSocketState.disconnected].
+final class WebSocketState$Disconnected extends WebSocketState {
+  /// See [WebSocketState.disconnected].
+  const WebSocketState$Disconnected({
+    this.closeCode,
+    this.closeReason,
+    this.error,
   });
 
-  @override
-  WebSocketReadyState get readyState => WebSocketReadyState.connecting;
-
-  /// The URL connected to.
-  final String url;
-
-  @override
-  int get hashCode => readyState.code ^ url.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is WebSocketClientState$Connecting && other.url == url;
-
-  @override
-  String toString() => 'WebSocketClientState.connecting($url)';
-}
-
-/// Connection is open and ready to communicate.
-/// {@macro web_socket_client_state}
-/// {@category Client}
-/// {@category Entity}
-final class WebSocketClientState$Open extends WebSocketClientState {
-  /// {@macro web_socket_client_state}
-  const WebSocketClientState$Open({
-    required this.url,
-  });
-
-  @override
-  WebSocketReadyState get readyState => WebSocketReadyState.open;
-
-  /// The URL connected to.
-  final String url;
-
-  @override
-  int get hashCode => readyState.code ^ url.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is WebSocketClientState$Open && other.url == url;
-
-  @override
-  String toString() => 'WebSocketClientState.open($url)';
-}
-
-/// Connection is in the process of closing.
-/// {@macro web_socket_client_state}
-/// {@category Client}
-/// {@category Entity}
-final class WebSocketClientState$Disconnecting extends WebSocketClientState {
-  /// {@macro web_socket_client_state}
-  const WebSocketClientState$Disconnecting({
-    required this.closeCode,
-    required this.closeReason,
-  });
-
-  @override
-  WebSocketReadyState get readyState => WebSocketReadyState.disconnecting;
-
-  /// The close code set when the WebSocket connection is closed.
-  /// If there is no close code available this property will be null.
+  /// Close code of the last connection, if there was one.
   final int? closeCode;
 
-  /// The close reason set when the WebSocket connection is closed.
-  /// If there is no close reason available this property will be null.
+  /// Close reason of the last connection.
   final String? closeReason;
 
-  @override
-  int get hashCode => Object.hashAll(<int?>[
-        readyState.code,
-        closeCode,
-        closeReason?.hashCode
-      ].whereType<int>());
+  /// Why the client stopped, when it was not a `disconnect()` call.
+  final WebSocketException? error;
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is WebSocketClientState$Disconnecting &&
-          other.closeCode == closeCode &&
-          other.closeReason == closeReason;
-
-  @override
-  String toString() => 'WebSocketClientState.disconnecting($closeReason)';
+  String toString() =>
+      'WebSocketState.disconnected('
+      '${closeCode ?? ''}${error == null ? '' : ', $error'})';
 }
 
-/// Connection is closed temporarily or permanently.
-/// {@macro web_socket_client_state}
-/// {@category Client}
-/// {@category Entity}
-final class WebSocketClientState$Closed extends WebSocketClientState {
-  /// {@macro web_socket_client_state}
-  const WebSocketClientState$Closed({
-    required this.closeCode,
-    required this.closeReason,
+/// See [WebSocketState.connecting].
+final class WebSocketState$Connecting extends WebSocketState {
+  /// See [WebSocketState.connecting].
+  const WebSocketState$Connecting({required this.url, required this.attempt});
+
+  /// The URL being connected to.
+  final Uri url;
+
+  /// 0 for the first try, then the reconnect attempt number.
+  final int attempt;
+
+  @override
+  String toString() =>
+      'WebSocketState.connecting(${_redact(url)}, attempt $attempt)';
+}
+
+/// See [WebSocketState.open].
+final class WebSocketState$Open extends WebSocketState {
+  /// See [WebSocketState.open].
+  const WebSocketState$Open({required this.url, this.protocol});
+
+  /// The URL the connection was opened with: what the `request` provider
+  /// returned, which may carry a token. [toString] leaves out user info
+  /// and the query.
+  final Uri url;
+
+  /// The subprotocol selected by the server.
+  final String? protocol;
+
+  @override
+  bool get isOpen => true;
+
+  @override
+  String toString() => 'WebSocketState.open(${_redact(url)})';
+}
+
+/// See [WebSocketState.reconnecting].
+final class WebSocketState$Reconnecting extends WebSocketState {
+  /// See [WebSocketState.reconnecting].
+  const WebSocketState$Reconnecting({
+    required this.attempt,
+    required this.delay,
+    required this.cause,
   });
 
-  @override
-  WebSocketReadyState get readyState => WebSocketReadyState.closed;
+  /// The number of the next attempt (1 for the first reconnect).
+  final int attempt;
 
-  /// The close code set when the WebSocket connection is closed.
-  /// If there is no close code available this property will be null.
-  final int? closeCode;
+  /// Delay before the next attempt.
+  final Duration delay;
 
-  /// The close reason set when the WebSocket connection is closed.
-  /// If there is no close reason available this property will be null.
-  final String? closeReason;
+  /// Why the previous connection or attempt ended.
+  final WebSocketException cause;
 
   @override
-  int get hashCode => Object.hashAll(<int?>[
-        readyState.code,
-        closeCode,
-        closeReason?.hashCode
-      ].whereType<int>());
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is WebSocketClientState$Closed &&
-          other.closeCode == closeCode &&
-          other.closeReason == closeReason;
-
-  @override
-  String toString() => 'WebSocketClientState.closed($closeReason)';
+  String toString() =>
+      'WebSocketState.reconnecting(attempt $attempt in '
+      '${delay.inMilliseconds} ms: $cause)';
 }
+
+/// See [WebSocketState.disconnecting].
+final class WebSocketState$Disconnecting extends WebSocketState {
+  /// See [WebSocketState.disconnecting].
+  const WebSocketState$Disconnecting({this.code, this.reason});
+
+  /// Close code sent to the server.
+  final int? code;
+
+  /// Close reason sent to the server.
+  final String? reason;
+
+  @override
+  String toString() => 'WebSocketState.disconnecting(${code ?? ''})';
+}
+
+/// See [WebSocketState.suspended].
+final class WebSocketState$Suspended extends WebSocketState {
+  /// See [WebSocketState.suspended].
+  const WebSocketState$Suspended({this.cause});
+
+  /// Why the last connection ended while suspended, if it did on its own.
+  final WebSocketException? cause;
+
+  @override
+  String toString() =>
+      'WebSocketState.suspended(${cause == null ? '' : '$cause'})';
+}
+
+/// See [WebSocketState.closed].
+final class WebSocketState$Closed extends WebSocketState {
+  /// See [WebSocketState.closed].
+  const WebSocketState$Closed();
+
+  @override
+  bool get isClosed => true;
+
+  @override
+  String toString() => 'WebSocketState.closed';
+}
+
+/// [url] for logs: no user info, and the query (tokens, often) elided.
+String _redact(Uri url) =>
+    '${url.scheme}://${url.host.contains(':') ? '[${url.host}]' : url.host}'
+    '${url.hasPort ? ':${url.port}' : ''}${url.path}'
+    '${url.hasQuery ? '?…' : ''}';

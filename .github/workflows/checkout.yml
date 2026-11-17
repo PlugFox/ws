@@ -6,79 +6,209 @@ on:
     branches:
       - "master"
       - "develop"
+      - "rewrite"
       - "feature/**"
       - "bugfix/**"
       - "hotfix/**"
       - "support/**"
-    paths:
-      - "lib/**.dart"
-      - "test/**.dart"
-      - "example/**.dart"
-      - "pubspec.yaml"
   pull_request:
     branches:
       - "master"
       - "develop"
-      - "feature/**"
-      - "bugfix/**"
-      - "hotfix/**"
-      - "support/**"
-    paths:
-      - "lib/**.dart"
-      - "test/**.dart"
-      - "example/**.dart"
-      - "pubspec.yaml"
+      - "rewrite"
+
+concurrency:
+  group: checkout-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  checkout:
-    name: "Checkout"
+  package:
+    name: "Package (format, analyze, publish layout)"
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./
-    container:
-      image: dart:beta
     timeout-minutes: 10
     steps:
       - name: 🚂 Get latest code
-        uses: actions/checkout@v3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: 🚃 Cache pub modules
-        uses: actions/cache@v2
-        env:
-          cache-name: cache-ws-package
+      - name: 🎯 Set up Dart
+        uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
         with:
-          path: |
-            $PWD/.pub_cache/
-          key: ${{ runner.os }}-ws-${{ env.cache-name }}-${{ hashFiles('**/pubspec.yaml') }}
+          # Same as mise.toml, so format and lints match local runs.
+          sdk: 3.14.0
 
-      - name: 🗄️ Export pub cache directory
-        run: export PUB_CACHE=$PWD/.pub_cache/
-
-      - name: 👷 Install Dependencies
-        timeout-minutes: 1
+      - name: 👷 Install dependencies
         run: |
           dart pub get
+          dart pub get --directory=native
+
+      - name: 🙈 .pubignore covers .gitignore
+        run: dart run tool/check_pubignore.dart
+
+      - name: 🔢 Toolchain pins agree (mise.toml, workflows, game image)
+        run: tool/toolchain_versions.sh
 
       - name: 🔎 Check format
-        timeout-minutes: 1
-        run: dart format --set-exit-if-changed -l 80 -o none lib/
+        run: dart format --set-exit-if-changed -o none bin/ lib/ test/ tool/ native/lib native/test native/hook native/example
 
       - name: 📈 Check analyzer
-        timeout-minutes: 1
-        run: dart analyze --fatal-infos --fatal-warnings lib/
-
-      #- name: 🌐 Setup Chrome
-      #  uses: browser-actions/setup-chrome@latest
-
-      - name: 🧪 Run tests
-        timeout-minutes: 2
         run: |
-          dart run coverage:test_with_coverage -fb -o coverage -- \
-            --concurrency=6 --platform vm --coverage=./coverage --reporter=expanded test/ws_test.dart
+          dart analyze --fatal-infos --fatal-warnings
+          (cd native && dart analyze --fatal-infos --fatal-warnings)
 
-      - name: 📥 Upload coverage to Codecov
-        timeout-minutes: 1
-        uses: codecov/codecov-action@v3
+      - name: 🐚 Workflows and shell scripts
+        run: |
+          # Pinned release and SHA-256 (from its checksums file).
+          tgz="$RUNNER_TEMP/actionlint.tar.gz"
+          curl -sSfL -o "$tgz" https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $tgz" | sha256sum -c -
+          tar -xzf "$tgz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+          shellcheck tool/*.sh
+
+      - name: 📦 Publish dry run
+        run: |
+          # The example's asset submodule is never published (.pubignore),
+          # but pub on Linux reports the uninitialized gitlink as an ignored
+          # checked-in file. Drop it from this workspace's index only.
+          git rm -q --cached example/assets
+          dart pub publish --dry-run
+
+  test-vm:
+    name: "Tests (VM)"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    timeout-minutes: 30
+    env:
+      # test/support/test_server.dart fails instead of skipping on CI.
+      CI: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 🦀 Rust from rust-toolchain.toml
+        shell: bash
+        run: '"$GITHUB_WORKSPACE/tool/rust_toolchain.sh"'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          token: ${{ secrets.CODECOV_TOKEN }} # not required for public repos
+          workspaces: |
+            server
+            native/rust
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
+        with:
+          sdk: stable
+      - run: dart pub get
+      - name: 🦀 Build the test server and the native library
+        shell: bash
+        run: |
+          (cd server && cargo build --release --locked)
+          (cd native/rust && cargo build --release --locked)
+          # Native Windows paths: Dart cannot open MSYS paths (/d/a/...).
+          root="$(pwd -W 2>/dev/null || pwd)"
+          case "$RUNNER_OS" in
+            Windows) lib=ws_native.dll; exe=.exe ;;
+            macOS) lib=libws_native.dylib; exe= ;;
+            *) lib=libws_native.so; exe= ;;
+          esac
+          echo "WS_TEST_SERVER=$root/server/target/release/ws_bench_server$exe" >> "$GITHUB_ENV"
+          echo "WS_NATIVE_LIBRARY=$root/native/rust/target/release/$lib" >> "$GITHUB_ENV"
+      - name: 🧪 Run tests (pure Dart, native by path, against the Rust server)
+        run: dart test --platform vm --reporter expanded
+
+  test-web:
+    name: "Tests (Chrome: dart2js, dart2wasm)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The shared server suite runs in the browser too (T-3): a missing
+      # server fails instead of skipping.
+      CI: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 🦀 Rust from rust-toolchain.toml
+        shell: bash
+        run: '"$GITHUB_WORKSPACE/tool/rust_toolchain.sh"'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: server
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
+        with:
+          sdk: stable
+      - run: dart pub get
+      - name: 🦀 Build the test server
+        run: cd server && cargo build --release --locked
+      - name: 🧪 dart2js
+        run: dart test --platform chrome --reporter expanded
+      - name: 🧪 dart2wasm
+        run: dart test --platform chrome --compiler dart2wasm --reporter expanded
+
+  flutter:
+    name: "Flutter lifecycle recipe (Flutter ${{ matrix.flutter }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The lowest supported (environment.flutter; 3.38.0 ships a Dart
+        # 3.10.0 beta, which ^3.10.0 rejects) and the
+        # one matching mise.toml's Dart 3.14.0.
+        flutter: [3.38.1, 3.50.0]
+    defaults:
+      run:
+        working-directory: flutter
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 🐦 Flutter (archive checked against the release manifest)
+        run: '"$GITHUB_WORKSPACE/tool/flutter_sdk.sh" "${{ matrix.flutter }}" "$RUNNER_TEMP"'
+      - run: flutter pub get
+      - name: 🔎 Format and analyzer
+        if: matrix.flutter == '3.50.0'
+        run: |
+          dart format --set-exit-if-changed -o none lib test example
+          flutter analyze --fatal-infos --fatal-warnings
+      - name: 🧪 Tests
+        run: flutter test --reporter expanded
+
+  server:
+    name: "Test server (fmt, clippy, tests)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 🦀 Rust from rust-toolchain.toml
+        shell: bash
+        run: '"$GITHUB_WORKSPACE/tool/rust_toolchain.sh"'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: server
+      - run: cargo fmt --check
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo test --release
+
+  min-sdk:
+    name: "Lowest bounds (Dart 3.10.0)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
+        with:
+          sdk: 3.10.0 # environment.sdk lower bound in pubspec.yaml
+      - name: 📉 Lowest dependency versions compile
+        # Only the library: the lowest test tooling (analyzer 6) does not
+        # build on Dart 3.
+        run: |
+          dart pub downgrade
+          dart analyze --fatal-warnings lib bin
+      - name: 🧪 Tests on the lowest SDK (pure Dart; server suites skip)
+        env:
+          CI: "false" # test/support/test_server.dart skips without a server
+        run: |
+          dart pub upgrade
+          dart test --platform vm --reporter expanded

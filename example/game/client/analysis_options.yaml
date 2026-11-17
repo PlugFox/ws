@@ -1,0 +1,9 @@
+# Application code: the root package's library-grade lint set (docs on every
+# public member, 80 columns) does not apply here.
+analyzer:
+  language:
+    strict-casts: true
+    strict-raw-types: true
+
+formatter:
+  page_width: 120

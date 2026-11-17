@@ -1,0 +1,9 @@
+# ws_native is published from a staged copy outside the repository (the
+# repository's root .pubignore hides native/ from the ws package, and pub
+# applies parent ignore files). See tool/stage_native.sh and DECISIONS.md D25.
+#
+# Prebuilt libraries ARE published (they are gitignored in the repository).
+.dart_tool/
+build/
+/rust/target/
+pubspec.lock

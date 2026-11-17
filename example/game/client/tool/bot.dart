@@ -1,0 +1,111 @@
+// Headless hub bots on the Dart VM (same package:ws client as the web app):
+// each registers, creates and selects a character, joins the hub and walks
+// in a circle around the spawn. For load tests and for watching remote
+// interpolation from a browser. With `--party CODE` the bots join that
+// party and follow it into the stage when its leader starts (there is no
+// ready check).
+//
+//   dart run tool/bot.dart [--server http://127.0.0.1:8088] [--count 5] [--party CODE]
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
+
+import 'package:game_client/src/protocol.dart';
+import 'package:ws/ws.dart';
+
+Future<void> main(List<String> args) async {
+  String opt(String name, String def) {
+    final i = args.indexOf('--$name');
+    return i >= 0 && i + 1 < args.length ? args[i + 1] : def;
+  }
+
+  final server = Uri.parse(opt('server', 'http://127.0.0.1:8088'));
+  final count = int.parse(opt('count', '5'));
+  final party = opt('party', '');
+  final run = DateTime.now().millisecondsSinceEpoch % 100000;
+  for (var i = 0; i < count; i++) {
+    final name = 'bot${run}_$i';
+    // Staggered, and one failing bot must not take the others down.
+    unawaited(_bot(server, name, i, count, party).catchError((Object e) => stderr.writeln('$name: $e')));
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+  }
+}
+
+Future<Map<String, Object?>> _post(HttpClient http, Uri uri, Object body, [String? token]) async {
+  final req = await http.postUrl(uri);
+  req.headers.contentType = ContentType.json;
+  if (token != null) req.headers.set('Authorization', 'Bearer $token');
+  req.write(jsonEncode(body));
+  final resp = await req.close();
+  final text = await resp.transform(utf8.decoder).join();
+  if (resp.statusCode >= 300) throw StateError('${uri.path}: ${resp.statusCode} $text');
+  return text.isEmpty ? {} : jsonDecode(text) as Map<String, Object?>;
+}
+
+Future<void> _bot(Uri server, String name, int index, int count, String party) async {
+  final http = HttpClient();
+  // Throwaway credentials for a local dev server.
+  final reg = await _post(http, server.resolve('/api/auth/register'), {
+    'username': name,
+    'password': 'Bot-${name.hashCode.abs()}-pass!',
+  });
+  final token = reg['access_token']! as String;
+  final ch = await _post(http, server.resolve('/api/characters'), {'name': name, 'archetype': 'novice'}, token);
+  await _post(http, server.resolve('/api/characters/${ch['id']}/select'), {}, token);
+
+  final ws = WebSocketClient.binary();
+  double? x, y;
+  double cx = 0, cy = 0;
+  void send(Uint8List frame) => ws.push(frame).ignore();
+  var joined = false;
+  ws.messages.listen((m) {
+    if (m.isEmpty || Snapshot.isSnapshot(m[0])) return;
+    switch (ServerMsg.decode(m)) {
+      case MapEnter(:final map, x: final ex, y: final ey):
+        x = ex;
+        y = ey;
+        cx = ex;
+        cy = ey - 4;
+        // Join the party once, from the hub.
+        if (party.isNotEmpty && map.kind == 'hub' && !joined) send(ClientMsg.lobbyJoin(party));
+      case LobbyState(:final lobby) when !joined:
+        joined = true;
+        stdout.writeln('$name joined party ${lobby.code} (${lobby.members.length})');
+      case StageJoined(:final stageId):
+        stdout.writeln('$name entered Stage-$stageId');
+      case LobbyError(:final message):
+        stderr.writeln('$name: $message');
+      default:
+        break;
+    }
+  });
+  // The server refuses another client build: a bot is whatever it takes
+  // (`GET /api/online` says, `update.dart`).
+  final online = await (await http.getUrl(server.resolve('/api/online'))).close();
+  final build = (jsonDecode(await online.transform(utf8.decoder).join()) as Map<String, Object?>)['build'] ?? 'dev';
+  final wsUri = server.replace(
+    scheme: server.scheme == 'https' ? 'wss' : 'ws',
+    path: '/api/ws',
+    queryParameters: {'token': token, 'build': '$build'},
+  );
+  await ws.connect(wsUri.toString());
+  await ws.push(ClientMsg.hubJoin());
+  stdout.writeln('$name joined');
+
+  var seq = 0;
+  final phase = index * 2 * math.pi / count;
+  final sw = Stopwatch()..start();
+  Timer.periodic(const Duration(milliseconds: 50), (_) {
+    if (x == null) return;
+    // Head for a point moving on a circle; the server does the walking.
+    final t = sw.elapsedMilliseconds / 1000 * 0.6 + phase;
+    final (tx, ty) = (cx + math.cos(t) * 4, cy + math.sin(t) * 4);
+    final (dx, dy) = quantizeDir((tx - x!).clamp(-1, 1).toDouble(), (ty - y!).clamp(-1, 1).toDouble());
+    ws.push(encodeInput(++seq, dx, dy)).ignore();
+    // Dead reckoning is enough for steering a bot.
+    x = x! + dx * 0.3;
+    y = y! + dy * 0.3;
+  });
+}

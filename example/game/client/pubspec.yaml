@@ -1,0 +1,14 @@
+name: game_client
+description: Web client of the ws showcase game (hub, prediction, interpolation).
+publish_to: none
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  web: ^1.1.0
+  ws:
+    path: ../../..
+
+dev_dependencies:
+  test: ^1.25.0

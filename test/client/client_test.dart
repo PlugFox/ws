@@ -1,794 +1,856 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:test/test.dart';
-import 'package:ws/interface.dart';
+import 'package:ws/testing.dart';
 import 'package:ws/ws.dart';
 
+/// Runs [body] in fake time and flushes everything at the end.
+void fake(void Function(FakeAsync async) body) => FakeAsync().run((async) {
+  body(async);
+  async.flushMicrotasks();
+});
+
 void main() {
-  final defaultWSOptions = WebSocketOptions.selector(
-    vm: () => WebSocketOptions.vm(
-      connectionRetryInterval: (
-        min: const Duration(milliseconds: 500),
-        max: const Duration(milliseconds: 1000),
+  group('basics', () {
+    test('connect, push, receive, close', () async {
+      final server = FakeWebSocketServer();
+      final client = WebSocketClient.text(
+        options: WebSocketOptions(transport: server),
+      );
+      final states = <String>[];
+      client.states.listen((s) => states.add(s.runtimeType.toString()));
+      final received = <String>[];
+      client.messages.listen(received.add);
+
+      await client.connect('ws://test/socket');
+      expect(client.state, isA<WebSocketState$Open>());
+      expect(server.last.request.url, Uri.parse('ws://test/socket'));
+
+      await client.push('héllo');
+      expect(server.last.received, ['héllo']);
+
+      server.last.sendText('back ✓');
+      await pumpEventQueue();
+      expect(received, ['back ✓']);
+
+      await client.close();
+      expect(client.state, isA<WebSocketState$Closed>());
+      expect(server.last.clientClose?.code, 1000);
+      expect(states, [
+        'WebSocketState\$Connecting',
+        'WebSocketState\$Open',
+        'WebSocketState\$Disconnecting',
+        'WebSocketState\$Disconnected',
+        'WebSocketState\$Closed',
+      ]);
+      await expectLater(
+        client.push('late'),
+        throwsA(isA<WebSocketNotConnectedException>()),
+      );
+      await expectLater(client.connect('ws://test'), throwsStateError);
+    });
+
+    test('push while not connected fails fast', () async {
+      final client = WebSocketClient.text(
+        options: WebSocketOptions(transport: FakeWebSocketServer()),
+      );
+      await expectLater(
+        client.push('x'),
+        throwsA(isA<WebSocketNotConnectedException>()),
+      );
+    });
+
+    test('http(s) URLs map to ws(s); other schemes are rejected', () async {
+      final server = FakeWebSocketServer();
+      final client = WebSocketClient.text(
+        options: WebSocketOptions(transport: server),
+      );
+      await client.connect('https://h/p');
+      expect(server.last.request.url.scheme, 'wss');
+      expect(() => client.connect('ftp://h'), throwsArgumentError);
+      await client.close();
+    });
+
+    test('binary client gets text as bytes', () async {
+      final server = FakeWebSocketServer();
+      final client = WebSocketClient.binary(
+        options: WebSocketOptions(transport: server),
+      );
+      final got = <Uint8List>[];
+      client.messages.listen(got.add);
+      await client.connect('ws://t');
+      server.last
+        ..sendBinary(Uint8List.fromList([1, 2, 3]))
+        ..sendText('ab');
+      await pumpEventQueue();
+      expect(got, [
+        [1, 2, 3],
+        [97, 98],
+      ]);
+      await client.push(Uint8List.fromList([9]));
+      expect(server.last.received.single, [9]);
+      await client.close();
+    });
+
+    test('close code and reason are validated like in browsers', () async {
+      final client = WebSocketClient.text(
+        options: WebSocketOptions(transport: FakeWebSocketServer()),
+      );
+      expect(() => client.disconnect(1001), throwsArgumentError);
+      expect(() => client.disconnect(1000, 'x' * 124), throwsArgumentError);
+      await client.disconnect(4000, 'ok');
+    });
+  });
+
+  group('json', () {
+    test('decode errors are reported, connection stays open', () async {
+      final server = FakeWebSocketServer();
+      final errors = <Object>[];
+      final client = WebSocketClient.json(
+        options: WebSocketOptions(
+          transport: server,
+          onError: (e, _) => errors.add(e),
+        ),
+      );
+      final got = <Map<String, Object?>>[];
+      client.messages.listen(got.add);
+      await client.connect('ws://t');
+      server.last
+        ..sendText('{bad json')
+        ..sendText('[1, 2]')
+        ..sendJson({'ok': true});
+      await pumpEventQueue();
+      expect(got, [
+        {'ok': true},
+      ]);
+      expect(errors, [
+        isA<WebSocketFormatException>(),
+        isA<WebSocketFormatException>(),
+      ]);
+      expect(client.metrics.decodeErrors, 2);
+      expect(client.state.isOpen, isTrue);
+      await client.push({'a': 1});
+      expect(server.last.receivedJson.single, {'a': 1});
+      await client.close();
+    });
+
+    test('invalid UTF-8 closes with 1007 and is not retried', () async {
+      final server = FakeWebSocketServer();
+      final client = WebSocketClient.json(
+        options: WebSocketOptions(transport: server),
+      );
+      await client.connect('ws://t');
+      server.last.sendTextBytes(Uint8List.fromList([0x7B, 0xFF, 0x7D]));
+      await pumpEventQueue();
+      expect(server.last.clientClose?.code, 1007);
+      final state = client.state;
+      expect(state, isA<WebSocketState$Disconnected>());
+      expect(
+        (state as WebSocketState$Disconnected).error,
+        isA<WebSocketClosedException>().having((e) => e.code, 'code', 1007),
+      );
+      expect(server.connections, hasLength(1));
+    });
+  });
+
+  group('rpc', () {
+    WebSocketClient<Map<String, Object?>> rpcClient(
+      FakeWebSocketServer server, {
+      Duration timeout = const Duration(seconds: 5),
+    }) => WebSocketClient.json(
+      options: WebSocketOptions(
+        transport: server,
+        rpc: const WebSocketJsonRpc(),
+        rpcTimeout: timeout,
       ),
-      compression: const CompressionOptions(),
-      customClient: HttpClient(),
-      headers: const <String, Object?>{
-        HttpHeaders.userAgentHeader: 'ws/1.0',
-        HttpHeaders.acceptHeader: 'application/json',
-      },
-      userAgent: 'ws/1.0',
-    ),
-    js: () => WebSocketOptions.js(
-      connectionRetryInterval: (
-        min: const Duration(milliseconds: 500),
-        max: const Duration(milliseconds: 1000),
-      ),
-      useBlobForBinary: false,
-    ),
-  );
-  test('WebSocketClient example', () async {
-    await runZoned<Future<void>>(
-      () async {
-        const url = 'wss://echo.plugfox.dev:443/connect';
-        final client = WebSocketClient(defaultWSOptions);
-        expect(client.state, isA<WebSocketClientState$Closed>());
-        expect(client.metrics, isA<WebSocketMetrics>());
-        client.stream.drain<void>().ignore();
-        client.stateChanges.drain<void>().ignore();
-        await expectLater(client.connect(url), completes);
-        await expectLater(client.add('Hello, '), completes);
-        await expectLater(client.add('world!'), completes);
-        await expectLater(client.add('close'), completes);
-        expect(client.metrics, isA<WebSocketMetrics>());
-        await Future<void>.delayed(const Duration(milliseconds: 350));
-        expect(client.state, isA<WebSocketClientState$Closed>());
-        await Future<void>.delayed(const Duration(seconds: 3));
-        expect(client.metrics, isA<WebSocketMetrics>());
-        expect(client.state, isA<WebSocketClientState$Open>());
-        await expectLater(client.disconnect(), completes);
-        await Future<void>.delayed(const Duration(seconds: 1));
-        await expectLater(client.close(), completes);
-        await expectLater(client.close(), completes);
-        expect(client.metrics, isA<WebSocketMetrics>());
-      },
-      zoneValues: <Object?, Object?>{
-        #dev.plugfox.ws.debug: true,
-      },
     );
-  });
 
-  group('Closed client', () {
-    const url = 'wss://echo.plugfox.dev:443/connect';
-
-    late IWebSocketClient client;
-
-    setUp(() {
-      client = WebSocketClient(defaultWSOptions);
-    });
-
-    tearDown(() {
-      client.close();
-    });
-
-    test('connect', () async {
-      await client.close();
-      expect(client.state, isA<WebSocketClientState$Closed>());
-      expect(() => client.connect(url), throwsException);
-    });
-
-    test('add', () async {
-      await client.close();
-      expect(client.state, isA<WebSocketClientState$Closed>());
-      expect(() => client.add(url), throwsException);
-    });
-
-    test('disconnect', () async {
-      await client.close();
-      expect(client.state, isA<WebSocketClientState$Closed>());
-      expect(() => client.disconnect(), throwsException);
-    });
-
-    test('close', () async {
-      await client.close();
-      expect(client.state, isA<WebSocketClientState$Closed>());
-      expect(() => client.close(), returnsNormally);
-    });
-  });
-
-  group(
-    'WebSocketClient init',
-    () {
-      const url = 'wss://echo.plugfox.dev:443/connect';
-
-      late IWebSocketClient client;
-
-      setUp(() {
-        client = WebSocketClient(defaultWSOptions);
+    test('replies are matched by id, pushes still flow', () async {
+      final server = FakeWebSocketServer();
+      final client = rpcClient(server);
+      final pushes = <Object?>[];
+      client.messages.listen(pushes.add);
+      await client.connect('ws://t');
+      server.connected.listen((_) {});
+      server.last.messages.listen((m) {
+        final request = jsonDecode(m as String) as Map<String, Object?>;
+        server.last
+          ..sendJson({'event': 'unrelated'})
+          ..sendJson({
+            'id': request['id'],
+            'result': (request['n']! as int) * 2,
+          });
       });
+      final a = client.rpc({'n': 2});
+      final b = client.rpc({'n': 5});
+      expect((await a)['result'], 4);
+      expect((await b)['result'], 10);
+      expect(pushes, hasLength(2));
+      await client.close();
+    });
 
-      tearDown(() {
+    test('deadlines: each call expires at its own time', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = rpcClient(server, timeout: const Duration(seconds: 5));
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        final failed = <String>[];
+        void track(String name, Future<Object?> call) =>
+            call.then((_) {}, onError: (Object _) => failed.add(name));
+        track('a 5 s', client.rpc({'n': 1}));
+        // An earlier deadline moves the timer forward.
+        track(
+          'b 1 s',
+          client.rpc({'n': 2}, timeout: const Duration(seconds: 1)),
+        );
+        track(
+          'c 3 s',
+          client.rpc({'n': 3}, timeout: const Duration(seconds: 3)),
+        );
+        async.elapse(const Duration(milliseconds: 999));
+        expect(failed, isEmpty);
+        async.elapse(const Duration(milliseconds: 2));
+        expect(failed, ['b 1 s']);
+        // A reply does not touch the timer; it fires at 3 s for c only.
+        final c = jsonDecode(server.last.received[2] as String) as Map;
+        server.last.sendJson({'id': c['id'], 'result': 0});
+        async.elapse(const Duration(seconds: 2));
+        expect(failed, ['b 1 s']);
+        async.elapse(const Duration(seconds: 2));
+        expect(failed, ['b 1 s', 'a 5 s']);
+        expect(
+          async.pendingTimers.where(
+            (t) =>
+                t.duration > Duration.zero &&
+                t.duration <= const Duration(seconds: 5),
+          ),
+          isEmpty,
+          reason: 'no RPC timer once no call waits',
+        );
         client.close();
       });
-
-      test('connect & close', () async {
-        expect(client.state, isA<WebSocketClientState$Closed>());
-        await expectLater(client.connect(url), completes);
-        expect(client.state, isA<WebSocketClientState$Open>());
-        await expectLater(client.add('ping'), completes);
-        await expectLater(client.stream.first, completion(equals('pong')));
-        expect(() => client.close(), returnsNormally);
-      });
-    },
-    /* onPlatform: <String, Object?>{
-      'browser': <Object?>[
-        const Skip('This test is currently failing on Browser.'),
-        // They'll be slow on browsers once it works on them.
-        const Timeout.factor(2),
-      ],
-    }, */
-  );
-
-  group('WebSocketClient', () {
-    const url = 'wss://echo.plugfox.dev:443/connect';
-
-    late IWebSocketClient client;
-
-    setUpAll(() {
-      client = WebSocketClient(defaultWSOptions);
     });
 
-    tearDownAll(() {
-      client.close();
-    });
-
-    setUp(() async {
-      if (!client.state.readyState.isOpen) {
-        await client.connect(url);
+    test('a burst of 20000 calls is linear (F23)', () async {
+      // Real time, real Stopwatch: 32000 calls took 1.9 s to issue and
+      // 2.4 s to answer when the timer was recomputed per call and reply.
+      final server = FakeWebSocketServer();
+      final client = rpcClient(server);
+      await client.connect('ws://t');
+      final watch = Stopwatch()..start();
+      final calls = [
+        for (var i = 0; i < 20000; i++) client.rpc({'n': i}),
+      ];
+      await Future<void>.delayed(Duration.zero);
+      for (final m in server.last.received) {
+        final id = (jsonDecode(m as String) as Map)['id'];
+        server.last.sendJson({'id': id, 'result': 0});
       }
+      await Future.wait(calls);
+      expect(watch.elapsed, lessThan(const Duration(seconds: 1)));
+      await client.close();
     });
 
-    test('can disconnect from a websocket server', () async {
-      expect(client.state, equals(const WebSocketClientState.open(url: url)));
-      client.disconnect();
-      expect(
-        client.state,
-        anyOf(
-          isA<WebSocketClientState$Disconnecting>(),
-          isA<WebSocketClientState$Closed>(),
-        ),
+    test('a real-time timeout expires on the monotonic clock', () async {
+      final server = FakeWebSocketServer();
+      final client = rpcClient(
+        server,
+        timeout: const Duration(milliseconds: 100),
       );
-    });
-
-    test('emit unsupported data type', () async {
-      expect(client.state, equals(const WebSocketClientState.open(url: url)));
-      await expectLater(client.add(true), throwsException);
-    });
-
-    test('can send and receive a string message', () async {
-      const message = 'Hello, World!';
-      client.add(message);
-      await for (final received in client.stream) {
-        if (received is List<int>) {
-          expect(utf8.decode(received), equals(message));
-        } else if (received is String) {
-          expect(received, equals(message));
-        } else {
-          fail('Received message is not a String or a List<int>.');
-        }
-        break;
-      }
-    });
-
-    test('can send and receive a byte message', () async {
-      final message = utf8.encode('Hello, World!');
-      client.add(message);
-      final received =
-          await client.stream.bytes.first.timeout(const Duration(seconds: 5));
-      expect(
-          received,
-          isA<List<int>>()
-              .having((l) => l.length, 'length', equals(message.length)));
-      expect(
-        received,
-        equals(message),
+      await client.connect('ws://t');
+      final watch = Stopwatch()..start();
+      await expectLater(
+        client.rpc({'n': 1}),
+        throwsA(isA<WebSocketRpcException>()),
       );
       expect(
-        utf8.decode(received),
-        equals('Hello, World!'),
+        watch.elapsed,
+        greaterThanOrEqualTo(const Duration(milliseconds: 95)),
       );
+      expect(watch.elapsed, lessThan(const Duration(seconds: 1)));
+      await client.close();
     });
 
-    test('reconnects if the connection is interrupted', () async {
-      expect(client.state, equals(const WebSocketClientState.open(url: url)));
-      client.add('close');
-      await expectLater(
-        client.stateChanges
-            .firstWhere((state) =>
-                state.readyState.isDisconnecting || state.readyState.isClosed)
-            .timeout(const Duration(seconds: 1)),
-        completes,
-      );
-      expect(
-        client.state,
-        anyOf(
-          isA<WebSocketClientState$Disconnecting>(),
-          isA<WebSocketClientState$Closed>(),
-        ),
-      );
-      await expectLater(
-        client.stateChanges
-            .firstWhere((state) => state.readyState.isOpen)
-            .timeout(const Duration(seconds: 2)),
-        completes,
-      );
-      expect(client.state, equals(const WebSocketClientState.open(url: url)));
-    });
+    test('error replies, timeouts, unknown replies, disconnect', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = rpcClient(server, timeout: const Duration(seconds: 2));
+        client.connect('ws://t');
+        async.flushMicrotasks();
 
-    // Test that messages can be sent again after reconnecting
-    test('can send messages after reconnecting', () async {
-      client.add('close'); // Simulate connection interruption.
-      // Wait for the client to have time to attempt to reconnect.
-      await expectLater(
-        client.stateChanges
-            .firstWhere((state) => state.readyState.isOpen)
-            .timeout(const Duration(seconds: 3)),
-        completes,
-        reason: 'Client did not reconnect in time.',
-      );
-      expect(client.state.readyState.isOpen, isTrue);
-      const message = 'Hello, again!';
-      client.add(message);
-      await expectLater(
-        client.stream.first.timeout(const Duration(seconds: 5)),
-        completion(equals(message)),
-        reason: 'Client did not receive message in time.',
-      );
-    });
-
-    // Test that large messages can be sent
-    test('can send large messages', () async {
-      final largeMessage = 'A' * 512 * 1024; // 0.5 MiB message
-      client.add(largeMessage);
-      await expectLater(
-        client.stream.first.timeout(const Duration(seconds: 5)),
-        completion(equals(largeMessage)),
-        reason: 'Client did not receive message in time.',
-      );
-    });
-
-    // Test that the client correctly handles
-    // the server closing the connection.
-    test(
-      'handles server closing connection',
-      () async {
-        expect(client.state.readyState.isOpen, isTrue);
-        // Simulate server closing connection.
-        client.add('close');
-        await expectLater(
-          client.stateChanges
-              .firstWhere((state) =>
-                  state.readyState.isDisconnecting || state.readyState.isClosed)
-              .timeout(const Duration(seconds: 1)),
-          completes,
-        );
+        Object? error;
+        client
+            .rpc({'m': 1})
+            .then<void>((_) {}, onError: (Object e) => error = e);
+        async.flushMicrotasks();
+        server.last.sendJson({'id': 1, 'error': 'nope'});
+        async.flushMicrotasks();
         expect(
-          client.state,
-          anyOf(
-            isA<WebSocketClientState$Disconnecting>(),
-            isA<WebSocketClientState$Closed>(),
+          error,
+          isA<WebSocketRpcException>()
+              .having((e) => e.failure, 'failure', WebSocketRpcFailure.remote)
+              .having((e) => e.error, 'error', 'nope'),
+        );
+
+        Object? timeout;
+        client
+            .rpc({'m': 2})
+            .then<void>((_) {}, onError: (Object e) => timeout = e);
+        async.elapse(const Duration(seconds: 3));
+        expect(
+          timeout,
+          isA<WebSocketRpcException>().having(
+            (e) => e.failure,
+            'failure',
+            WebSocketRpcFailure.timeout,
           ),
         );
-      },
-    );
+        server.last.sendJson({'id': 2, 'late': true});
+        async.flushMicrotasks();
+        expect(client.metrics.droppedReplies, 1);
 
-    // Test that an error is thrown when trying to send
-    // a message with a closed connection
-    test('throws an error when trying to send with a closed connection',
-        () async {
-      expect(client.state.readyState.isOpen, isTrue);
-      await client.add('close'); // Simulate connection closing.
-      // Wait for the client to have time to handle the connection closing.
-      await expectLater(
-        client.stateChanges
-            .firstWhere((state) =>
-                state.readyState.isDisconnecting || state.readyState.isClosed)
-            .timeout(const Duration(seconds: 2)),
-        completes,
-      );
-      await expectLater(
-        Future<void>(() => client.add('Hello, World!')),
-        anyOf(
-          throwsA(isException),
-          throwsA(isA<Error>()),
-          throwsA(isA<AssertionError>()),
-        ),
-      );
-    });
-  });
-
-  group('Binary data', () {
-    const url = 'wss://echo.plugfox.dev:443/connect';
-
-    late IWebSocketClient client;
-
-    setUpAll(() {
-      client = WebSocketClient(defaultWSOptions);
-    });
-
-    tearDownAll(() {
-      client.close();
-    });
-
-    setUp(() async {
-      if (!client.state.readyState.isOpen) {
-        await client.connect(url);
-      }
-    });
-
-    // Test that List<int> can be sent
-    test('can send List<int> data', () async {
-      final binaryData =
-          List<int>.generate(512, (i) => i % 256); // 0.5 KiB binary data
-      client.add(binaryData);
-      final received =
-          await client.stream.first.timeout(const Duration(seconds: 5));
-      if (received is String) throw Exception('Received is String');
-      expect(
-          received,
-          isA<List<int>>()
-              .having((l) => l.length, 'length', equals(binaryData.length)));
-      expect(received, equals(binaryData));
-    });
-
-    // Test that Uint8List can be sent
-    test('can send Uint8List data', () async {
-      final binaryData = Uint8List.fromList(
-          List<int>.generate(512, (i) => i % 256)); // 0.5 KiB binary data
-      client.add(binaryData);
-      final received =
-          await client.stream.first.timeout(const Duration(seconds: 5));
-      expect(
-          received,
-          isA<List<int>>()
-              .having((l) => l.length, 'length', equals(binaryData.length)));
-    });
-
-    // Test that ByteBuffer can be sent
-    test('can send ByteBuffer data', () async {
-      final buffer = Uint8List.fromList(List<int>.generate(512, (i) => i % 256))
-          .buffer; // 0.5 KiB binary data
-      client.add(buffer);
-      final received =
-          await client.stream.first.timeout(const Duration(seconds: 5));
-      expect(
-          received,
-          isA<List<int>>()
-              .having((l) => l.length, 'length', equals(buffer.lengthInBytes)));
-    });
-
-    // Test that ByteBuffer can be sent
-    test('can send ByteBuffer data', () async {
-      final buffer = Uint8List.fromList(List<int>.generate(512, (i) => i % 256))
-          .buffer; // 0.5 KiB binary data
-      client.add(buffer);
-      final received =
-          await client.stream.first.timeout(const Duration(seconds: 5));
-      expect(
-          received,
-          isA<List<int>>()
-              .having((l) => l.length, 'length', equals(buffer.lengthInBytes)));
-    });
-  });
-
-  group('First message after connect', () {
-    const url = 'wss://echo.plugfox.dev:443/connect';
-
-    late IWebSocketClient client;
-
-    setUpAll(() {
-      client = WebSocketClient(WebSocketOptions.common(
-        afterConnect: (c) => c.add('auth.abc.123'),
-      ));
-    });
-
-    tearDownAll(() {
-      client.close();
-    });
-
-    test('Can send first message from options', () async {
-      await client.connect(url);
-      var received =
-          await client.stream.first.timeout(const Duration(seconds: 5));
-      expect(received, equals('auth.abc.123'));
-      client.add('message');
-      received = await client.stream.first.timeout(const Duration(seconds: 5));
-      expect(received, equals('message'));
-    });
-  });
-
-  group(
-    'Binary data as a Blob',
-    () {
-      const url = 'wss://echo.plugfox.dev:443/connect';
-
-      late IWebSocketClient client;
-
-      setUpAll(() {
-        client = WebSocketClient(WebSocketOptions.js(
-          connectionRetryInterval: (
-            min: const Duration(milliseconds: 500),
-            max: const Duration(milliseconds: 1000),
+        Object? lost;
+        client
+            .rpc({'m': 3})
+            .then<void>((_) {}, onError: (Object e) => lost = e);
+        async.flushMicrotasks();
+        server.last.drop();
+        async.flushMicrotasks();
+        expect(
+          lost,
+          isA<WebSocketRpcException>().having(
+            (e) => e.failure,
+            'failure',
+            WebSocketRpcFailure.disconnected,
           ),
-          useBlobForBinary: true,
-        ));
-      });
-
-      tearDownAll(() {
+        );
         client.close();
       });
-
-      setUp(() async {
-        if (!client.state.readyState.isOpen) {
-          await client.connect(url);
-        }
-      });
-
-      // Test that List<int> can be sent
-      test('can send List<int> data', () async {
-        final binaryData =
-            List<int>.generate(512, (i) => i % 256); // 0.5 KiB binary data
-        client.add(binaryData);
-        final received =
-            await client.stream.first.timeout(const Duration(seconds: 5));
-        if (received is String) throw Exception('Received is String');
-        expect(
-            received,
-            isA<List<int>>()
-                .having((l) => l.length, 'length', equals(binaryData.length)));
-        expect(received, equals(binaryData));
-      });
-
-      // Test that Uint8List can be sent
-      test('can send Uint8List data', () async {
-        final binaryData = Uint8List.fromList(
-            List<int>.generate(512, (i) => i % 256)); // 0.5 KiB binary data
-        client.add(binaryData);
-        final received =
-            await client.stream.first.timeout(const Duration(seconds: 5));
-        expect(
-            received,
-            isA<List<int>>()
-                .having((l) => l.length, 'length', equals(binaryData.length)));
-      });
-
-      // Test that ByteBuffer can be sent
-      test('can send ByteBuffer data', () async {
-        final buffer =
-            Uint8List.fromList(List<int>.generate(512, (i) => i % 256))
-                .buffer; // 0.5 KiB binary data
-        client.add(buffer);
-        final received =
-            await client.stream.first.timeout(const Duration(seconds: 5));
-        expect(
-            received,
-            isA<List<int>>().having(
-                (l) => l.length, 'length', equals(buffer.lengthInBytes)));
-      });
-
-      // Test that ByteBuffer can be sent
-      test('can send ByteBuffer data', () async {
-        final buffer =
-            Uint8List.fromList(List<int>.generate(512, (i) => i % 256))
-                .buffer; // 0.5 KiB binary data
-        client.add(buffer);
-        final received =
-            await client.stream.first.timeout(const Duration(seconds: 5));
-        expect(
-            received,
-            isA<List<int>>().having(
-                (l) => l.length, 'length', equals(buffer.lengthInBytes)));
-      });
-    },
-    onPlatform: <String, Object?>{
-      'vm': <Object?>[
-        const Skip('This case only works on Browser'),
-      ],
-      'browser': <Object?>[
-        const Timeout.factor(2),
-      ],
-    },
-  );
-
-  group('URLs', () {
-    const url = 'wss://echo.plugfox.dev:443/connect';
-
-    late IWebSocketClient client;
-
-    setUpAll(() {
-      client = WebSocketClient(defaultWSOptions);
     });
 
-    tearDownAll(() {
-      client.close();
-    });
-
-    setUp(() async {
-      if (!client.state.readyState.isOpen) {
-        await client.connect(url);
-      }
-    });
-
-    // Test that the client behaves correctly when it fails to connect
-    test(
-      'handles failed connection attempts',
-      () async {
-        // Try to connect to an invalid URL.
-        await expectLater(
-          client.connect('wss://invalid.url'),
-          throwsA(isException),
-        );
-        expect(client.state, isA<WebSocketClientState$Closed>());
-      },
-      timeout: const Timeout(Duration(seconds: 15)),
-    );
-
-    // Test that the client can connect to different URLs
-    test('can connect to different URLs', () async {
-      expect(client.state, isA<WebSocketClientState$Open>());
-      client.add('close'); // Simulate server closing connection.
-      await Future<void>.delayed(const Duration(seconds: 3));
-      const anotherUrl = url;
-      await client.connect(anotherUrl);
-      expect(
-        client.state,
-        equals(const WebSocketClientState.open(url: anotherUrl)),
+    test('rpc without a handler throws', () async {
+      final client = WebSocketClient.text(
+        options: WebSocketOptions(transport: FakeWebSocketServer()),
       );
+      await client.connect('ws://t');
+      expect(() => client.rpc('x'), throwsA(isA<AssertionError>()));
+      await client.close();
     });
   });
 
-  group(
-    'Responses',
-    () {
-      const url = 'wss://echo.plugfox.dev:443/connect';
+  group('reconnect', () {
+    test('reconnects with backoff after the connection drops', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            reconnect: const WebSocketReconnect(
+              minDelay: Duration(milliseconds: 100),
+              maxDelay: Duration(seconds: 1),
+            ),
+          ),
+        );
+        final states = <WebSocketState>[];
+        client.states.listen(states.add);
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        expect(client.state.isOpen, isTrue);
 
-      late IWebSocketClient client;
-
-      setUpAll(() {
-        client = WebSocketClient(defaultWSOptions);
-      });
-
-      tearDownAll(() {
+        server.last.drop();
+        async.flushMicrotasks();
+        final reconnecting = client.state as WebSocketState$Reconnecting;
+        expect(reconnecting.attempt, 1);
+        expect(reconnecting.cause, isA<WebSocketConnectionException>());
+        expect(reconnecting.delay.inMilliseconds, inInclusiveRange(100, 200));
+        async.elapse(reconnecting.delay);
+        expect(client.state.isOpen, isTrue);
+        expect(server.connections, hasLength(2));
+        expect(client.metrics.reconnectAttempts, 1);
         client.close();
       });
+    });
 
-      setUp(() async {
-        if (!client.state.readyState.isOpen) {
-          await client.connect(url);
-        }
-      });
-
-      // Test that the response time is acceptable
-      test('has acceptable response time', () async {
-        const message = 'Hello, World!';
-        client.add(message);
-        final stopwatch = Stopwatch()..start();
-        try {
-          await expectLater(
-            client.stream.first.timeout(const Duration(seconds: 3)),
-            completion(equals(message)),
+    test('delays grow while attempts keep failing, reset when stable', () {
+      fake((async) {
+        final server = FakeWebSocketServer(autoAccept: false);
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            reconnect: const WebSocketReconnect(
+              minDelay: Duration(milliseconds: 100),
+              maxDelay: Duration(seconds: 10),
+              stableAfter: Duration(seconds: 1),
+            ),
+          ),
+        );
+        client.connect('ws://t');
+        for (var i = 1; i <= 4; i++) {
+          async.flushMicrotasks();
+          server.last.reject(503);
+          async.flushMicrotasks();
+          final s = client.state as WebSocketState$Reconnecting;
+          expect(s.attempt, i);
+          expect(
+            s.delay.inMilliseconds,
+            lessThanOrEqualTo(100 + 100 * (1 << (i - 1))),
           );
-          stopwatch.stop();
-          expect(stopwatch.elapsed, lessThan(const Duration(seconds: 3)));
-        } finally {
-          stopwatch.stop();
+          async.elapse(s.delay);
         }
+        server.last.accept();
+        async.flushMicrotasks();
+        expect(client.state.isOpen, isTrue);
+        async.elapse(const Duration(seconds: 2)); // stable
+        server.last.drop();
+        async.flushMicrotasks();
+        expect((client.state as WebSocketState$Reconnecting).attempt, 1);
+        client.close();
       });
-    },
-    timeout: const Timeout(Duration(seconds: 10)),
-    /* onPlatform: <String, Object?>{
-      'browser': <Object?>[
-        const Skip('This test is currently failing on Browser.'),
-        // They'll be slow on browsers once it works on them.
-        const Timeout.factor(2),
-      ],
-    }, */
-  );
-
-  group('Closed', () {
-    late IWebSocketClient client;
-
-    setUpAll(() {
-      client = WebSocketClient();
     });
 
-    tearDownAll(() {
-      client.close();
+    test('4xx handshake is terminal (except 408/425/429)', () {
+      fake((async) {
+        final server = FakeWebSocketServer(autoAccept: false);
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(transport: server),
+        );
+        Object? error;
+        client
+            .connect('ws://t')
+            .then<void>((_) {}, onError: (Object e) => error = e);
+        async.flushMicrotasks();
+        server.last.reject(429);
+        async.flushMicrotasks();
+        expect(client.state, isA<WebSocketState$Reconnecting>());
+        async.elapse(const Duration(seconds: 2));
+        server.last.reject(401);
+        async.flushMicrotasks();
+        expect(client.state, isA<WebSocketState$Disconnected>());
+        expect(
+          error,
+          isA<WebSocketHandshakeException>().having(
+            (e) => e.statusCode,
+            'status',
+            401,
+          ),
+        );
+        async.elapse(const Duration(minutes: 1));
+        expect(server.connections, hasLength(2));
+      });
     });
 
-    test('try to close a closed connection', () async {
-      expect(client.state.readyState.isClosed, isTrue);
-      await expectLater(
-        client.close(),
-        completes,
-      );
-      await expectLater(
-        client.close(),
-        completes,
-      );
-      expect(client.isClosed, isTrue);
+    test('terminal close codes stop, others reconnect', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(transport: server),
+        );
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        server.last.close(1001, 'restart');
+        async.flushMicrotasks();
+        expect(client.state, isA<WebSocketState$Reconnecting>());
+        async.elapse(const Duration(seconds: 2));
+        expect(client.state.isOpen, isTrue);
+        server.last.close(1008, 'banned');
+        async.flushMicrotasks();
+        expect(client.state, isA<WebSocketState$Disconnected>());
+        async.elapse(const Duration(minutes: 1));
+        expect(server.connections, hasLength(2));
+      });
     });
 
-    test('try use closed client', () async {
-      expect(client.state.readyState.isClosed, isTrue);
-      await expectLater(
-        client.close(),
-        completes,
-      );
-      await expectLater(
-        client.connect('wss://echo.plugfox.dev:443/connect'),
-        throwsA(isException),
-      );
-      await expectLater(
-        client.add('Message'),
-        throwsA(isException),
-      );
-      await expectLater(
-        client.disconnect(),
-        throwsA(isException),
-      );
-      await expectLater(
-        client.close(),
-        completes,
-      );
+    test('maxAttempts and shouldReconnect', () {
+      fake((async) {
+        final server = FakeWebSocketServer(autoAccept: false);
+        final causes = <int>[];
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            reconnect: WebSocketReconnect(
+              minDelay: const Duration(milliseconds: 10),
+              maxAttempts: 2,
+              shouldReconnect: (cause, attempt) {
+                causes.add(attempt);
+                return true;
+              },
+            ),
+          ),
+        );
+        client.connect('ws://t').ignore();
+        for (var i = 0; i < 3; i++) {
+          async.flushMicrotasks();
+          server.last.reject(500);
+          async.elapse(const Duration(seconds: 1));
+        }
+        expect(client.state, isA<WebSocketState$Disconnected>());
+        expect(server.connections, hasLength(3));
+        expect(causes, [1, 2]);
+      });
     });
 
-    test('WSClientClosed', () {
-      expect(const WSClientClosedException(), isA<WSClientClosedException>());
+    test('request provider runs per attempt (token refresh)', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        var token = 0;
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            request: (url, attempt) async => WebSocketRequest(
+              url.replace(queryParameters: {'token': '${++token}'}),
+              headers: {'X-Attempt': '$attempt'},
+            ),
+          ),
+        );
+        client.connect('ws://t/s');
+        async.flushMicrotasks();
+        server.last.drop();
+        async.elapse(const Duration(seconds: 2));
+        expect(server.connections.map((c) => c.request.url.query), [
+          'token=1',
+          'token=2',
+        ]);
+        expect(server.last.request.headers['X-Attempt'], '1');
+        client.close();
+      });
+    });
+
+    test('reconnect() skips the wait', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            reconnect: const WebSocketReconnect(
+              minDelay: Duration(seconds: 30),
+              maxDelay: Duration(seconds: 60),
+            ),
+          ),
+        );
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        server.last.drop();
+        async.flushMicrotasks();
+        expect(client.state, isA<WebSocketState$Reconnecting>());
+        client.reconnect();
+        async.flushMicrotasks();
+        expect(client.state.isOpen, isTrue);
+        client.close();
+      });
+    });
+
+    test('connect timeout is retried', () {
+      fake((async) {
+        final server = FakeWebSocketServer(autoAccept: false);
+        final errors = <Object>[];
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            connectTimeout: const Duration(seconds: 3),
+            onError: (e, _) => errors.add(e),
+          ),
+        );
+        client.connect('ws://t');
+        async.elapse(const Duration(seconds: 3));
+        expect(errors.single, isA<WebSocketTimeoutException>());
+        expect(client.state, isA<WebSocketState$Reconnecting>());
+        client.close();
+      });
     });
   });
 
-  group('Protocols', () {
-    test('Set protocols', () async {
-      final commonOptions = WebSocketOptions.common(
-        connectionRetryInterval: (
-          min: const Duration(milliseconds: 500),
-          max: const Duration(milliseconds: 1000),
+  group('lifecycle', () {
+    test('onOpen runs before open and can push', () async {
+      final server = FakeWebSocketServer();
+      final seen = <String>[];
+      final client = WebSocketClient.text(
+        options: WebSocketOptions(
+          transport: server,
+          onOpen: (c) async {
+            await c.push('auth');
+            seen.add('onOpen');
+          },
+          onStateChange: (s) {
+            if (s.isOpen) seen.add('open');
+          },
         ),
-        protocols: const <String>['foo', 'bar'],
       );
-      final client1 = WebSocketClient(commonOptions);
-      final client2 =
-          WebSocketClient.connect('ws://localhost:80', commonOptions);
-      final client3 = WebSocketClient.fromClient(client1);
-      expect(client1, isA<WebSocketClient>());
-      expect(client2, isA<WebSocketClient>());
-      expect(client3, isA<WebSocketClient>());
-      await expectLater(client1.close(), completes);
-      await expectLater(client2.close(), completes);
-      await expectLater(client3.close(), completes);
-    });
-  });
-
-  group('Fake client', () {
-    test('Construct', () async {
-      final commonOptions = WebSocketOptions.common(
-        connectionRetryInterval: (
-          min: const Duration(milliseconds: 500),
-          max: const Duration(milliseconds: 1000),
-        ),
-        protocols: const <String>['foo', 'bar'],
-      );
-      final clientFake =
-          WebSocketClientFake(protocols: commonOptions.protocols);
-      final client = WebSocketClient.fromClient(clientFake, commonOptions);
-      expect(clientFake, isA<IWebSocketClient>());
-      expect(client, isA<WebSocketClient>());
-      expect(clientFake, isA<WebSocketClientFake>());
-      expect(client.metrics, isA<WebSocketMetrics>());
-      expect(client.state, isA<WebSocketClientState>());
-      expect(client.stream, isA<WebSocketMessagesStream>());
-      expect(client.stateChanges, isA<Stream<WebSocketClientState>>());
-      expect(client.isClosed, isFalse);
-      expect(client.state, isA<WebSocketClientState$Closed>());
-      await expectLater(client.connect('ws://localhost:80'), completes);
-      expect(client.state, isA<WebSocketClientState$Open>());
-      await expectLater(client.add('Hello, world!'), completes);
-      await expectLater(client.disconnect(), completes);
-      expect(client.state, isA<WebSocketClientState$Closed>());
-      await expectLater(client.close(), completes);
-      expect(client.state, isA<WebSocketClientState$Closed>());
-      expect(client.isClosed, isTrue);
-    });
-  });
-
-  group('Interceptors', () {
-    const url = 'wss://echo.plugfox.dev:443/connect';
-
-    test('Can send first message from options', () async {
-      var s1 = 0, s2 = 0, s3 = 0, s4 = 0;
-      var r1 = 0, r2 = 0, r3 = 0, r4 = 0;
-      final client = WebSocketClient(WebSocketOptions.common(
-        interceptors: [
-          // 1
-          WSInterceptor.wrap(
-            onSend: (data) {
-              s1++;
-            },
-            onMessage: (data) {
-              r1++;
-            },
-          ),
-          // 2
-          WSInterceptor.wrap(),
-          // 3
-          WSInterceptor.wrap(
-            onSend: (data) {
-              s3++;
-            },
-          ),
-          // 4
-          WSInterceptor.wrap(
-            onMessage: (data) {
-              r4++;
-            },
-          ),
-        ],
-      ));
-
-      await client.connect(url);
-
-      await client.add('ping');
-
-      final response = await client.stream.first;
-      expect(response, equals('pong'));
-
-      // Send Interceptors
-      expect(s1, equals(1));
-      expect(s2, equals(0));
-      expect(s3, equals(1));
-      expect(s4, equals(0));
-
-      // Receive Interceptors
-      expect(r1, equals(1));
-      expect(r2, equals(0));
-      expect(r3, equals(0));
-      expect(r4, equals(1));
-
+      await client.connect('ws://t');
+      expect(seen, ['onOpen', 'open']);
+      expect(server.last.received, ['auth']);
       await client.close();
     });
 
-    test('Dublicate send and receive', () async {
-      final client = WebSocketClient(WebSocketOptions.common(
-        interceptors: [
-          WSInterceptor.handlers(
-            onSend: (data, next) {
-              next(data);
-              next(data);
-            },
-            onMessage: (data, next) {
-              next(data);
-              next(data);
-            },
+    test('disconnect aborts when the server ignores the close', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            disconnectTimeout: const Duration(seconds: 3),
           ),
-        ],
-      ));
+        );
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        server.last.echoClose = false;
+        var done = false;
+        client.disconnect().then((_) => done = true);
+        async.elapse(const Duration(seconds: 2));
+        expect(done, isFalse);
+        expect(client.state, isA<WebSocketState$Disconnecting>());
+        async.elapse(const Duration(seconds: 2));
+        expect(done, isTrue);
+        expect(client.state, isA<WebSocketState$Disconnected>());
+        async.elapse(const Duration(minutes: 1));
+        expect(server.connections, hasLength(1));
+      });
+    });
 
-      await client.connect(url);
+    test('disconnect during reconnect wait and while connecting', () {
+      fake((async) {
+        final server = FakeWebSocketServer(autoAccept: false);
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(transport: server),
+        );
+        Object? error;
+        client
+            .connect('ws://t')
+            .then<void>((_) {}, onError: (Object e) => error = e);
+        async.flushMicrotasks();
+        client.disconnect();
+        async.flushMicrotasks();
+        expect(error, isA<WebSocketNotConnectedException>());
+        expect(client.state, isA<WebSocketState$Disconnected>());
+        expect(server.last.isEnded, isTrue);
 
-      await client.add('ping');
+        client.connect('ws://t').ignore();
+        async.flushMicrotasks();
+        server.last.reject(500);
+        async.flushMicrotasks();
+        expect(client.state, isA<WebSocketState$Reconnecting>());
+        client.disconnect();
+        async.elapse(const Duration(minutes: 1));
+        expect(client.state, isA<WebSocketState$Disconnected>());
+        expect(server.connections, hasLength(2));
+      });
+    });
 
-      final response = await client.stream
-          .take(4)
-          .toList()
-          .timeout(const Duration(seconds: 5));
-      expect(response, hasLength(4));
-      expect(response, equals(['pong', 'pong', 'pong', 'pong']));
-
+    test('connect to another URL switches', () async {
+      final server = FakeWebSocketServer();
+      final client = WebSocketClient.text(
+        options: WebSocketOptions(transport: server),
+      );
+      await client.connect('ws://a');
+      await client.connect('ws://b');
+      expect(server.connections.first.clientClose?.code, 1000);
+      expect(server.last.request.url.host, 'b');
+      expect(client.state.isOpen, isTrue);
       await client.close();
+    });
+
+    test('a throwing listener does not break the client', () async {
+      final server = FakeWebSocketServer();
+      final errors = <Object>[];
+      final client = WebSocketClient.text(
+        options: WebSocketOptions(
+          transport: server,
+          onMessage: (_) => throw StateError('boom'),
+          onError: (e, _) => errors.add(e),
+        ),
+      );
+      final got = <String>[];
+      client.messages.listen(got.add);
+      await client.connect('ws://t');
+      server.last.sendText('x');
+      await pumpEventQueue();
+      expect(got, ['x']);
+      expect(errors.single, isA<StateError>());
+      await client.close();
+    });
+  });
+
+  group('backpressure', () {
+    test('push waits for the queue to drain above the high-water mark', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(transport: server, sendHighWaterMark: 100),
+        );
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        server.last.bufferedAmount = 50;
+        var first = false;
+        client.push('a').then((_) => first = true);
+        async.flushMicrotasks();
+        expect(first, isTrue);
+
+        server.last.bufferedAmount = 500;
+        var second = false;
+        client.push('b').then((_) => second = true);
+        async.flushMicrotasks();
+        expect(second, isFalse);
+        server.last.drain();
+        async.flushMicrotasks();
+        expect(second, isTrue);
+
+        server.last.bufferedAmount = 500;
+        Object? lost;
+        client.push('c').then<void>((_) {}, onError: (Object e) => lost = e);
+        server.last.drop();
+        async.flushMicrotasks();
+        expect(lost, isA<WebSocketNotConnectedException>());
+        client.close();
+      });
+    });
+  });
+
+  group('heartbeat', () {
+    test('protocol ping when idle, reconnect when no answer', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            heartbeat: const WebSocketHeartbeat(
+              interval: Duration(seconds: 10),
+              timeout: Duration(seconds: 5),
+            ),
+          ),
+        );
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        final first = server.last;
+        async.elapse(const Duration(seconds: 10));
+        expect(first.pings, 1);
+        async.elapse(const Duration(seconds: 6));
+        expect(client.state.isOpen, isTrue); // pong arrived
+        expect(client.metrics.lastRoundTrip, isNotNull);
+
+        // Traffic postpones the ping.
+        async.elapse(const Duration(seconds: 8));
+        first.sendText('activity');
+        async.elapse(const Duration(seconds: 8));
+        expect(first.pings, 1);
+
+        first.autoPong = false;
+        async.elapse(const Duration(seconds: 20));
+        expect(first.isEnded, isTrue);
+        expect(server.connections.length, greaterThan(1));
+        client.close();
+      });
+    });
+
+    test('is on by default and can be disabled with null', () {
+      expect(const WebSocketOptions<String>().heartbeat, isNotNull);
+      expect(
+        const WebSocketOptions<String>().heartbeat!.interval,
+        const Duration(seconds: 30),
+      );
+      expect(const WebSocketOptions<String>(heartbeat: null).heartbeat, isNull);
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(transport: server),
+        );
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        server.last.autoPong = false;
+        async.elapse(const Duration(seconds: 41));
+        expect(server.connections.first.pings, 1);
+        expect(server.connections.first.isEnded, isTrue);
+        client.close();
+      });
+    });
+
+    test('a draining send queue extends the wait (slow upload)', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            heartbeat: const WebSocketHeartbeat(
+              interval: Duration(seconds: 10),
+              timeout: Duration(seconds: 5),
+            ),
+          ),
+        );
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        final conn = server.last..autoPong = false;
+        // The ping is stuck behind a large queue that drains slowly.
+        conn.bufferedAmount = 1000;
+        async.elapse(const Duration(seconds: 10));
+        expect(conn.pings, 1);
+        for (var i = 0; i < 6; i++) {
+          conn.bufferedAmount -= 100;
+          async.elapse(const Duration(seconds: 5));
+          expect(conn.isEnded, isFalse, reason: 'round $i');
+        }
+        // Pushing more is not progress by itself (the fake does not count
+        // pushed bytes, a real queue does).
+        client.push('x' * 50);
+        conn.bufferedAmount += 50;
+        async.elapse(const Duration(seconds: 5));
+        expect(conn.isEnded, isTrue, reason: 'the queue stopped draining');
+        client.close();
+      });
+    });
+
+    test('a stalled send queue is a dead connection', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            heartbeat: const WebSocketHeartbeat(
+              interval: Duration(seconds: 10),
+              timeout: Duration(seconds: 5),
+            ),
+          ),
+        );
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        final conn = server.last
+          ..autoPong = false
+          ..bufferedAmount = 1000;
+        async.elapse(const Duration(seconds: 16));
+        expect(conn.isEnded, isTrue);
+        client.close();
+      });
+    });
+
+    test('application-level ping and pong', () {
+      fake((async) {
+        final server = FakeWebSocketServer();
+        final client = WebSocketClient.text(
+          options: WebSocketOptions(
+            transport: server,
+            heartbeat: WebSocketHeartbeat(
+              interval: const Duration(seconds: 10),
+              ping: () => 'ping',
+              isPong: (m) => m == 'pong',
+            ),
+          ),
+        );
+        final got = <String>[];
+        client.messages.listen(got.add);
+        client.connect('ws://t');
+        async.flushMicrotasks();
+        server.last.messages.listen((m) {
+          if (m == 'ping') server.last.sendText('pong');
+        });
+        var ponged = false;
+        client.ping().then((_) => ponged = true);
+        async.flushMicrotasks();
+        expect(ponged, isTrue);
+        expect(got, isEmpty);
+        expect(server.last.pings, 0);
+        client.close();
+      });
     });
   });
 }

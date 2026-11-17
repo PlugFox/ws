@@ -1,0 +1,3 @@
+[submodule "example/assets"]
+	path = example/assets
+	url = git@github.com:PlugFox/ws-game-assets.git

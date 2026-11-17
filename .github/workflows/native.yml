@@ -1,0 +1,100 @@
+name: Native
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["master", "develop", "rewrite"]
+    paths:
+      - "native/**"
+      - "lib/**"
+      - "test/transport/**"
+      - "test/native/**"
+      - "test/support/**"
+      - "server/**"
+      - ".github/workflows/native.yml"
+  pull_request:
+    branches: ["master", "develop", "rewrite"]
+    paths:
+      - "native/**"
+      - "lib/**"
+      - "test/transport/**"
+      - "test/native/**"
+      - "test/support/**"
+      - "server/**"
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: "Rust (fmt, clippy, tests, ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: native/rust
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 🦀 Rust from rust-toolchain.toml
+        shell: bash
+        run: '"$GITHUB_WORKSPACE/tool/rust_toolchain.sh"'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: native/rust
+      - run: cargo fmt --check
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo test --release
+
+  conformance:
+    name: "Conformance (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 🦀 Rust from rust-toolchain.toml
+        shell: bash
+        run: '"$GITHUB_WORKSPACE/tool/rust_toolchain.sh"'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            native/rust
+            server
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
+        with:
+          sdk: stable
+      - name: 👷 Install dependencies
+        working-directory: native
+        run: dart pub get
+      - name: 📈 Analyze
+        working-directory: native
+        run: dart analyze --fatal-infos --fatal-warnings
+      - name: 🧪 Shared transport conformance suite (hook builds with cargo)
+        working-directory: native
+        run: dart test --reporter expanded
+      - name: 🧪 Same suites, library loaded by path from package:ws (no hook)
+        shell: bash
+        run: |
+          (cd server && cargo build --release --locked)
+          (cd native/rust && cargo build --release --locked)
+          # Native Windows paths: Dart cannot open MSYS paths (/d/a/...).
+          root="$(pwd -W 2>/dev/null || pwd)"
+          case "$RUNNER_OS" in
+            Windows) lib=ws_native.dll; exe=.exe ;;
+            macOS) lib=libws_native.dylib; exe= ;;
+            *) lib=libws_native.so; exe= ;;
+          esac
+          dart pub get
+          WS_TEST_SERVER="$root/server/target/release/ws_bench_server$exe" \
+          WS_NATIVE_LIBRARY="$root/native/rust/target/release/$lib" \
+            dart test test/native --reporter expanded
