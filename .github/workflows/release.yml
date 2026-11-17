@@ -14,13 +14,13 @@ name: Release
 #              wait until pub.dev serves it
 #   publish-native   (same environment) ws_native
 #
-# A push to `rewrite` that touches the release tooling runs everything up
+# A push to `master` or `rewrite` that touches the release tooling runs everything up
 # to and including the dry runs; nothing is released or published.
 
 on:
   push:
     tags: ["[0-9]+.[0-9]+.[0-9]+*"]
-    branches: ["rewrite"]
+    branches: ["master", "rewrite"]
     paths:
       - ".github/workflows/release.yml"
       - "tool/release_check.dart"

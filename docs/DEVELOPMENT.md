@@ -67,7 +67,8 @@ Things the task list does not show:
     hand from the run's artifact (`gh run download <run-id> -n <name>`)
     after `Publish ws`; that is how `ws_native` 2.0.0-dev.1 went out.
 
-  The release tooling runs on every push to `rewrite` that touches it
+  The release tooling runs on every push to `master` or `rewrite` that
+  touches it
   (dry run, nothing is published). `mise run release:hashes` verifies
   `native/prebuilt/checksums.json` before writing the hashes locally;
   it never regenerates them.
